@@ -33,6 +33,7 @@ type jsonItem struct {
 	DirExists      *bool    `json:"dir_exists,omitempty"`
 	MessageCount   *int64   `json:"message_count,omitempty"`
 	Resumable      bool     `json:"resumable"`
+	Archived       bool     `json:"archived,omitempty"`
 	Tags           []string `json:"tags,omitempty"`
 	MatchSnippet   string   `json:"match_snippet,omitempty"`
 }
@@ -43,7 +44,7 @@ func toJSONItem(it search.Item) jsonItem {
 		CWD: it.CWD, GitBranch: it.GitBranch, GitRepoRoot: it.GitRepoRoot,
 		Topic: it.Topic, Name: it.Name, LastPrompt: it.LastPrompt, EndState: string(it.EndState),
 		DirExists: it.DirExists, MessageCount: it.MessageCount, Resumable: it.Resumable,
-		Tags: it.Tags, MatchSnippet: it.MatchSnippet,
+		Archived: it.Archived, Tags: it.Tags, MatchSnippet: it.MatchSnippet,
 	}
 	if it.StartedAt != nil {
 		s := it.StartedAt.Format(time.RFC3339)

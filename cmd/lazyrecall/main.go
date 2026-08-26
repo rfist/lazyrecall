@@ -87,6 +87,10 @@ func run(args []string) error {
 		return cmdComment(global, profileFlag, noRefresh, rest)
 	case "tag":
 		return cmdTag(global, profileFlag, noRefresh, rest)
+	case "archive":
+		return cmdArchive(global, profileFlag, noRefresh, rest)
+	case "unarchive":
+		return cmdUnarchive(global, profileFlag, noRefresh, rest)
 	case "refresh":
 		return cmdRefresh(global, profileFlag, rest)
 	case "profiles":
@@ -118,6 +122,8 @@ Usage:
   lazyrecall resume    [SESSION_ID] [--profile=NAME]
   lazyrecall comment   add SESSION_ID TEXT... | list SESSION_ID | rm COMMENT_ID
   lazyrecall tag       add SESSION_ID TAG | rm SESSION_ID TAG | list
+  lazyrecall archive   SESSION_ID | list
+  lazyrecall unarchive SESSION_ID
   lazyrecall refresh   [--full] [--profile=NAME]
   lazyrecall browse    [QUERY] [--agent=NAME] [--repo=PATH] [--tag=NAME] [--profile=NAME]
   lazyrecall profiles  [--json]
@@ -552,6 +558,75 @@ func cmdTag(global *flag.FlagSet, profileFlag *string, noRefresh *bool, args []s
 	default:
 		return fmt.Errorf("unknown tag subcommand %q", rest[0])
 	}
+}
+
+// cmdArchive implements `lazyrecall archive SESSION_ID` and `lazyrecall
+// archive list` (change add-archive-facility). Archiving a session is a
+// decision the user made, recorded on the lineage (annotate.Archive) so a
+// full index rebuild cannot destroy it. `list` renders the archived
+// sessions through the normal row path rather than a bespoke format.
+func cmdArchive(global *flag.FlagSet, profileFlag *string, noRefresh *bool, args []string) error {
+	rest, err := parseInterleaved(global, args)
+	if err != nil {
+		return err
+	}
+	if len(rest) == 0 {
+		return fmt.Errorf("usage: lazyrecall archive SESSION_ID|list")
+	}
+	p, err := resolveProfile(*profileFlag)
+	if err != nil {
+		return err
+	}
+	db, err := openDB(p, *noRefresh, false)
+	if err != nil {
+		return err
+	}
+
+	if rest[0] == "list" {
+		ids, err := annotate.AllArchived(db)
+		if err != nil {
+			return err
+		}
+		items, err := search.ListByLineageIDs(db, ids)
+		if err != nil {
+			return err
+		}
+		return outputItems(p, items, false, "No archived sessions.")
+	}
+
+	// SESSION_ID accepts the short handle exactly like every other
+	// command (annotate.LineageForIdentifier), so "archive 3" names the
+	// same session "comment add 3 ..." does.
+	lineage, err := annotate.LineageForIdentifier(db, p.Name, rest[0])
+	if err != nil {
+		return err
+	}
+	return annotate.Archive(db, lineage)
+}
+
+// cmdUnarchive implements `lazyrecall unarchive SESSION_ID`, returning an
+// archived session to normal listings.
+func cmdUnarchive(global *flag.FlagSet, profileFlag *string, noRefresh *bool, args []string) error {
+	rest, err := parseInterleaved(global, args)
+	if err != nil {
+		return err
+	}
+	if len(rest) == 0 {
+		return fmt.Errorf("usage: lazyrecall unarchive SESSION_ID")
+	}
+	p, err := resolveProfile(*profileFlag)
+	if err != nil {
+		return err
+	}
+	db, err := openDB(p, *noRefresh, false)
+	if err != nil {
+		return err
+	}
+	lineage, err := annotate.LineageForIdentifier(db, p.Name, rest[0])
+	if err != nil {
+		return err
+	}
+	return annotate.Unarchive(db, lineage)
 }
 
 func cmdRefresh(global *flag.FlagSet, profileFlag *string, args []string) error {
