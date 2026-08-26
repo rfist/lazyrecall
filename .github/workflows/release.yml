@@ -1,0 +1,73 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Timestamp
+        id: date
+        run: echo "date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+      - name: Build and package
+        env:
+          TAG: ${{ github.ref_name }}
+          DATE: ${{ steps.date.outputs.date }}
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          mkdir -p dist
+          archive="dist/lazyrecall_${version}_${GOOS}_${GOARCH}.tar.gz"
+          CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${version} -X main.buildTime=${DATE}" -o lazyrecall ./cmd/lazyrecall
+          tar -czf "${archive}" lazyrecall
+          sha256sum "${archive}" > "dist/checksums-${GOOS}-${GOARCH}.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+      - name: Merge checksums
+        run: |
+          cd dist
+          cat checksums-*.txt | sort -k2 > checksums.txt
+          rm checksums-*.txt
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          files: |
+            dist/lazyrecall_*.tar.gz
+            dist/checksums.txt
