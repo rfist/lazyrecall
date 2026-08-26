@@ -4,12 +4,12 @@ import (
 	"encoding/json"
 	"time"
 
-	"recall/internal/adapter"
-	"recall/internal/session"
-	"recall/internal/transcript"
+	"lazyrecall/internal/adapter"
+	"lazyrecall/internal/session"
+	"lazyrecall/internal/transcript"
 )
 
-// cursorRow is one row from Recall's own cursors table.
+// cursorRow is one row from LazyRecall's own cursors table.
 type cursorRow struct {
 	Source       string  `json:"source"`
 	SourceID     string  `json:"source_id"`
@@ -79,7 +79,7 @@ type existingSessionRow struct {
 }
 
 // existingSessions is the previous refresh pass's rows, indexed two ways.
-// ByID matches how sessions were always looked up: keyed on Recall's own
+// ByID matches how sessions were always looked up: keyed on LazyRecall's own
 // composite id, which adapter.Discover computes fresh every pass. ByTranscript
 // is the fallback keyed on the transcript's file path, which stays constant
 // even across the one pass where a session's SourceSessionID (and therefore

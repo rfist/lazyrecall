@@ -5,7 +5,7 @@ package resume
 // TestResumeReplacesProcessWithAgent is the real end-to-end proof of
 // design.md decision 1 (change resume-in-current-terminal): Resume must
 // truly replace the process, not fork-and-wait, and task 1.5 requires
-// verifying that no Recall process remains once the agent is running. A
+// verifying that no LazyRecall process remains once the agent is running. A
 // unit test cannot call Resume() directly with the real execAgent and
 // observe that, because a successful syscall.Exec never returns - it would
 // simply end the test binary. So this test re-execs the test binary itself
@@ -16,7 +16,7 @@ package resume
 // process outright: what the outer test observes afterward - the stub's
 // distinctive exit code and the argv/cwd it recorded before exiting - could
 // only have come from the stub actually running in the helper's place, not
-// from anything Recall itself printed or returned.
+// from anything LazyRecall itself printed or returned.
 import (
 	"os"
 	"os/exec"
@@ -80,7 +80,7 @@ func TestResumeReplacesProcessWithAgent(t *testing.T) {
 
 	data, err := os.ReadFile(marker)
 	if err != nil {
-		t.Fatalf("expected the stub to have run and written its marker (proving it - not Recall - was the process that kept running): %v; helper output: %s", err, out)
+		t.Fatalf("expected the stub to have run and written its marker (proving it - not LazyRecall - was the process that kept running): %v; helper output: %s", err, out)
 	}
 	content := string(data)
 	argv0 := ""

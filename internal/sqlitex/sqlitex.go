@@ -49,7 +49,7 @@ type Runner struct {
 	// ":memory:", used only in tests.
 	DBPath string
 	// ReadOnly opens DBPath as a read-only connection. Used for reading
-	// source databases that belong to other agents - Recall must never
+	// source databases that belong to other agents - LazyRecall must never
 	// write to them and must never checkpoint their WAL (task 3.1). It is
 	// enforced at connection configuration (mode=ro URI + query_only
 	// pragma), not merely by convention.
@@ -87,7 +87,7 @@ func quoteIdent(name string) (string, error) {
 // A busy_timeout is set on every connection: a source database has its own
 // active writer (task 3.3), and even in WAL mode a reader can transiently
 // collide with a writer's commit. Waiting a little is correct here -
-// Recall is never the one holding a source's lock, so it is never the one
+// LazyRecall is never the one holding a source's lock, so it is never the one
 // causing another connection to wait.
 func (r *Runner) dsn() string {
 	if r.DBPath == "" {

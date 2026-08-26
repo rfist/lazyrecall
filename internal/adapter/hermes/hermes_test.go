@@ -3,7 +3,7 @@ package hermes
 import (
 	"testing"
 
-	"recall/internal/session"
+	"lazyrecall/internal/session"
 )
 
 func strp(s string) *string { return &s }

@@ -3,7 +3,7 @@ package search
 import (
 	"fmt"
 
-	"recall/internal/sqlitex"
+	"lazyrecall/internal/sqlitex"
 )
 
 // Search finds sessions whose prompts or topic match query (spec

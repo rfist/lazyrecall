@@ -1,7 +1,7 @@
 // Package search answers "find a past session" (spec session-search): the
 // unified cross-agent listing, full-text search over what the user
 // actually typed, repository/worktree grouping, and combinable filters. It
-// only reads Recall's own database - never a source directly.
+// only reads LazyRecall's own database - never a source directly.
 package search
 
 import (
@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"recall/internal/session"
-	"recall/internal/sqlitex"
+	"lazyrecall/internal/session"
+	"lazyrecall/internal/sqlitex"
 )
 
 // Filter narrows a listing or search. Zero values mean "no constraint on

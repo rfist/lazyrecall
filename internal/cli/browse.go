@@ -21,11 +21,11 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/lithammer/fuzzysearch/fuzzy"
 
-	"recall/internal/annotate"
-	"recall/internal/profile"
-	"recall/internal/refresh"
-	"recall/internal/search"
-	"recall/internal/sqlitex"
+	"lazyrecall/internal/annotate"
+	"lazyrecall/internal/profile"
+	"lazyrecall/internal/refresh"
+	"lazyrecall/internal/search"
+	"lazyrecall/internal/sqlitex"
 )
 
 // BrowserOptions carries the initial state for one browsing session.
@@ -1201,7 +1201,7 @@ func browseActionsHint() string {
 
 func (m browseModel) helpView() string {
 	var b strings.Builder
-	b.WriteString("recall browse - key bindings\n\n")
+	b.WriteString("lazyrecall browse - key bindings\n\n")
 	for _, a := range browseActions {
 		fmt.Fprintf(&b, "  %-22s %s\n", a.key, a.label)
 	}

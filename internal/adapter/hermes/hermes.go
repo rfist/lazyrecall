@@ -1,7 +1,7 @@
 // Package hermes adapts hermes's on-disk session data: everything lives in
 // SQLite at ~/.hermes/state.db, no transcript files exist at all (design.md
 // context; task 5.5). hermes's sessions table is the reference shape for
-// Recall's own session model - it is the only source that records both a
+// LazyRecall's own session model - it is the only source that records both a
 // topic and an explicit signal for how a session ended, so this adapter
 // builds complete session.Session records directly, with no separate
 // transcript-scanning step. User prompts for tier 2 come from the messages
@@ -16,10 +16,10 @@ import (
 	"path/filepath"
 	"time"
 
-	"recall/internal/adapter"
-	"recall/internal/profile"
-	"recall/internal/session"
-	"recall/internal/sqlitex"
+	"lazyrecall/internal/adapter"
+	"lazyrecall/internal/profile"
+	"lazyrecall/internal/session"
+	"lazyrecall/internal/sqlitex"
 )
 
 type Adapter struct {
@@ -99,7 +99,7 @@ LEFT JOIN last_msg lm ON lm.session_id = s.id AND lm.rn = 1;`
 			// hermes has no concept of compaction in its schema.
 			Compaction: nil,
 			// A session with no working directory did not originate in a
-			// place Recall can return the user to (spec session-index /
+			// place LazyRecall can return the user to (spec session-index /
 			// session-resume): chat-platform-origin sessions land here.
 			Resumable: row.CWD != nil && *row.CWD != "",
 		}
@@ -122,7 +122,7 @@ LEFT JOIN last_msg lm ON lm.session_id = s.id AND lm.rn = 1;`
 	return out, nil
 }
 
-// classifyEndState maps hermes's own last-message signal onto Recall's
+// classifyEndState maps hermes's own last-message signal onto LazyRecall's
 // closed end-state set. hermes's end_reason column describes why the host
 // process exited (cli_close, tui_shutdown, ...), which does not reliably
 // indicate whether the conversation itself was left mid-turn - the same

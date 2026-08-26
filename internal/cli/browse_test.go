@@ -14,11 +14,11 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/mattn/go-runewidth"
 
-	"recall/internal/annotate"
-	"recall/internal/profile"
-	"recall/internal/schema"
-	"recall/internal/search"
-	"recall/internal/sqlitex"
+	"lazyrecall/internal/annotate"
+	"lazyrecall/internal/profile"
+	"lazyrecall/internal/schema"
+	"lazyrecall/internal/search"
+	"lazyrecall/internal/sqlitex"
 )
 
 // All fixtures below are synthetic, hand-written data - never real session
@@ -27,7 +27,7 @@ import (
 func browseTestDB(t *testing.T) *sqlitex.Runner {
 	t.Helper()
 	dir := t.TempDir()
-	r := &sqlitex.Runner{DBPath: filepath.Join(dir, "recall.db")}
+	r := &sqlitex.Runner{DBPath: filepath.Join(dir, "lazyrecall.db")}
 	if _, err := schema.Open(r); err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +71,7 @@ func newTestBrowser(db *sqlitex.Runner, name string, opts BrowserOptions) *brows
 
 // testResolve builds a resolver that returns the named profile verbatim -
 // the browser's refresh/profile-switch actions need a profile.Profile, and
-// profile.DBPath is derived from RECALL_HOME (set by the test) plus Name.
+// profile.DBPath is derived from LAZYRECALL_HOME (set by the test) plus Name.
 func testResolve(name string) func(string) (profile.Profile, error) {
 	return func(n string) (profile.Profile, error) {
 		if n != name {
@@ -784,7 +784,7 @@ func TestAltKeysAreInert(t *testing.T) {
 // ones entirely; sessions from two profiles are never listed together.
 func TestProfileSwitchReplacesResultSet(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("RECALL_HOME", home)
+	t.Setenv("LAZYRECALL_HOME", home)
 
 	pdb := browseTestDBAt(t, filepath.Join(home, "p.db"))
 	seedBrowseSession(t, pdb, "lp", "claude:p:1", "p", 1, map[string]any{"topic": "profile p session"})
@@ -843,7 +843,7 @@ func TestProfileSwitchReplacesResultSet(t *testing.T) {
 // immediately, before ever moving the highlight.
 func TestProfileSelectConfirmWithNothingHighlightedKeepsCurrent(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("RECALL_HOME", home)
+	t.Setenv("LAZYRECALL_HOME", home)
 	pdb := browseTestDBAt(t, filepath.Join(home, "p.db"))
 	seedBrowseSession(t, pdb, "lp", "claude:p:1", "p", 1, map[string]any{"topic": "still here"})
 
@@ -946,7 +946,7 @@ func (b *syncBuffer) Contains(s string) bool {
 // regresses, through any path (model-level or real event-loop-level).
 func TestProfileSwitchThroughRealProgramEventLoop(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("RECALL_HOME", home)
+	t.Setenv("LAZYRECALL_HOME", home)
 
 	pdb := browseTestDBAt(t, filepath.Join(home, "p.db"))
 	seedBrowseSession(t, pdb, "lp", "claude:p:1", "p", 1, map[string]any{"topic": "profile p session"})
@@ -1080,7 +1080,7 @@ func TestProfileSwitchCannotBeOpenedReportsAndKeepsCurrent(t *testing.T) {
 func TestSelectTypeToNarrowThenEnterAppliesTheMatch(t *testing.T) {
 	t.Run("profile", func(t *testing.T) {
 		home := t.TempDir()
-		t.Setenv("RECALL_HOME", home)
+		t.Setenv("LAZYRECALL_HOME", home)
 		pdb := browseTestDBAt(t, filepath.Join(home, "p.db"))
 		seedBrowseSession(t, pdb, "lp", "claude:p:1", "p", 1, map[string]any{"topic": "profile p session"})
 		qdb := browseTestDBAt(t, filepath.Join(home, "q.db"))
@@ -1157,7 +1157,7 @@ func TestSelectTypeToNarrowThenEnterAppliesTheMatch(t *testing.T) {
 // candidate list happened to contain.
 func TestSelectBlankConfirmStillAppliesNothingAfterTyping(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("RECALL_HOME", home)
+	t.Setenv("LAZYRECALL_HOME", home)
 	pdb := browseTestDBAt(t, filepath.Join(home, "p.db"))
 	seedBrowseSession(t, pdb, "lp", "claude:p:1", "p", 1, map[string]any{"topic": "still here"})
 
@@ -1389,7 +1389,7 @@ func TestPromptLabelShownExactlyOnce(t *testing.T) {
 // reports back without leaving the browser.
 func TestRefreshActionReloads(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("RECALL_HOME", home)
+	t.Setenv("LAZYRECALL_HOME", home)
 	pdb := browseTestDBAt(t, filepath.Join(home, "p.db"))
 	seedBrowseSession(t, pdb, "lp", "claude:p:1", "p", 1, map[string]any{"topic": "session one"})
 

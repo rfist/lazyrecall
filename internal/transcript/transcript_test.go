@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"recall/internal/session"
+	"lazyrecall/internal/session"
 )
 
 func writeFile(t *testing.T, dir, name, content string) string {
@@ -161,7 +161,7 @@ func TestPiVocabNoCompactionConcept(t *testing.T) {
 // TestPiVocabSourceIDFromSessionRecord covers change fix-resume-session-identity,
 // design.md decision 1: the identifier passed to pi must be the "id" the
 // session record itself carries, not anything derived from the transcript's
-// file name (which Recall's caller never even passes into Scan - a
+// file name (which LazyRecall's caller never even passes into Scan - a
 // deliberate proof that the vocab cannot be reading it).
 func TestPiVocabSourceIDFromSessionRecord(t *testing.T) {
 	dir := t.TempDir()
@@ -203,7 +203,7 @@ func TestPiVocabNoSourceIDWhenRecordOmitsIt(t *testing.T) {
 
 // TestOmpVocabSourceIDFromSessionRecord covers task 3.2: omp names its
 // transcript files the same "<timestamp>_<uuid>.jsonl" way pi does, so its
-// session record's own "id" - not the file name - must be what Recall reads
+// session record's own "id" - not the file name - must be what LazyRecall reads
 // as omp's identifier too, for the same reason as pi.
 func TestOmpVocabSourceIDFromSessionRecord(t *testing.T) {
 	dir := t.TempDir()

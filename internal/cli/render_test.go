@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"recall/internal/search"
+	"lazyrecall/internal/search"
 )
 
 func TestWriteItemsJSONUsesSnakeCaseAndOmitsAbsentFields(t *testing.T) {

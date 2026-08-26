@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"recall/internal/sqlitex"
+	"lazyrecall/internal/sqlitex"
 )
 
 func testRunner(t *testing.T) *sqlitex.Runner {
@@ -15,7 +15,7 @@ func testRunner(t *testing.T) *sqlitex.Runner {
 		t.Skip("sqlite3 not on PATH")
 	}
 	dir := t.TempDir()
-	return &sqlitex.Runner{BinPath: bin, DBPath: filepath.Join(dir, "recall.db"), TmpDir: dir}
+	return &sqlitex.Runner{BinPath: bin, DBPath: filepath.Join(dir, "lazyrecall.db"), TmpDir: dir}
 }
 
 func TestOpenFreshDatabase(t *testing.T) {

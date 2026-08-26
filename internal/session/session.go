@@ -83,7 +83,7 @@ type Compaction struct {
 // value). No field is ever populated with a placeholder, guess, or derived
 // value standing in for data the source did not provide.
 type Session struct {
-	// ID is Recall's own identifier for this session, stable across
+	// ID is LazyRecall's own identifier for this session, stable across
 	// refreshes: "<source>:<profile>:<source session id>".
 	ID string
 

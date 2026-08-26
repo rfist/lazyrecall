@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"recall/internal/profile"
+	"lazyrecall/internal/profile"
 )
 
 // Synthetic fixtures only - no real session content.

@@ -16,7 +16,7 @@ import (
 // means these tests exercise the real command parsing path, not a
 // lookalike.
 func newTestFlagSet() (*flag.FlagSet, *string, *string, *string, *string) {
-	fs := flag.NewFlagSet("recall", flag.ContinueOnError)
+	fs := flag.NewFlagSet("lazyrecall", flag.ContinueOnError)
 	profileFlag := fs.String("profile", "", "profile to operate under")
 	fs.Bool("json", false, "machine-readable JSON output")
 	fs.Bool("no-refresh", false, "skip the automatic refresh")
@@ -146,7 +146,7 @@ func TestSpaceSeparatedFlagValueAfterPositional(t *testing.T) {
 }
 
 // TestProfilesCommandIsReadable covers choose-from-known-values tasks
-// 4.1/4.2: `recall profiles` must print each profile by name together with
+// 4.1/4.2: `lazyrecall profiles` must print each profile by name together with
 // the sources it covers, never an internal data structure representation.
 // Before this change it printed p.Sources() through %v - Go's own map
 // syntax, e.g. "claude: map[claude:/Users/...]".
@@ -220,8 +220,8 @@ func TestVersionFlagReportsBuildIdentity(t *testing.T) {
 			}
 			out, _ := io.ReadAll(r)
 			got := strings.TrimSpace(string(out))
-			if !strings.HasPrefix(got, "recall ") {
-				t.Errorf("expected output to start with %q, got %q", "recall ", got)
+			if !strings.HasPrefix(got, "lazyrecall ") {
+				t.Errorf("expected output to start with %q, got %q", "lazyrecall ", got)
 			}
 			if !strings.Contains(got, version) || !strings.Contains(got, buildTime) {
 				t.Errorf("expected the current version (%q) and build time (%q) to appear, got %q", version, buildTime, got)

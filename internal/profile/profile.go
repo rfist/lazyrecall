@@ -197,7 +197,7 @@ func Discover() []Profile {
 // Resolve picks exactly one active profile (spec session-index, "Profile
 // isolation": "Exactly one profile SHALL be active for any operation").
 // requested, when non-empty, must name a discovered profile exactly.
-// Otherwise RECALL_PROFILE is consulted, and failing that the primary
+// Otherwise LAZYRECALL_PROFILE is consulted, and failing that the primary
 // profile (the one bundling pi/omp/hermes, if any) is used, and failing
 // that, if exactly one profile was discovered, that one is used.
 func Resolve(profiles []Profile, requested string) (Profile, error) {
@@ -206,7 +206,7 @@ func Resolve(profiles []Profile, requested string) (Profile, error) {
 	}
 
 	if requested == "" {
-		requested = os.Getenv("RECALL_PROFILE")
+		requested = envProfile()
 	}
 	if requested != "" {
 		for _, p := range profiles {
@@ -234,16 +234,43 @@ func Resolve(profiles []Profile, requested string) (Profile, error) {
 	for i, p := range profiles {
 		names[i] = p.Name
 	}
-	return Profile{}, fmt.Errorf("multiple profiles found (%s) and none is the default; pass --profile or set RECALL_PROFILE", strings.Join(names, ", "))
+	return Profile{}, fmt.Errorf("multiple profiles found (%s) and none is the default; pass --profile or set LAZYRECALL_PROFILE", strings.Join(names, ", "))
 }
 
-// DataDir is the directory Recall's own per-profile databases live in.
-// Overridable via RECALL_HOME; defaults to ~/.recall. This is the one
-// accepted data location Recall writes to (proposal.md - Impact).
+// envProfile reads the profile name from the environment, preferring the
+// current variable and falling back to the pre-rename one for the same
+// reason DataDir does.
+func envProfile() string {
+	if v := os.Getenv("LAZYRECALL_PROFILE"); v != "" {
+		return v
+	}
+	return os.Getenv("RECALL_PROFILE")
+}
+
+// DataDir is the directory LazyRecall's own per-profile databases live in.
+// Overridable via LAZYRECALL_HOME; defaults to ~/.lazyrecall. This is the
+// one accepted data location LazyRecall writes to (proposal.md - Impact).
+//
+// RECALL_HOME is still honoured when LAZYRECALL_HOME is unset (change
+// rename-to-lazyrecall): the variable predates the rename, and an
+// environment that still sets it would otherwise silently start indexing
+// into a second, empty database instead of the one it has been pointing at.
 func DataDir() string {
+	if v := os.Getenv("LAZYRECALL_HOME"); v != "" {
+		return v
+	}
 	if v := os.Getenv("RECALL_HOME"); v != "" {
 		return v
 	}
+	return filepath.Join(homeDir(), ".lazyrecall")
+}
+
+// LegacyDataDir is the pre-rename default data directory, ~/.recall. It is
+// consulted for exactly one purpose - the one-time move in refresh.New -
+// and is deliberately not part of DataDir's resolution order: an existing
+// ~/.recall is migrated, never read in place, so there is only ever one
+// live database location.
+func LegacyDataDir() string {
 	return filepath.Join(homeDir(), ".recall")
 }
 

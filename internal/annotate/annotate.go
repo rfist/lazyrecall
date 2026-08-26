@@ -13,7 +13,7 @@ import (
 	"fmt"
 	"time"
 
-	"recall/internal/sqlitex"
+	"lazyrecall/internal/sqlitex"
 )
 
 // Comment is one free-text comment attached to a lineage (spec
@@ -50,7 +50,7 @@ func LineageForSession(db *sqlitex.Runner, sessionID string) (string, error) {
 
 // AddComment attaches a new comment to lineageID (spec session-annotations,
 // "Adding a comment"). The comment is never written into any session
-// source - it exists only in Recall's own database.
+// source - it exists only in LazyRecall's own database.
 func AddComment(db *sqlitex.Runner, lineageID, body string) error {
 	now := time.Now().Unix()
 	b := db.NewBatch()
@@ -77,7 +77,7 @@ func EditComment(db *sqlitex.Runner, commentID int64, body string) error {
 
 // RemoveComment deletes a comment (spec session-annotations, "Removing a
 // comment": "the session itself is unaffected" - this only ever touches
-// Recall's own comments table).
+// LazyRecall's own comments table).
 func RemoveComment(db *sqlitex.Runner, commentID int64) error {
 	pf, err := db.WriteParams(map[string]any{"id": commentID})
 	if err != nil {

@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strconv"
 
-	"recall/internal/session"
-	"recall/internal/sqlitex"
+	"lazyrecall/internal/session"
+	"lazyrecall/internal/sqlitex"
 )
 
 // LineageForIdentifier resolves either form of a session identifier (spec

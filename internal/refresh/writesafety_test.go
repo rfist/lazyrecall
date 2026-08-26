@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"recall/internal/profile"
+	"lazyrecall/internal/profile"
 )
 
 // TestNoSourceIsEverWritten builds a profile with synthetic data across all
@@ -21,8 +21,8 @@ func TestNoSourceIsEverWritten(t *testing.T) {
 	bin := sqlite3Path(t)
 	home := t.TempDir()
 	dataDir := t.TempDir()
-	os.Setenv("RECALL_HOME", dataDir)
-	t.Cleanup(func() { os.Unsetenv("RECALL_HOME") })
+	os.Setenv("LAZYRECALL_HOME", dataDir)
+	t.Cleanup(func() { os.Unsetenv("LAZYRECALL_HOME") })
 
 	claudeRoot := filepath.Join(home, ".claude-personal")
 	writeFile(t, filepath.Join(claudeRoot, "history.jsonl"),

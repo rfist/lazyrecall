@@ -1,18 +1,18 @@
-// Package schema defines Recall's own database schema - the index tables
+// Package schema defines LazyRecall's own database schema - the index tables
 // (sessions, prompt search, per-source cursors) and the annotation tables
 // (lineages, comments, tags) - and the rule for evolving it: the index is
 // disposable and gets discarded and rebuilt on a schema change; annotations
-// are the one thing Recall originates, so they are migrated forward and
+// are the one thing LazyRecall originates, so they are migrated forward and
 // never rebuilt (design.md "Migration Plan"; tasks.md 2.4-2.6).
 package schema
 
 import (
 	"fmt"
 
-	"recall/internal/sqlitex"
+	"lazyrecall/internal/sqlitex"
 )
 
-// CurrentVersion is the schema version this build of Recall expects. It is
+// CurrentVersion is the schema version this build of LazyRecall expects. It is
 // a var rather than a const solely so tests can simulate a version bump
 // without a second binary.
 //
@@ -81,7 +81,7 @@ CREATE TABLE IF NOT EXISTS cursors (
 );
 `
 
-// annotationDDL creates the tables Recall itself originates. These are
+// annotationDDL creates the tables LazyRecall itself originates. These are
 // never dropped by a schema-version rebuild - only migrated forward.
 const annotationDDL = `
 CREATE TABLE IF NOT EXISTS lineages (
@@ -223,7 +223,7 @@ func Open(r *sqlitex.Runner) (int, error) {
 		return CurrentVersion, nil
 
 	default:
-		return 0, fmt.Errorf("schema: database at %s has schema version %d, newer than this build (%d); use a newer recall binary", r.DBPath, stored, CurrentVersion)
+		return 0, fmt.Errorf("schema: database at %s has schema version %d, newer than this build (%d); use a newer lazyrecall binary", r.DBPath, stored, CurrentVersion)
 	}
 }
 

@@ -82,7 +82,7 @@ func TestResolveRejectsAmbiguityWithoutADefault(t *testing.T) {
 		"RECALL_PI_HOME":            "",
 		"RECALL_OMP_HOME":           "",
 		"RECALL_HERMES_HOME":        "",
-		"RECALL_PROFILE":            "",
+		"LAZYRECALL_PROFILE":        "",
 	})
 	profiles := Discover()
 	if _, err := Resolve(profiles, ""); err == nil {
@@ -144,7 +144,7 @@ func TestSingleInstanceSourcesNeverDuplicateAcrossProfiles(t *testing.T) {
 
 func TestDBPathIsOnePerProfile(t *testing.T) {
 	home := t.TempDir()
-	withEnv(t, map[string]string{"HOME": home, "RECALL_HOME": ""})
+	withEnv(t, map[string]string{"HOME": home, "LAZYRECALL_HOME": ""})
 	p1 := Profile{Name: "claude"}
 	p2 := Profile{Name: "claude-personal"}
 	if DBPath(p1) == DBPath(p2) {

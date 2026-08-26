@@ -1,4 +1,4 @@
-// Command recall is a cross-agent index over coding-agent sessions already
+// Command lazyrecall is a cross-agent index over coding-agent sessions already
 // written to disk by Claude Code, pi, omp, and hermes. It is read-only with
 // respect to every source; the only file it writes is its own per-profile
 // database (see internal/profile.DataDir).
@@ -14,14 +14,14 @@ import (
 	"strings"
 	"time"
 
-	"recall/internal/annotate"
-	"recall/internal/cli"
-	"recall/internal/profile"
-	"recall/internal/refresh"
-	"recall/internal/resume"
-	"recall/internal/review"
-	"recall/internal/search"
-	"recall/internal/sqlitex"
+	"lazyrecall/internal/annotate"
+	"lazyrecall/internal/cli"
+	"lazyrecall/internal/profile"
+	"lazyrecall/internal/refresh"
+	"lazyrecall/internal/resume"
+	"lazyrecall/internal/review"
+	"lazyrecall/internal/search"
+	"lazyrecall/internal/sqlitex"
 )
 
 // version and buildTime are set at build time via
@@ -29,7 +29,7 @@ import (
 // zero-value defaults for a plain `go build`/`go run` - which is exactly
 // the situation this flag exists to make diagnosable (change
 // fix-herdr-resume-delegation: this episode's misdiagnosis turned in part
-// on not being able to tell which build of recall was actually running).
+// on not being able to tell which build of lazyrecall was actually running).
 var (
 	version   = "dev"
 	buildTime = "unknown"
@@ -37,15 +37,25 @@ var (
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
-		fmt.Fprintln(os.Stderr, "recall: "+err.Error())
+		fmt.Fprintln(os.Stderr, "lazyrecall: "+err.Error())
 		os.Exit(1)
 	}
 }
 
 func run(args []string) error {
+	global := flag.NewFlagSet("lazyrecall", flag.ContinueOnError)
+	profileFlag := global.String("profile", "", "profile to operate under (default: the primary profile)")
+	jsonFlag := global.Bool("json", false, "machine-readable JSON output")
+	noRefresh := global.Bool("no-refresh", false, "skip the automatic refresh before answering")
+
+	// Bare `lazyrecall` is the browser, not a usage dump: the interactive
+	// interface is this tool's front door, the same way `lazygit` and
+	// `lazydocker` open on theirs. The subcommands below remain the
+	// scriptable surface, and `--help` still prints them. cmdBrowse already
+	// falls back to a plain listing when output is not a terminal, so
+	// `lazyrecall | head` keeps working.
 	if len(args) == 0 {
-		printUsage()
-		return nil
+		return cmdBrowse(global, profileFlag, noRefresh, nil)
 	}
 	cmd, rest := args[0], args[1:]
 	if cmd == "-h" || cmd == "--help" || cmd == "help" {
@@ -56,11 +66,6 @@ func run(args []string) error {
 		fmt.Println(versionString())
 		return nil
 	}
-
-	global := flag.NewFlagSet("recall", flag.ContinueOnError)
-	profileFlag := global.String("profile", "", "profile to operate under (default: the primary profile)")
-	jsonFlag := global.Bool("json", false, "machine-readable JSON output")
-	noRefresh := global.Bool("no-refresh", false, "skip the automatic refresh before answering")
 
 	// Subcommand-specific flags are parsed after pulling out any global
 	// ones interleaved by the user; for simplicity every subcommand parses
@@ -90,37 +95,41 @@ func run(args []string) error {
 	}
 }
 
-// versionString is the one-line identifier `recall --version`/`-v`/
+// versionString is the one-line identifier `lazyrecall --version`/`-v`/
 // `version` prints - enough to tell which build is actually running
 // (name, version, build time), the diagnostic this change adds because its
 // own debugging episode needed it and didn't have it.
 func versionString() string {
-	return fmt.Sprintf("recall %s (built %s)", version, buildTime)
+	return fmt.Sprintf("lazyrecall %s (built %s)", version, buildTime)
 }
 
 func printUsage() {
-	fmt.Fprint(os.Stderr, `recall - a cross-agent index over coding-agent sessions
+	fmt.Fprint(os.Stderr, `lazyrecall - a cross-agent index over coding-agent sessions
 
 Usage:
-  recall list      [--agent=NAME] [--repo=PATH] [--tag=NAME] [--since=DAYS] [--json] [--profile=NAME]
-  recall search    QUERY [--agent=NAME] [--repo=PATH] [--tag=NAME] [--json] [--profile=NAME]
-  recall review    [--json] [--profile=NAME]
-  recall resume    [SESSION_ID] [--profile=NAME]
-  recall comment   add SESSION_ID TEXT... | list SESSION_ID | rm COMMENT_ID
-  recall tag       add SESSION_ID TAG | rm SESSION_ID TAG | list
-  recall refresh   [--full] [--profile=NAME]
-  recall browse    [QUERY] [--agent=NAME] [--repo=PATH] [--tag=NAME] [--profile=NAME]
-  recall profiles  [--json]
-  recall version, --version, -v
+  lazyrecall                  open the interactive browser
+  lazyrecall list      [--agent=NAME] [--repo=PATH] [--tag=NAME] [--since=DAYS] [--json] [--profile=NAME]
+  lazyrecall search    QUERY [--agent=NAME] [--repo=PATH] [--tag=NAME] [--json] [--profile=NAME]
+  lazyrecall review    [--json] [--profile=NAME]
+  lazyrecall resume    [SESSION_ID] [--profile=NAME]
+  lazyrecall comment   add SESSION_ID TEXT... | list SESSION_ID | rm COMMENT_ID
+  lazyrecall tag       add SESSION_ID TAG | rm SESSION_ID TAG | list
+  lazyrecall refresh   [--full] [--profile=NAME]
+  lazyrecall browse    [QUERY] [--agent=NAME] [--repo=PATH] [--tag=NAME] [--profile=NAME]
+  lazyrecall profiles  [--json]
+  lazyrecall version, --version, -v
 
-With no SESSION_ID, "recall resume" opens a numbered picker to choose from.
+With no SESSION_ID, "lazyrecall resume" opens a numbered picker to choose from.
 Resuming runs the agent directly in this terminal - nothing else needs to be
 installed.
 
-"recall browse" opens on the most recent sessions and stays open: change
-filters, read and edit comments/tags, and resume a session without leaving
-it. SESSION_ID accepts either a session's short handle (e.g. "3") or its
-full composite identifier.
+The browser - "lazyrecall" with no arguments, or "lazyrecall browse" - opens on
+the most recent sessions and stays open: narrow by profile, agent, repository,
+or tag from the side panels, read and edit comments/tags, and resume a session
+without leaving it.
+
+SESSION_ID accepts either a session's short handle (e.g. "3") or its full
+composite identifier.
 `)
 }
 
@@ -154,7 +163,7 @@ func openDB(p profile.Profile, skipRefresh bool, full bool) (*sqlitex.Runner, er
 // does not change a command's meaning"; design.md decision 1). The
 // standard library's flag.Parse stops at the first non-flag argument by
 // design, so a command's documented usage - flags after a positional, e.g.
-// "recall search buddy --profile=X" - would otherwise be swallowed whole
+// "lazyrecall search buddy --profile=X" - would otherwise be swallowed whole
 // into the positional. This is the standard re-parse idiom: parse, peel off
 // one positional when flag.Parse stops on one, and parse whatever remains,
 // repeating until nothing is left.
@@ -246,7 +255,7 @@ func cmdSearch(global *flag.FlagSet, profileFlag *string, jsonFlag, noRefresh *b
 		return err
 	}
 	if len(rest) == 0 {
-		return fmt.Errorf("usage: recall search QUERY")
+		return fmt.Errorf("usage: lazyrecall search QUERY")
 	}
 	query := strings.Join(rest, " ")
 
@@ -343,7 +352,7 @@ func cmdResume(global *flag.FlagSet, profileFlag *string, jsonFlag, noRefresh *b
 
 	// Resume replaces this process with the agent on success (change
 	// resume-in-current-terminal, design.md decision 1), so anything below
-	// this call only ever runs on a failure path - there is no Recall left
+	// this call only ever runs on a failure path - there is no LazyRecall left
 	// to report success from.
 	profileEnv, profileOK, profileReason := resumeProfileEnv(target.Source, profileNameFrom(target.SessionID))
 	out := resume.Resume(resume.Target{
@@ -363,17 +372,17 @@ func cmdResume(global *flag.FlagSet, profileFlag *string, jsonFlag, noRefresh *b
 	return nil
 }
 
-// sourceSessionIDFrom recovers the source's own session id from Recall's
+// sourceSessionIDFrom recovers the source's own session id from LazyRecall's
 // composite id ("source:profile:sourceSessionID").
-func sourceSessionIDFrom(recallID string) string {
-	parts := strings.SplitN(recallID, ":", 3)
+func sourceSessionIDFrom(compositeID string) string {
+	parts := strings.SplitN(compositeID, ":", 3)
 	if len(parts) == 3 {
 		return parts[2]
 	}
-	return recallID
+	return compositeID
 }
 
-// profileNameFrom recovers the profile name from Recall's composite id
+// profileNameFrom recovers the profile name from LazyRecall's composite id
 // ("source:profile:sourceSessionID") - the same composite sourceSessionIDFrom
 // reads, just the middle segment instead of the last. Needed because a
 // session accepted via the browser may belong to a profile other than the
@@ -381,8 +390,8 @@ func sourceSessionIDFrom(recallID string) string {
 // so the profile a session's own agent must be started under has to be read
 // off the session itself, not assumed from the command's own --profile flag
 // (change fix-resume-session-identity, design.md decision 3).
-func profileNameFrom(recallID string) string {
-	parts := strings.SplitN(recallID, ":", 3)
+func profileNameFrom(compositeID string) string {
+	parts := strings.SplitN(compositeID, ":", 3)
 	if len(parts) == 3 {
 		return parts[1]
 	}
@@ -423,7 +432,7 @@ func cmdComment(global *flag.FlagSet, profileFlag *string, noRefresh *bool, args
 		return err
 	}
 	if len(rest) == 0 {
-		return fmt.Errorf("usage: recall comment add|list|rm ...")
+		return fmt.Errorf("usage: lazyrecall comment add|list|rm ...")
 	}
 	p, err := resolveProfile(*profileFlag)
 	if err != nil {
@@ -437,7 +446,7 @@ func cmdComment(global *flag.FlagSet, profileFlag *string, noRefresh *bool, args
 	switch rest[0] {
 	case "add":
 		if len(rest) < 3 {
-			return fmt.Errorf("usage: recall comment add SESSION_ID TEXT...")
+			return fmt.Errorf("usage: lazyrecall comment add SESSION_ID TEXT...")
 		}
 		lineage, err := annotate.LineageForIdentifier(db, p.Name, rest[1])
 		if err != nil {
@@ -446,7 +455,7 @@ func cmdComment(global *flag.FlagSet, profileFlag *string, noRefresh *bool, args
 		return annotate.AddComment(db, lineage, strings.Join(rest[2:], " "))
 	case "list":
 		if len(rest) < 2 {
-			return fmt.Errorf("usage: recall comment list SESSION_ID")
+			return fmt.Errorf("usage: lazyrecall comment list SESSION_ID")
 		}
 		lineage, err := annotate.LineageForIdentifier(db, p.Name, rest[1])
 		if err != nil {
@@ -465,7 +474,7 @@ func cmdComment(global *flag.FlagSet, profileFlag *string, noRefresh *bool, args
 		return nil
 	case "rm":
 		if len(rest) < 2 {
-			return fmt.Errorf("usage: recall comment rm COMMENT_ID")
+			return fmt.Errorf("usage: lazyrecall comment rm COMMENT_ID")
 		}
 		id, err := strconv.ParseInt(rest[1], 10, 64)
 		if err != nil {
@@ -483,7 +492,7 @@ func cmdTag(global *flag.FlagSet, profileFlag *string, noRefresh *bool, args []s
 		return err
 	}
 	if len(rest) == 0 {
-		return fmt.Errorf("usage: recall tag add|rm|list ...")
+		return fmt.Errorf("usage: lazyrecall tag add|rm|list ...")
 	}
 	p, err := resolveProfile(*profileFlag)
 	if err != nil {
@@ -497,7 +506,7 @@ func cmdTag(global *flag.FlagSet, profileFlag *string, noRefresh *bool, args []s
 	switch rest[0] {
 	case "add":
 		if len(rest) < 3 {
-			return fmt.Errorf("usage: recall tag add SESSION_ID TAG")
+			return fmt.Errorf("usage: lazyrecall tag add SESSION_ID TAG")
 		}
 		lineage, err := annotate.LineageForIdentifier(db, p.Name, rest[1])
 		if err != nil {
@@ -506,7 +515,7 @@ func cmdTag(global *flag.FlagSet, profileFlag *string, noRefresh *bool, args []s
 		return annotate.AddTag(db, lineage, rest[2])
 	case "rm":
 		if len(rest) < 3 {
-			return fmt.Errorf("usage: recall tag rm SESSION_ID TAG")
+			return fmt.Errorf("usage: lazyrecall tag rm SESSION_ID TAG")
 		}
 		lineage, err := annotate.LineageForIdentifier(db, p.Name, rest[1])
 		if err != nil {
@@ -632,7 +641,7 @@ func jsonEnvelope(profileName string, writeArray func() error) error {
 }
 
 // ---------------------------------------------------------------------
-// recall browse (change add-interactive-browse)
+// lazyrecall browse (change add-interactive-browse)
 // ---------------------------------------------------------------------
 
 // cmdBrowse opens the interactive browser (change
@@ -704,7 +713,7 @@ func cmdBrowse(global *flag.FlagSet, profileFlag *string, noRefresh *bool, args 
 	// (spec session-search, "Switching profile replaces the view") - so
 	// resume against the item the browser returned as it was selected; the
 	// item carries its profile's data. This is the same resume path the
-	// non-interactive `recall resume` uses.
+	// non-interactive `lazyrecall resume` uses.
 	//
 	// cli.RunBrowser has already returned by this point, which is exactly
 	// what makes the terminal-restoration ordering correct (change

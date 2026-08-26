@@ -5,20 +5,20 @@ import (
 	"path/filepath"
 	"testing"
 
-	"recall/internal/profile"
-	"recall/internal/search"
+	"lazyrecall/internal/profile"
+	"lazyrecall/internal/search"
 )
 
 // TestNoOperationReturnsSessionsFromMultipleProfiles refreshes two
 // distinct profiles - each with its own synthetic claude session - into
-// Recall's own database directory, then asserts that listing one profile's
+// LazyRecall's own database directory, then asserts that listing one profile's
 // database never surfaces the other's session (task 12.3; spec
 // session-index, "Profile isolation").
 func TestNoOperationReturnsSessionsFromMultipleProfiles(t *testing.T) {
 	bin := sqlite3Path(t)
 	dataDir := t.TempDir()
-	os.Setenv("RECALL_HOME", dataDir)
-	t.Cleanup(func() { os.Unsetenv("RECALL_HOME") })
+	os.Setenv("LAZYRECALL_HOME", dataDir)
+	t.Cleanup(func() { os.Unsetenv("LAZYRECALL_HOME") })
 
 	home := t.TempDir()
 	workRoot := filepath.Join(home, ".claude")
