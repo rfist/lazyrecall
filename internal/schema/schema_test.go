@@ -327,3 +327,108 @@ INSERT INTO tags (lineage_id, tag, created_at) VALUES ('lin_1', 'urgent', 1);
 		t.Errorf("expected a fresh lineage to be unarchived (archived_at NULL), got %+v", archived)
 	}
 }
+
+// TestV4ToV5MigrationAddsOriginColumnKeepsData covers change
+// add-session-origin: an existing database at schema version 4 (with
+// lineages, comments, and tags already populated, including handle and
+// archived_at) must, on the next Open, gain the sessions.origin column with
+// all of that annotation data intact. sessions.origin is index data read
+// back out of the transcripts, so the bump discards and rebuilds the index
+// (the seeded session row is gone) - exactly like sessions.name did at v3 -
+// while the annotations are migrated forward and never rebuilt.
+func TestV4ToV5MigrationAddsOriginColumnKeepsData(t *testing.T) {
+	r := testRunner(t)
+
+	// Hand-build a v4-shaped database: schema_meta at version 4, lineages
+	// with handle and archived_at (the v4 shape), comments, tags, and a v4
+	// index table without origin - without ever going through the current
+	// origin-aware indexDDL.
+	v4DDL := `
+CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+INSERT INTO schema_meta (key, value) VALUES ('schema_version', '4');
+CREATE TABLE lineages (id TEXT PRIMARY KEY, profile TEXT NOT NULL, orphaned INTEGER NOT NULL DEFAULT 0, handle INTEGER, archived_at INTEGER);
+CREATE UNIQUE INDEX idx_lineages_handle_profile ON lineages(profile, handle);
+CREATE TABLE comments (id INTEGER PRIMARY KEY AUTOINCREMENT, lineage_id TEXT NOT NULL, body TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+CREATE INDEX idx_comments_lineage ON comments(lineage_id);
+CREATE TABLE tags (lineage_id TEXT NOT NULL, tag TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (lineage_id, tag));
+CREATE INDEX idx_tags_tag ON tags(tag);
+CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT NOT NULL, source_session_id TEXT NOT NULL, lineage_id TEXT NOT NULL, end_state TEXT NOT NULL, name TEXT);
+INSERT INTO lineages (id, profile, orphaned, handle, archived_at) VALUES ('lin_1', 'p', 0, 3, 1234);
+INSERT INTO comments (lineage_id, body, created_at, updated_at) VALUES ('lin_1', 'keep me', 1, 1);
+INSERT INTO tags (lineage_id, tag, created_at) VALUES ('lin_1', 'urgent', 1);
+INSERT INTO sessions (id, source, source_session_id, lineage_id, end_state) VALUES ('s1', 'claude', 's1', 'lin_1', 'completed');
+`
+	if err := r.Exec(v4DDL); err != nil {
+		t.Fatalf("seeding v4 database: %v", err)
+	}
+
+	v, err := Open(r)
+	if err != nil {
+		t.Fatalf("Open (migrating v4 -> current): %v", err)
+	}
+	if v != CurrentVersion {
+		t.Fatalf("got version %d, want %d", v, CurrentVersion)
+	}
+
+	var cols []struct {
+		Name string `json:"name"`
+	}
+	if err := r.Query(`PRAGMA table_info(sessions);`, &cols); err != nil {
+		t.Fatal(err)
+	}
+	hasOrigin := false
+	for _, c := range cols {
+		if c.Name == "origin" {
+			hasOrigin = true
+		}
+	}
+	if !hasOrigin {
+		t.Errorf("expected sessions.origin to exist after migration, columns: %+v", cols)
+	}
+
+	// The index table was discarded and rebuilt (the seeded row is gone)...
+	var sessions []struct {
+		ID string `json:"id"`
+	}
+	if err := r.Query(`SELECT id FROM sessions;`, &sessions); err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 0 {
+		t.Errorf("expected the disposable index to still be discarded after migrating, got %d rows", len(sessions))
+	}
+
+	// ...while every annotation seeded at v4 is intact: the lineage row
+	// with its handle and archive timestamp, the comment, and the tag.
+	var lineage []struct {
+		Handle     int   `json:"handle"`
+		ArchivedAt int64 `json:"archived_at"`
+	}
+	if err := r.Query(`SELECT handle, archived_at FROM lineages WHERE id = 'lin_1';`, &lineage); err != nil {
+		t.Fatal(err)
+	}
+	if len(lineage) != 1 || lineage[0].Handle != 3 || lineage[0].ArchivedAt != 1234 {
+		t.Errorf("expected the lineage (handle, archived_at) to survive migration, got %+v", lineage)
+	}
+
+	var comments []struct {
+		LineageID string `json:"lineage_id"`
+		Body      string `json:"body"`
+	}
+	if err := r.Query(`SELECT lineage_id, body FROM comments;`, &comments); err != nil {
+		t.Fatal(err)
+	}
+	if len(comments) != 1 || comments[0].Body != "keep me" {
+		t.Errorf("expected the comment to survive migration, got %+v", comments)
+	}
+
+	var tags []struct {
+		LineageID string `json:"lineage_id"`
+		Tag       string `json:"tag"`
+	}
+	if err := r.Query(`SELECT lineage_id, tag FROM tags;`, &tags); err != nil {
+		t.Fatal(err)
+	}
+	if len(tags) != 1 || tags[0].Tag != "urgent" {
+		t.Errorf("expected the tag to survive migration, got %+v", tags)
+	}
+}

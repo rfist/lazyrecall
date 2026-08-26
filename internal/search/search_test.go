@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"lazyrecall/internal/schema"
+	"lazyrecall/internal/session"
 	"lazyrecall/internal/sqlitex"
 )
 
@@ -406,4 +407,46 @@ func contains(s, sub string) bool {
 		}
 		return false
 	})()
+}
+
+// TestOriginNormalisedOnReadOut covers the origin closed-set invariant on
+// the way out: a sessions row whose origin was never written (NULL, as an
+// older build or a hand-edit would leave it) or holds a garbage value
+// reads back as session.OriginUnknown - never as the raw stored value -
+// while a legitimate value comes through unchanged.
+func TestOriginNormalisedOnReadOut(t *testing.T) {
+	db := testDB(t)
+	seedSession(t, db, map[string]any{
+		"id": "claude:p:null", "source": "claude", "source_session_id": "null", "lineage_id": "lin1",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 100,
+		// deliberately no origin -> the column stores NULL
+	})
+	seedSession(t, db, map[string]any{
+		"id": "claude:p:garbage", "source": "claude", "source_session_id": "garbage", "lineage_id": "lin2",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 200,
+		"origin": "nonsense",
+	})
+	seedSession(t, db, map[string]any{
+		"id": "claude:p:interactive", "source": "claude", "source_session_id": "interactive", "lineage_id": "lin3",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 300,
+		"origin": "interactive",
+	})
+
+	items, err := List(db, Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]session.Origin{}
+	for _, it := range items {
+		byID[it.SessionID] = it.Origin
+	}
+	if byID["claude:p:null"] != session.OriginUnknown {
+		t.Errorf("NULL origin read back as %q, want unknown", byID["claude:p:null"])
+	}
+	if byID["claude:p:garbage"] != session.OriginUnknown {
+		t.Errorf("garbage origin read back as %q, want unknown", byID["claude:p:garbage"])
+	}
+	if byID["claude:p:interactive"] != session.OriginInteractive {
+		t.Errorf("valid origin read back as %q, want interactive", byID["claude:p:interactive"])
+	}
 }
