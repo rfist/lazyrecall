@@ -95,10 +95,10 @@ func exists(dir string) bool {
 }
 
 // candidateClaudeRoots returns the Claude config roots to probe: an
-// explicit override list (RECALL_CLAUDE_CONFIG_DIRS, colon-separated) if
-// set, else the two conventional defaults.
+// explicit override list (LAZYRECALL_CLAUDE_CONFIG_DIRS, colon-separated)
+// if set, else the two conventional defaults.
 func candidateClaudeRoots() []string {
-	if v := os.Getenv("RECALL_CLAUDE_CONFIG_DIRS"); v != "" {
+	if v := env("CLAUDE_CONFIG_DIRS"); v != "" {
 		var out []string
 		for _, p := range strings.Split(v, ":") {
 			if p != "" {
@@ -132,7 +132,7 @@ func Discover() []Profile {
 		}
 	}
 
-	piRoot := os.Getenv("RECALL_PI_HOME")
+	piRoot := env("PI_HOME")
 	if piRoot == "" {
 		piRoot = filepath.Join(home, ".pi")
 	}
@@ -140,7 +140,7 @@ func Discover() []Profile {
 		piRoot = ""
 	}
 
-	ompRoot := os.Getenv("RECALL_OMP_HOME")
+	ompRoot := env("OMP_HOME")
 	if ompRoot == "" {
 		ompRoot = filepath.Join(home, ".omp")
 	}
@@ -148,7 +148,7 @@ func Discover() []Profile {
 		ompRoot = ""
 	}
 
-	hermesRoot := os.Getenv("RECALL_HERMES_HOME")
+	hermesRoot := env("HERMES_HOME")
 	if hermesRoot == "" {
 		hermesRoot = filepath.Join(home, ".hermes")
 	}
@@ -237,15 +237,20 @@ func Resolve(profiles []Profile, requested string) (Profile, error) {
 	return Profile{}, fmt.Errorf("multiple profiles found (%s) and none is the default; pass --profile or set LAZYRECALL_PROFILE", strings.Join(names, ", "))
 }
 
-// envProfile reads the profile name from the environment, preferring the
-// current variable and falling back to the pre-rename one for the same
-// reason DataDir does.
-func envProfile() string {
-	if v := os.Getenv("LAZYRECALL_PROFILE"); v != "" {
+// env reads one of this program's environment overrides, preferring the
+// current LAZYRECALL_-prefixed name and falling back to the pre-rename
+// RECALL_ one (change rename-to-lazyrecall). Every override goes through
+// here, so "the old name still works" is one rule in one place rather than
+// a fallback that some variables got and others quietly did not.
+func env(name string) string {
+	if v := os.Getenv("LAZYRECALL_" + name); v != "" {
 		return v
 	}
-	return os.Getenv("RECALL_PROFILE")
+	return os.Getenv("RECALL_" + name)
 }
+
+// envProfile reads the profile name from the environment.
+func envProfile() string { return env("PROFILE") }
 
 // DataDir is the directory LazyRecall's own per-profile databases live in.
 // Overridable via LAZYRECALL_HOME; defaults to ~/.lazyrecall. This is the
@@ -256,14 +261,18 @@ func envProfile() string {
 // environment that still sets it would otherwise silently start indexing
 // into a second, empty database instead of the one it has been pointing at.
 func DataDir() string {
-	if v := os.Getenv("LAZYRECALL_HOME"); v != "" {
-		return v
-	}
-	if v := os.Getenv("RECALL_HOME"); v != "" {
+	if v := env("HOME"); v != "" {
 		return v
 	}
 	return filepath.Join(homeDir(), ".lazyrecall")
 }
+
+// DataDirExplicit reports whether the data directory was chosen by the
+// environment rather than defaulted. The one-time migration in
+// internal/refresh needs to know: a caller that has named its data
+// directory has said where its data is, and moving something else on top of
+// that would be the opposite of what it asked for.
+func DataDirExplicit() bool { return env("HOME") != "" }
 
 // LegacyDataDir is the pre-rename default data directory, ~/.recall. It is
 // consulted for exactly one purpose - the one-time move in refresh.New -

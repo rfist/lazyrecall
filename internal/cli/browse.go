@@ -1,9 +1,22 @@
-// The in-process interactive browser (change replace-fzf-browser-with-tui,
-// design.md decision 1): a bubbletea program that holds every piece of
-// browsing state - active filters, active profile, selection, scroll
-// position - in the running process. There is no external fuzzy finder, no
-// coordination file, and no re-invocation of the binary; the terminal is
-// owned and restored by the interface itself on every exit path.
+// The in-process interactive browser: a bubbletea program that holds every
+// piece of browsing state - active filters, active profile, selection,
+// scroll position - in the running process. There is no external fuzzy
+// finder, no coordination file, and no re-invocation of the binary; the
+// terminal is owned and restored by the interface itself on every exit
+// path (change replace-fzf-browser-with-tui, design.md decision 1).
+//
+// Change lazy-style-browser reshapes it into the layout the lazy* family
+// established: the dimensions you slice sessions by - profile, agent,
+// repository, tag - are persistent panels down the left with live counts,
+// not transient prompts you open with a letter and dismiss. Two
+// consequences follow, and they are the point of the change:
+//
+//   - The filters in effect are visible because they *are* the interface.
+//     Previously they survived only as a line of header text, and the way
+//     to discover what you could filter by was to remember which letter
+//     opened which prompt.
+//   - Navigation is "move to a panel, move within it, press Enter",
+//     uniformly, instead of a different modal prompt per dimension.
 package cli
 
 import (
@@ -105,51 +118,111 @@ func RunBrowser(opts BrowserOptions) (search.Item, bool, error) {
 	return fm.selected, fm.selectedOK, nil
 }
 
+// ---------------------------------------------------------------------
+// Panels
+// ---------------------------------------------------------------------
+
+// panelID names one focusable region. Focus is the browser's primary mode:
+// which panel has it determines what the movement keys move, what Enter
+// applies, and which actions the footer and the action menu offer.
+type panelID int
+
+const (
+	panelProfiles panelID = iota
+	panelAgents
+	panelRepos
+	panelTags
+	panelSessions
+	panelDetail
+	numPanels
+)
+
+// jumpKey is the digit that focuses a panel directly. The detail pane has
+// none: it is reached with Tab from Sessions, which is where you already
+// are when you want to read it.
+func (p panelID) jumpKey() int {
+	if p == panelDetail {
+		return 0
+	}
+	return int(p) + 1
+}
+
+func (p panelID) title() string {
+	switch p {
+	case panelProfiles:
+		return "Profiles"
+	case panelAgents:
+		return "Agents"
+	case panelRepos:
+		return "Repos"
+	case panelTags:
+		return "Tags"
+	case panelSessions:
+		return "Sessions"
+	}
+	return "Detail"
+}
+
+// isFacet reports whether p is one of the three panels that filter the
+// session list by a value. Profiles looks the same but does not filter -
+// it replaces the whole view - and Sessions/Detail are not filters at all.
+func (p panelID) isFacet() bool {
+	return p == panelAgents || p == panelRepos || p == panelTags
+}
+
+// detailTab is which page of the right-hand pane is showing.
+type detailTab int
+
+const (
+	tabDetail detailTab = iota
+	tabPrompts
+	tabComments
+	numDetailTabs
+)
+
+func (t detailTab) title() string {
+	switch t {
+	case tabPrompts:
+		return "Prompts"
+	case tabComments:
+		return "Comments"
+	}
+	return "Detail"
+}
+
+// ---------------------------------------------------------------------
+// Input modes
+// ---------------------------------------------------------------------
+
 // inputMode is what the browser is currently prompting for. Prompts are
-// input modes owned by the interface (design.md decision 1) - cancelling
-// one (Esc) returns to browsing with no change applied, and submitting
-// empty applies nothing except on a filter prompt, where it clears that one
-// filter (spec session-search, "Leaving input mode" / design.md decision 2
-// "INPUT MODE").
+// input modes owned by the interface - cancelling one (Esc) returns to
+// browsing with no change applied, and submitting empty applies nothing
+// except on a filter prompt, where it clears that one filter (spec
+// session-search, "Leaving input mode").
+//
+// The three prompts that used to ask for a profile, an agent, or a tag are
+// gone: those values are panels now, chosen by moving to them. What is
+// left is the input that genuinely is free text - a search phrase, a fuzzy
+// narrowing, a new tag, a comment - plus the action menu.
 type inputMode int
 
 const (
-	modeNone inputMode = iota
-	modeFuzzyFilter
-	modeRepoFilter
-	modeAgentFilter
-	modeTagFilter
+	modeNone   inputMode = iota
+	modeFilter           // narrows the focused panel's rows
 	modeSearchPhrase
-	modeProfile
 	modeAddTag
 	modeRemoveTag
 	modeAddComment
 	modeRemoveComment
-	// modeSelect is the one selection mode (change choose-from-known-values,
-	// design.md decision 1) reused by every prompt whose valid values are
-	// already known to the program: profile switch, agent filter, and tag
-	// filter. m.selectFor records which of those three underlying actions a
-	// selection is being made for - modeSelect itself is never the thing
-	// submitInput dispatches on; submitSelect sets m.mode back to
-	// m.selectFor before delegating to submitInput, so the existing
-	// per-action switch there needs no new case.
-	modeSelect
+	modeMenu // the action menu (x)
 )
 
 func (m inputMode) prompt() string {
 	switch m {
-	case modeFuzzyFilter:
-		return "filter listed sessions (blank to clear): "
-	case modeRepoFilter:
-		return "repo filter (blank to clear): "
-	case modeAgentFilter:
-		return "agent filter (choose or type to narrow, blank to clear): "
-	case modeTagFilter:
-		return "tag filter (choose or type to narrow, blank to clear): "
+	case modeFilter:
+		return "filter (blank to clear): "
 	case modeSearchPhrase:
 		return "search phrase (blank to clear): "
-	case modeProfile:
-		return "switch to profile (choose or type to narrow): "
 	case modeAddTag:
 		return "tag to add: "
 	case modeRemoveTag:
@@ -158,13 +231,18 @@ func (m inputMode) prompt() string {
 		return "comment to add: "
 	case modeRemoveComment:
 		return "comment id to remove: "
+	case modeMenu:
+		return "action (type to narrow): "
 	}
 	return ""
 }
 
+// ---------------------------------------------------------------------
+// Model
+// ---------------------------------------------------------------------
+
 // browseModel is the running state of the browser. Everything here lives in
-// the process; nothing is written to disk for coordination (design.md
-// decision 3).
+// the process; nothing is written to disk for coordination.
 type browseModel struct {
 	db          *sqlitex.Runner
 	profileName string
@@ -172,23 +250,31 @@ type browseModel struct {
 	width       int
 	height      int
 
-	// Server-side filters: what the current result set was queried with.
-	// Changing one re-queries (search.Search when a phrase is set,
-	// search.List otherwise) - the same paths the non-interactive commands
-	// use (design.md decision 4).
-	repo, agent, tag, query string
+	focus panelID
 
-	// Client-side fuzzy query: narrows the loaded rows in-process as the
-	// user types (design.md decision 4; spec session-search, "Fuzzy
-	// filtering of the loaded rows as the user types").
+	// all is the profile's whole result set for the current search phrase,
+	// queried once and sliced in process (see facet.go for why). It is
+	// re-queried only when the corpus itself can have changed: a profile
+	// switch, an index refresh, a new search phrase, or an annotation edit.
+	all   []search.Item
+	query string // the full-text search phrase, "" for none
+
+	profiles_ facet // the Profiles panel: same shape, but Enter switches rather than filters
+	agents    facet
+	repos     facet
+	tags      facet
+
+	// fuzzyQuery narrows the loaded session rows in process as the user
+	// types (spec session-search, "Fuzzy filtering of the loaded rows").
 	fuzzyQuery string
 
-	rows    []search.Item // the current server-side result set
-	visible []search.Item // rows after fuzzy narrowing
-	cursor  int           // selection index into visible
-	listTop int           // first row index shown in the list pane
+	visible []search.Item // sessions after every facet and the fuzzy query
+	cursor  int
+	listTop int
 
-	detail *viewport.Model
+	tab      detailTab
+	detail   *viewport.Model
+	detailOf string // session id the viewport's content was built for
 
 	mode       inputMode
 	input      textinput.Model
@@ -196,20 +282,12 @@ type browseModel struct {
 	resolve    func(name string) (profile.Profile, error)
 	profiles   func() []profile.Profile
 
-	// Selection-mode state (modeSelect - change choose-from-known-values,
-	// design.md decision 1). selectAll is the full candidate list for the
-	// active selection prompt; selectFiltered is selectAll narrowed by
-	// m.input's current text (the same fuzzy matcher plain typing already
-	// uses to narrow the loaded rows - design.md non-goal: "no new
-	// fuzzy-matching"); selectCursor indexes into selectFiltered.
-	selectFor      inputMode
-	selectAll      []string
-	selectFiltered []string
-	selectCursor   int
-	// selectCursorTouched becomes true the moment the user explicitly moves
-	// the cursor (Up/Down) - see refilterSelect for why this distinction
-	// matters (change fix-row-newlines-and-profile-switch, task 3.2).
-	selectCursorTouched bool
+	// Action-menu state. The menu is a list of concrete actions for the
+	// focused panel, narrowable by typing - the same interaction the old
+	// value-selection prompt had, now pointed at verbs instead of values.
+	menuAll      []menuAction
+	menuFiltered []menuAction
+	menuCursor   int
 
 	help   bool // the full action list is showing
 	notice string
@@ -221,9 +299,7 @@ type browseModel struct {
 // Init satisfies tea.Model: the browser needs no startup command beyond
 // the initial refresh already performed by the caller before the program
 // was created (design.md decision 5: refresh once on open).
-func (m browseModel) Init() tea.Cmd {
-	return nil
-}
+func (m browseModel) Init() tea.Cmd { return nil }
 
 func newBrowseModel(opts BrowserOptions) browseModel {
 	m := browseModel{
@@ -234,16 +310,20 @@ func newBrowseModel(opts BrowserOptions) browseModel {
 		profiles:    opts.discoverProfiles,
 		width:       DefaultWidth,
 		height:      24,
-		repo:        opts.Repo,
-		agent:       opts.Agent,
-		tag:         opts.Tag,
+		focus:       panelSessions,
 		query:       opts.Query,
 		input:       textinput.New(),
 	}
+	// Command-line filters open as the corresponding panels' selections, so
+	// `lazyrecall browse --agent=pi` and walking to "pi" in the Agents panel
+	// land in exactly the same state.
+	m.agents.Sel = opts.Agent
+	m.repos.Sel = opts.Repo
+	m.tags.Sel = opts.Tag
 	m.input.CharLimit = 1000
 	detail := viewport.New(m.width, 12)
 	m.detail = &detail
-	m.reload()
+	m.loadAll()
 	return m
 }
 
@@ -259,65 +339,72 @@ type dbSwitchedMsg struct {
 }
 
 // ---------------------------------------------------------------------
-// Queries
+// Queries and derivation
 // ---------------------------------------------------------------------
 
-func (m browseModel) queryRows() ([]search.Item, error) {
-	f := search.Filter{Agent: m.agent, Repo: m.repo, Tag: m.tag}
+// loadAll re-queries the profile's whole result set and rebuilds everything
+// derived from it. This is the only function that touches the session
+// tables; every filter change below is a walk over what it loaded.
+func (m *browseModel) loadAll() {
+	var (
+		rows []search.Item
+		err  error
+	)
 	if m.query != "" {
-		return search.Search(m.db, m.query, f)
+		rows, err = search.Search(m.db, m.query, search.Filter{})
+	} else {
+		rows, err = search.List(m.db, search.Filter{})
 	}
-	return search.List(m.db, f)
-}
-
-// agentCandidates lists the agents sessions actually exist for in the
-// active profile (change choose-from-known-values, design.md decision 2:
-// "taken from the sessions present in the active profile, not from a fixed
-// list of adapter names") - queried unfiltered so switching from an already
-// narrowed view still offers every agent the profile has, not just the ones
-// visible under the current filters.
-func (m browseModel) agentCandidates() []string {
-	rows, err := search.List(m.db, search.Filter{})
 	if err != nil {
-		return nil
+		m.notice = "browse: " + err.Error()
+		return
 	}
-	seen := map[string]bool{}
-	var out []string
-	for _, it := range rows {
-		if it.Source != "" && !seen[it.Source] {
-			seen[it.Source] = true
-			out = append(out, it.Source)
-		}
-	}
-	sort.Strings(out)
-	return out
+	m.all = rows
+	m.rebuild()
 }
 
-// tagCandidates lists the tags currently in use in the active profile
-// (design.md decision 2; "tags from annotate.AllTags") - the tag *filter*
-// only, distinct from tag creation (m/modeAddTag), which must keep
-// accepting a value that does not exist yet (design.md decision 3).
-func (m browseModel) tagCandidates() []string {
-	tags, err := annotate.AllTags(m.db)
-	if err != nil {
-		return nil
+// rebuild recomputes the facet panels and the visible session list from
+// m.all. Each facet is counted over the corpus narrowed by the *other*
+// facets, so a panel always answers "what would selecting this row give
+// me, on top of what is already selected" - a row showing 0 would be a row
+// that leads nowhere, and none is ever shown.
+func (m *browseModel) rebuild() {
+	m.agents.setRows(countBy(narrow(m.all, "", m.repos.Sel, m.tags.Sel), "all agents", agentKey, nil))
+	m.repos.setRows(countBy(narrow(m.all, m.agents.Sel, "", m.tags.Sel), "all repos", repoKey, abbreviateHome))
+	m.tags.setRows(countBy(narrow(m.all, m.agents.Sel, m.repos.Sel, ""), "all tags", tagKeys, func(s string) string { return "#" + s }))
+	m.profiles_.setRows(m.profileRows())
+
+	m.visible = m.applyFuzzy(narrow(m.all, m.agents.Sel, m.repos.Sel, m.tags.Sel))
+	if m.cursor >= len(m.visible) {
+		m.cursor = len(m.visible) - 1
 	}
-	return tags
+	if m.cursor < 0 {
+		m.cursor = 0
+	}
+	if m.listTop > m.cursor {
+		m.listTop = m.cursor
+	}
 }
 
-// profileCandidates lists every profile that can be switched to, excluding
-// the one already active - switching to the current profile would be a
-// no-op, and it is not a useful choice to offer (design.md decision 2's
-// "a value that would return nothing is not a useful choice" reasoning
-// applies equally here).
-func (m browseModel) profileCandidates() []string {
-	var out []string
+// profileRows lists every profile on the machine, active one first. There
+// are no counts: a count would mean opening every other profile's database,
+// and profiles are isolated from each other by design - reading one to
+// annotate another's panel is exactly the mixing that isolation exists to
+// prevent.
+func (m browseModel) profileRows() []facetRow {
+	var out []facetRow
 	for _, p := range m.profiles() {
-		if p.Name != "" && p.Name != m.profileName {
-			out = append(out, p.Name)
+		if p.Name == "" {
+			continue
 		}
+		out = append(out, facetRow{Value: p.Name, Label: p.Name})
 	}
-	sort.Strings(out)
+	sort.Slice(out, func(i, j int) bool {
+		if (out[i].Value == m.profileName) != (out[j].Value == m.profileName) {
+			return out[i].Value == m.profileName
+		}
+		return out[i].Value < out[j].Value
+	})
 	return out
 }
 
@@ -365,27 +452,6 @@ func (m browseModel) applyFuzzy(rows []search.Item) []search.Item {
 	return out
 }
 
-// reload re-runs the current server-side query and re-applies the fuzzy
-// filter, clamping the selection into the new result set.
-func (m *browseModel) reload() {
-	rows, err := m.queryRows()
-	if err != nil {
-		m.notice = "browse: " + err.Error()
-		return
-	}
-	m.rows = rows
-	m.visible = m.applyFuzzy(rows)
-	if m.cursor >= len(m.visible) {
-		m.cursor = len(m.visible) - 1
-	}
-	if m.cursor < 0 {
-		m.cursor = 0
-	}
-	if m.listTop > m.cursor {
-		m.listTop = m.cursor
-	}
-}
-
 func (m *browseModel) current() *search.Item {
 	if m.cursor >= 0 && m.cursor < len(m.visible) {
 		return &m.visible[m.cursor]
@@ -393,9 +459,25 @@ func (m *browseModel) current() *search.Item {
 	return nil
 }
 
-// keepCursorVisible scrolls the list window so the cursor row is shown.
+// facetFor returns the panel state p navigates, or nil for panels that
+// hold no row list of their own.
+func (m *browseModel) facetFor(p panelID) *facet {
+	switch p {
+	case panelProfiles:
+		return &m.profiles_
+	case panelAgents:
+		return &m.agents
+	case panelRepos:
+		return &m.repos
+	case panelTags:
+		return &m.tags
+	}
+	return nil
+}
+
+// keepCursorVisible scrolls the session list window so the cursor is shown.
 func (m *browseModel) keepCursorVisible() {
-	h := m.listHeight()
+	h := m.geometry().sessionsInner
 	if h <= 0 {
 		return
 	}
@@ -419,50 +501,47 @@ func (m *browseModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		if m.detail != nil {
-			m.detail.Width = msg.Width
-			m.detail.Height = m.detailHeight()
-		}
+		g := m.geometry()
+		m.detail.Width = g.rightWidth - 2
+		m.detail.Height = g.detailInner
 		m.keepCursorVisible()
 		return m, nil
 
 	case refreshDoneMsg:
 		if msg.err != nil {
-			m.notice = "refresh failed: " + msg.err.Error()
+			m.notice = "refresh: " + msg.err.Error()
 		} else {
 			m.notice = "index refreshed."
-			m.reload()
 		}
+		m.loadAll()
 		return m, nil
 
 	case dbSwitchedMsg:
 		if msg.err != nil {
-			m.notice = "profile switch failed: " + msg.err.Error()
+			m.notice = "profile: " + msg.err.Error()
 			return m, nil
 		}
 		m.db = msg.db
 		m.profileName = msg.name
-		m.cursor = 0
-		m.listTop = 0
-		m.reload()
+		// A profile is a different corpus, so nothing selected under the
+		// old one carries over: its agents, repos, and tags are not this
+		// profile's, and keeping them would silently show an empty list.
+		m.agents.Sel, m.repos.Sel, m.tags.Sel = "", "", ""
+		m.fuzzyQuery = ""
+		m.cursor, m.listTop = 0, 0
+		m.notice = "profile: " + msg.name
+		m.loadAll()
 		return m, nil
-	}
 
-	// Input modes own every key while active (design.md decision 6):
-	// Esc/Ctrl-C cancels without applying, Enter submits.
-	if m.mode != modeNone {
-		return m.updateInputMode(msg)
-	}
-
-	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if m.mode != modeNone {
+			return m.updateInputMode(msg)
+		}
 		if m.help {
-			switch msg.Type {
-			case tea.KeyEsc, tea.KeyCtrlC, tea.KeyRunes:
-				if msg.Type != tea.KeyRunes || string(msg.Runes) == "?" {
-					m.help = false
-				}
-			}
+			// Any key closes the help overlay; nothing else acts while it
+			// is up, so a key pressed to dismiss it can never also fire an
+			// action behind it.
+			m.help = false
 			return m, nil
 		}
 		return m.handleBrowseKey(msg)
@@ -470,17 +549,15 @@ func (m *browseModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleBrowseKey dispatches normal-mode keys. Normal mode is unmodified
-// keys only (design.md decision 1: "The browser becomes modal") - every
-// action below is bound exactly as design.md decision 2's binding table
-// specifies, with no substituted or added keys. Alt/Meta combinations are
-// never bound to anything: the user's window manager reserves them, so they
-// would never reach the program (spec session-search, "The browser binds no
-// Alt combinations").
+// handleBrowseKey dispatches normal-mode keys: first the ones that mean the
+// same thing everywhere, then the focused panel's own.
+//
+// Alt/Meta combinations are never bound to anything: the user's window
+// manager reserves them, so they would never reach the program (spec
+// session-search, "The browser binds no Alt combinations") - checked once,
+// up front, rather than per-case, so it can never be missed by a future
+// addition below.
 func (m *browseModel) handleBrowseKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// No action is ever bound to Alt/Meta (spec session-search, "The browser
-	// binds no Alt combinations") - checked once, up front, rather than
-	// per-case, so it can never be missed by a future addition below.
 	if msg.Alt {
 		return m, nil
 	}
@@ -489,122 +566,264 @@ func (m *browseModel) handleBrowseKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyCtrlC:
 		m.selectedOK = false
 		return m, tea.Quit
-
-	case tea.KeyEnter:
-		if it := m.current(); it != nil {
-			m.selected = *it
-			m.selectedOK = true
-			return m, tea.Quit
-		}
+	case tea.KeyTab:
+		m.moveFocus(1)
 		return m, nil
-
+	case tea.KeyShiftTab:
+		m.moveFocus(-1)
+		return m, nil
+	case tea.KeyEnter:
+		return m.activate()
+	case tea.KeyEsc:
+		m.clearFocused()
+		return m, nil
 	case tea.KeyUp:
-		m.moveSelection(-1)
+		m.move(-1)
 		return m, nil
 	case tea.KeyDown:
-		m.moveSelection(1)
+		m.move(1)
 		return m, nil
 	case tea.KeyCtrlU:
-		m.moveSelection(-m.halfScreen())
+		m.move(-m.halfScreen())
 		return m, nil
 	case tea.KeyCtrlD:
-		m.moveSelection(m.halfScreen())
+		m.move(m.halfScreen())
 		return m, nil
-
 	case tea.KeyRunes:
-		switch string(msg.Runes) {
-		case "j":
-			m.moveSelection(1)
-		case "k":
-			m.moveSelection(-1)
-		case "g":
-			m.cursor = 0
-			m.listTop = 0
-		case "G":
-			m.cursor = len(m.visible) - 1
-			if m.cursor < 0 {
-				m.cursor = 0
-			}
-			m.keepCursorVisible()
-		case "q":
-			m.selectedOK = false
-			return m, tea.Quit
-		case "?":
-			m.help = true
-		case "/":
-			return m.startInput(modeFuzzyFilter)
-		case "s":
-			return m.startInput(modeSearchPhrase)
-		case "r":
-			// The repository filter stays free text: repository paths
-			// cannot be enumerated usefully (design.md decision 3).
-			return m.startInput(modeRepoFilter)
-		case "a":
-			return m.startSelect(modeAgentFilter, m.agentCandidates())
-		case "t":
-			return m.startSelect(modeTagFilter, m.tagCandidates())
-		case "p":
-			return m.startSelect(modeProfile, m.profileCandidates())
-		case "x":
-			m.repo, m.agent, m.tag, m.query, m.fuzzyQuery = "", "", "", "", ""
-			m.reload()
-		case "R":
-			return m, m.refreshCmd()
-		case "m":
-			return m.startInput(modeAddTag)
-		case "M":
-			return m.startInput(modeRemoveTag)
-		case "c":
-			return m.startInput(modeAddComment)
-		case "C":
-			return m.startInput(modeRemoveComment)
-		}
+	default:
 		return m, nil
 	}
 
-	// Every other key (including any Alt/Meta combination) is inert in
-	// normal mode: it is neither a bound action nor text, because normal
-	// mode never enters text.
+	switch string(msg.Runes) {
+	case "j":
+		m.move(1)
+	case "k":
+		m.move(-1)
+	case "g":
+		m.moveTo(0)
+	case "G":
+		m.moveTo(1 << 30)
+	case "1", "2", "3", "4", "5":
+		n, _ := strconv.Atoi(string(msg.Runes))
+		m.setFocus(panelID(n - 1))
+	case "q":
+		m.selectedOK = false
+		return m, tea.Quit
+	case "?":
+		m.help = true
+	case "x":
+		return m.openMenu()
+	case "/":
+		return m.startInput(modeFilter)
+	case "s":
+		return m.startInput(modeSearchPhrase)
+	case "X":
+		m.clearAllFilters()
+	case "R":
+		m.notice = "refreshing index..."
+		return m, m.refreshCmd()
+	case "[":
+		m.cycleTab(-1)
+	case "]":
+		m.cycleTab(1)
+	case "m":
+		return m.startInput(modeAddTag)
+	case "M":
+		return m.startInput(modeRemoveTag)
+	case "c":
+		return m.startInput(modeAddComment)
+	case "C":
+		return m.startInput(modeRemoveComment)
+	}
 	return m, nil
 }
 
-// moveSelection shifts the cursor by delta rows, clamped to the visible
-// range, and keeps it scrolled into view.
-func (m *browseModel) moveSelection(delta int) {
-	m.cursor += delta
-	if m.cursor < 0 {
-		m.cursor = 0
+// setFocus moves focus to p, skipping panels that are not currently drawn -
+// on a narrow terminal the side panels are not rendered, and focus must
+// never land somewhere invisible.
+func (m *browseModel) setFocus(p panelID) {
+	if p < 0 || p >= numPanels {
+		return
 	}
-	if lastIdx := len(m.visible) - 1; m.cursor > lastIdx {
-		m.cursor = lastIdx
+	if !m.geometry().sidebar && p != panelSessions && p != panelDetail {
+		m.notice = "the side panels need a wider terminal."
+		return
 	}
-	if m.cursor < 0 {
-		m.cursor = 0
-	}
-	m.keepCursorVisible()
+	m.focus = p
+	m.notice = ""
 }
 
-// halfScreen is the number of rows Ctrl-D/Ctrl-U move by - half of the
-// list pane's height, by vim convention (design.md decision 2 notes: "Ctrl-D
-// is half-screen-down by convention").
+// moveFocus cycles focus by delta over the panels currently drawn.
+func (m *browseModel) moveFocus(delta int) {
+	sidebar := m.geometry().sidebar
+	for i := 0; i < int(numPanels); i++ {
+		m.focus = panelID((int(m.focus) + delta + int(numPanels)) % int(numPanels))
+		if sidebar || m.focus == panelSessions || m.focus == panelDetail {
+			break
+		}
+	}
+	m.notice = ""
+}
+
+// move shifts the focused panel's cursor by delta.
+func (m *browseModel) move(delta int) {
+	switch m.focus {
+	case panelSessions:
+		m.cursor = clampIndex(m.cursor+delta, len(m.visible))
+		m.keepCursorVisible()
+	case panelDetail:
+		if delta < 0 {
+			m.detail.LineUp(-delta)
+		} else {
+			m.detail.LineDown(delta)
+		}
+	default:
+		if f := m.facetFor(m.focus); f != nil {
+			f.cursor = clampIndex(f.cursor+delta, len(f.rows))
+			f.keepVisible(m.facetInnerHeight(m.focus))
+		}
+	}
+}
+
+// moveTo jumps the focused panel's cursor to an absolute index, clamped -
+// what g and G do.
+func (m *browseModel) moveTo(idx int) {
+	switch m.focus {
+	case panelSessions:
+		m.cursor = clampIndex(idx, len(m.visible))
+		m.listTop = 0
+		m.keepCursorVisible()
+	case panelDetail:
+		if idx == 0 {
+			m.detail.GotoTop()
+		} else {
+			m.detail.GotoBottom()
+		}
+	default:
+		if f := m.facetFor(m.focus); f != nil {
+			f.cursor = clampIndex(idx, len(f.rows))
+			f.top = 0
+			f.keepVisible(m.facetInnerHeight(m.focus))
+		}
+	}
+}
+
+// halfScreen is the number of rows Ctrl-D/Ctrl-U move by in the focused
+// panel - half of that panel's height, by vim convention.
 func (m *browseModel) halfScreen() int {
-	h := m.listHeight() / 2
-	if h < 1 {
+	h := m.geometry().sessionsInner
+	if m.focus != panelSessions {
+		h = m.facetInnerHeight(m.focus)
+	}
+	if h /= 2; h < 1 {
 		h = 1
 	}
 	return h
 }
 
+// activate is Enter: what it does depends entirely on which panel has
+// focus, which is the whole navigation model in one function.
+func (m *browseModel) activate() (tea.Model, tea.Cmd) {
+	switch m.focus {
+	case panelSessions:
+		if it := m.current(); it != nil {
+			m.selected = *it
+			m.selectedOK = true
+			return m, tea.Quit
+		}
+	case panelProfiles:
+		row := m.profiles_.index()
+		if row == nil || row.Value == "" {
+			return m, nil
+		}
+		if row.Value == m.profileName {
+			m.notice = row.Value + " is already the active profile."
+			return m, nil
+		}
+		return m, m.switchProfileCmd(row.Value)
+	case panelAgents, panelRepos, panelTags:
+		f := m.facetFor(m.focus)
+		row := f.index()
+		if row == nil {
+			return m, nil
+		}
+		f.Sel = row.Value // the "all" row carries "", which is "no filter"
+		m.cursor, m.listTop = 0, 0
+		m.rebuild()
+	}
+	return m, nil
+}
+
+// clearFocused is Esc outside of a prompt: it undoes whatever the focused
+// panel contributes to the current view, and nothing else. Esc on Sessions
+// clears the fuzzy narrowing, which is the thing typed into that panel.
+func (m *browseModel) clearFocused() {
+	switch m.focus {
+	case panelSessions:
+		m.fuzzyQuery = ""
+		m.rebuild()
+	case panelAgents, panelRepos, panelTags:
+		f := m.facetFor(m.focus)
+		if f.Sel == "" {
+			return
+		}
+		f.Sel = ""
+		m.cursor, m.listTop = 0, 0
+		m.rebuild()
+	}
+}
+
+func (m *browseModel) clearAllFilters() {
+	m.agents.Sel, m.repos.Sel, m.tags.Sel = "", "", ""
+	m.fuzzyQuery = ""
+	m.cursor, m.listTop = 0, 0
+	if m.query != "" {
+		m.query = ""
+		m.loadAll()
+		return
+	}
+	m.rebuild()
+}
+
+func (m *browseModel) cycleTab(delta int) {
+	m.tab = detailTab((int(m.tab) + delta + int(numDetailTabs)) % int(numDetailTabs))
+	m.detailOf = "" // force a re-render of the pane's content
+	m.detail.GotoTop()
+}
+
+func clampIndex(i, n int) int {
+	if i >= n {
+		i = n - 1
+	}
+	if i < 0 {
+		i = 0
+	}
+	return i
+}
+
+// keepVisible scrolls a facet panel's window so its cursor row is shown.
+func (f *facet) keepVisible(h int) {
+	if h <= 0 {
+		return
+	}
+	if f.cursor < f.top {
+		f.top = f.cursor
+	}
+	if f.cursor >= f.top+h {
+		f.top = f.cursor - h + 1
+	}
+	if f.top < 0 {
+		f.top = 0
+	}
+}
+
+// ---------------------------------------------------------------------
+// Input modes and the action menu
+// ---------------------------------------------------------------------
+
 // startInput begins a free-text input mode: the prompt is drawn by the
 // interface, and the text input owns the keyboard until submitted or
 // cancelled. The returned command starts the input cursor blinking.
-//
-// The input's placeholder is deliberately left blank (change
-// choose-from-known-values, task 3.1) - it used to be assigned mode.prompt(),
-// which is also what m.inputLabel renders right before the input box, so a
-// prompt read "switch to profile: switch to profile:" on screen (the label,
-// shown by View(), immediately followed by the same text again as the empty
-// field's placeholder). A prompt's label is only ever shown once now.
 func (m *browseModel) startInput(mode inputMode) (tea.Model, tea.Cmd) {
 	m.mode = mode
 	m.inputLabel = mode.prompt()
@@ -615,216 +834,79 @@ func (m *browseModel) startInput(mode inputMode) (tea.Model, tea.Cmd) {
 	if m.input.Width < 10 {
 		m.input.Width = 10
 	}
-	cmd := m.input.Focus()
-	return m, cmd
-}
-
-// startSelect begins the one selection mode (design.md decision 1), used by
-// every prompt whose valid values are already known to the program: the
-// profile switch, the agent filter, and the tag filter. target names which
-// of those the selection is for; candidates is what's offered.
-//
-// An empty candidate set is reported and applies nothing rather than
-// entering selection mode over an empty list (design.md decision 2
-// consequence; task 1.4) - there is nothing useful to choose from, and a
-// value that would return nothing is not a useful choice.
-func (m *browseModel) startSelect(target inputMode, candidates []string) (tea.Model, tea.Cmd) {
-	if len(candidates) == 0 {
-		m.notice = "no " + selectNoun(target) + " to choose from."
-		return m, nil
-	}
-	m.mode = modeSelect
-	m.selectFor = target
-	m.selectAll = candidates
-	m.selectFiltered = candidates
-	// -1: nothing highlighted yet, mirroring the blank default a free-text
-	// prompt starts with. Confirming right away (Enter with no navigation
-	// AND no typing) therefore behaves exactly like the old empty-submit
-	// did - applies nothing, except on a filter prompt, where it clears
-	// that filter (design.md decision 4) - rather than surprising the user
-	// by acting on whatever candidate happens to sort first. Once the user
-	// types anything that narrows the list, refilterSelect auto-highlights
-	// the best match instead (task 3.2 fix) - see its comment.
-	m.selectCursor = -1
-	m.selectCursorTouched = false
-	m.inputLabel = target.prompt()
-	m.input.Prompt = ""
-	m.input.Placeholder = ""
-	m.input.SetValue("")
-	m.input.Width = m.width - len(m.inputLabel) - 2
-	if m.input.Width < 10 {
-		m.input.Width = 10
-	}
-	cmd := m.input.Focus()
-	return m, cmd
-}
-
-// selectNoun names what's missing in the empty-candidate-set notice.
-func selectNoun(target inputMode) string {
-	switch target {
-	case modeAgentFilter:
-		return "agents"
-	case modeTagFilter:
-		return "tags"
-	case modeProfile:
-		return "other profiles"
-	}
-	return "values"
+	m.notice = ""
+	return m, m.input.Focus()
 }
 
 func (m *browseModel) updateInputMode(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		switch msg.Type {
+	if key, ok := msg.(tea.KeyMsg); ok {
+		switch key.Type {
 		case tea.KeyEsc, tea.KeyCtrlC:
 			m.mode = modeNone
 			m.input.Blur()
 			m.notice = ""
 			return m, nil
 		case tea.KeyEnter:
-			if m.mode == modeSelect {
-				return m, m.submitSelect()
+			if m.mode == modeMenu {
+				return m, m.runMenuSelection()
 			}
-			cmd := m.submitInput(strings.TrimSpace(m.input.Value()))
-			return m, cmd
+			return m, m.submitInput(strings.TrimSpace(m.input.Value()))
 		case tea.KeyUp:
-			if m.mode == modeSelect {
-				m.moveSelectCursor(-1)
+			if m.mode == modeMenu {
+				m.menuCursor = clampIndex(m.menuCursor-1, len(m.menuFiltered))
 				return m, nil
 			}
 		case tea.KeyDown:
-			if m.mode == modeSelect {
-				m.moveSelectCursor(1)
+			if m.mode == modeMenu {
+				m.menuCursor = clampIndex(m.menuCursor+1, len(m.menuFiltered))
 				return m, nil
 			}
 		}
 	}
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
-	if m.mode == modeSelect {
-		m.refilterSelect()
+	switch m.mode {
+	case modeMenu:
+		m.refilterMenu()
+	case modeFilter:
+		// The narrowing filter applies as it is typed, which is what makes
+		// it feel like filtering rather than like filling in a form.
+		m.applyFilterText(m.input.Value())
 	}
 	return m, cmd
 }
 
-// moveSelectCursor shifts the highlighted candidate by delta, clamped to
-// the narrowed candidate list. -1 (nothing highlighted) is a valid position,
-// reachable again by moving up from the first candidate - so a user who
-// navigated past the value they wanted can always get back to "apply
-// nothing" without cancelling and reopening the prompt.
-func (m *browseModel) moveSelectCursor(delta int) {
-	m.selectCursorTouched = true
-	m.selectCursor += delta
-	if m.selectCursor < -1 {
-		m.selectCursor = -1
-	}
-	if last := len(m.selectFiltered) - 1; m.selectCursor > last {
-		m.selectCursor = last
-	}
-}
-
-// refilterSelect narrows selectAll to selectFiltered by the input's current
-// text (task 1.1: "narrowable by typing"), reusing the exact fuzzy matcher
-// plain typing already uses to narrow the loaded rows (design.md non-goal:
-// no new fuzzy-matching change) rather than a second matching scheme.
-//
-// Established cause of "choosing a profile has no effect" (change
-// fix-row-newlines-and-profile-switch, task 3.1, reported after this
-// change's first pass wrongly concluded the switch path had no bug):
-// typing to narrow the list used to never move selectCursor off -1, only
-// clamp it. The real, reported user flow is open the prompt, type to
-// narrow ("claude"), press Enter - never touching Up/Down at all. With the
-// old clamp-only logic that flow left the cursor at -1 even after typing
-// narrowed the list to exactly the wanted candidate, so Enter submitted an
-// empty value and submitInput's "empty value applies nothing" case fired
-// silently - the switch (or agent/tag filter - all three selection prompts
-// share this function) never happened, and nothing on screen indicated why.
-//
-// Fix: once the user has typed something that narrows the list AND has
-// never explicitly navigated with Up/Down (selectCursorTouched), the best
-// (first-ranked) match is auto-highlighted, so Enter after typing selects
-// it - matching what typing-then-Enter looks like it should do. Clearing
-// the typed text back to blank (still untouched) reverts to -1, exactly
-// mirroring the state the prompt opened in, so "open and confirm
-// immediately" (design.md decision 4 from choose-from-known-values:
-// confirming with nothing selected applies nothing, except a filter
-// prompt clears that filter) is unchanged - that convention only ever
-// covered the case where the user typed nothing, not the case where
-// typing had already narrowed the list to a single obvious choice. The
-// moment the user does press Up/Down, selectCursorTouched latches true
-// and this function goes back to pure clamping, so a cursor the user
-// positioned on purpose is never silently overridden by further typing.
-func (m *browseModel) refilterSelect() {
-	q := m.input.Value()
-	if q == "" {
-		m.selectFiltered = m.selectAll
-	} else {
-		ranks := fuzzy.RankFindFold(q, m.selectAll)
-		out := make([]string, 0, len(ranks))
-		for _, r := range ranks {
-			out = append(out, m.selectAll[r.OriginalIndex])
-		}
-		m.selectFiltered = out
-	}
-
-	if !m.selectCursorTouched {
-		if q != "" && len(m.selectFiltered) > 0 {
-			m.selectCursor = 0
-		} else {
-			m.selectCursor = -1
-		}
+// applyFilterText routes / to whatever the focused panel narrows by: the
+// session list's fuzzy query, or a facet panel's own row filter.
+func (m *browseModel) applyFilterText(v string) {
+	if f := m.facetFor(m.focus); f != nil {
+		f.filter = v
+		m.rebuild()
 		return
 	}
-
-	if last := len(m.selectFiltered) - 1; m.selectCursor > last {
-		m.selectCursor = last
-	}
-}
-
-// submitSelect applies the highlighted candidate, if any, for the prompt
-// modeSelect was entered for. It delegates to submitInput by temporarily
-// restoring m.mode to m.selectFor, so the one switch in submitInput that
-// already knows how to apply each of these three prompts' values needs no
-// second, selection-specific copy. Confirming with nothing highlighted
-// (task 1.3) is exactly submitInput's existing empty-value case: applies
-// nothing, except on a filter prompt (agent/tag), where it clears that
-// filter - the same convention every other prompt already has.
-func (m *browseModel) submitSelect() tea.Cmd {
-	value := ""
-	if m.selectCursor >= 0 && m.selectCursor < len(m.selectFiltered) {
-		value = m.selectFiltered[m.selectCursor]
-	}
-	m.mode = m.selectFor
-	return m.submitInput(value)
+	m.fuzzyQuery = v
+	m.cursor, m.listTop = 0, 0
+	m.rebuild()
 }
 
 // submitInput applies the submitted value for the current input mode. An
 // empty value applies nothing (spec session-search, "Submitting an empty
 // value"): clearing a filter is done by submitting a blank line to that
-// filter's prompt - an explicit action, not an accident. Returns the
-// command to run after applying (the profile switch, when the mode was a
-// profile switch).
+// filter's prompt - an explicit action, not an accident.
 func (m *browseModel) submitInput(value string) tea.Cmd {
 	mode := m.mode
 	m.mode = modeNone
 	m.input.Blur()
 
 	switch mode {
-	case modeFuzzyFilter:
-		m.fuzzyQuery = value // blank clears this one filter, leaving the rest
-	case modeRepoFilter:
-		m.repo = value // blank clears this one filter, leaving the rest
-	case modeAgentFilter:
-		m.agent = value
-	case modeTagFilter:
-		m.tag = value
+	case modeFilter:
+		m.applyFilterText(value)
+		return nil
 	case modeSearchPhrase:
 		m.query = value
-	case modeProfile:
-		if value == "" {
-			return nil // submitting empty to the profile prompt applies nothing
-		}
-		return m.switchProfileCmd(value)
+		m.cursor, m.listTop = 0, 0
+		m.loadAll()
+		return nil
 	case modeAddTag:
 		if value != "" {
 			if it := m.current(); it != nil {
@@ -865,9 +947,109 @@ func (m *browseModel) submitInput(value string) tea.Cmd {
 			}
 		}
 	}
-	m.reload()
+	// An annotation edit changes the tag facet and the rows themselves, so
+	// the corpus is re-read rather than re-sliced.
+	m.detailOf = ""
+	m.loadAll()
 	return nil
 }
+
+// menuAction is one entry in the action menu: a label, and what pressing
+// Enter on it does.
+type menuAction struct {
+	label string
+	run   func(*browseModel) tea.Cmd
+}
+
+// menuFor is the action menu's contents for the focused panel. Every entry
+// here is also a key binding; the menu exists so the actions available
+// right now can be *read* rather than recalled, which is the job `x` does
+// in lazygit.
+func (m *browseModel) menuFor(p panelID) []menuAction {
+	var out []menuAction
+	switch p {
+	case panelSessions:
+		out = append(out,
+			menuAction{"resume this session", func(m *browseModel) tea.Cmd {
+				mod, cmd := m.activate()
+				*m = *mod.(*browseModel)
+				return cmd
+			}},
+			menuAction{"add a tag", func(m *browseModel) tea.Cmd { _, c := m.startInput(modeAddTag); return c }},
+			menuAction{"remove a tag", func(m *browseModel) tea.Cmd { _, c := m.startInput(modeRemoveTag); return c }},
+			menuAction{"add a comment", func(m *browseModel) tea.Cmd { _, c := m.startInput(modeAddComment); return c }},
+			menuAction{"remove a comment", func(m *browseModel) tea.Cmd { _, c := m.startInput(modeRemoveComment); return c }},
+			menuAction{"filter these sessions", func(m *browseModel) tea.Cmd { _, c := m.startInput(modeFilter); return c }},
+		)
+	case panelProfiles:
+		out = append(out, menuAction{"switch to this profile", func(m *browseModel) tea.Cmd {
+			mod, cmd := m.activate()
+			*m = *mod.(*browseModel)
+			return cmd
+		}})
+	case panelAgents, panelRepos, panelTags:
+		out = append(out,
+			menuAction{"filter by this " + strings.TrimSuffix(strings.ToLower(p.title()), "s"), func(m *browseModel) tea.Cmd {
+				mod, cmd := m.activate()
+				*m = *mod.(*browseModel)
+				return cmd
+			}},
+			menuAction{"clear this filter", func(m *browseModel) tea.Cmd { m.clearFocused(); return nil }},
+			menuAction{"narrow this panel", func(m *browseModel) tea.Cmd { _, c := m.startInput(modeFilter); return c }},
+		)
+	}
+	// Always available, listed last so the panel's own actions lead.
+	return append(out,
+		menuAction{"set the search phrase", func(m *browseModel) tea.Cmd { _, c := m.startInput(modeSearchPhrase); return c }},
+		menuAction{"clear all filters", func(m *browseModel) tea.Cmd { m.clearAllFilters(); return nil }},
+		menuAction{"refresh the index", func(m *browseModel) tea.Cmd { m.notice = "refreshing index..."; return m.refreshCmd() }},
+		menuAction{"show all key bindings", func(m *browseModel) tea.Cmd { m.help = true; return nil }},
+	)
+}
+
+func (m *browseModel) openMenu() (tea.Model, tea.Cmd) {
+	m.menuAll = m.menuFor(m.focus)
+	m.menuFiltered = m.menuAll
+	m.menuCursor = 0
+	return m.startInput(modeMenu)
+}
+
+func (m *browseModel) refilterMenu() {
+	q := m.input.Value()
+	if q == "" {
+		m.menuFiltered = m.menuAll
+		m.menuCursor = clampIndex(m.menuCursor, len(m.menuFiltered))
+		return
+	}
+	labels := make([]string, len(m.menuAll))
+	for i, a := range m.menuAll {
+		labels[i] = a.label
+	}
+	ranks := fuzzy.RankFindFold(q, labels)
+	out := make([]menuAction, 0, len(ranks))
+	for _, r := range ranks {
+		out = append(out, m.menuAll[r.OriginalIndex])
+	}
+	m.menuFiltered = out
+	m.menuCursor = 0
+}
+
+// runMenuSelection closes the menu and runs the highlighted action. Unlike
+// the value-selection prompt it replaced, the menu always has a highlighted
+// entry: every entry is a verb the user asked for by opening the menu, so
+// there is no "apply nothing" position to defend - Esc is that.
+func (m *browseModel) runMenuSelection() tea.Cmd {
+	m.mode = modeNone
+	m.input.Blur()
+	if m.menuCursor < 0 || m.menuCursor >= len(m.menuFiltered) {
+		return nil
+	}
+	return m.menuFiltered[m.menuCursor].run(m)
+}
+
+// ---------------------------------------------------------------------
+// Commands
+// ---------------------------------------------------------------------
 
 // switchProfileCmd resolves name to a profile and opens that profile's own
 // database (one file per profile - sessions from two profiles can never
@@ -909,79 +1091,339 @@ func (m browseModel) refreshCmd() tea.Cmd {
 }
 
 // ---------------------------------------------------------------------
-// Layout and View
+// Layout
 // ---------------------------------------------------------------------
 
-// separatorLines is how many separator rules View() actually draws: one
-// above the list and one between the list and the detail pane. listHeight
-// and detailHeight must budget for both, or the rendered frame ends up one
-// line taller than the terminal and the terminal scrolls it - silently
-// pushing the header (profile, active filters) off the top of the screen.
-// That was a pre-existing off-by-one (found and fixed while verifying this
-// change over a real pty, task 5.2/5.3 - unrelated to the key rebinding
-// itself; see devdocs/fyi.md) that only a real terminal's own scrolling
-// could surface: a string comparison in a unit test has no terminal height
-// to overflow.
-const separatorLines = 2
+// minSidebarWidth is the terminal width below which the side panels are
+// not drawn at all. Under it there is no width left for a session row
+// after a usable sidebar, and a sidebar that squeezes the rows it exists
+// to filter is worse than no sidebar: the Sessions and Detail panes take
+// the whole screen instead, which is the pre-panel layout and still a
+// complete interface.
+const minSidebarWidth = 76
 
-func (m browseModel) listHeight() int {
-	avail := m.height - m.headerLines() - m.footerLines() - separatorLines
+// geometry is the whole frame's arithmetic in one place. Every height here
+// is an *outer* height, borders included, and the panels in each column
+// sum to exactly bodyHeight - if they did not, the rendered frame would be
+// taller than the terminal and the terminal would scroll it, silently
+// pushing the top panel off the screen. That failure mode is invisible to
+// a unit test comparing strings, which is why it is computed once here
+// rather than per-panel at draw time.
+type geometry struct {
+	sidebar       bool
+	leftWidth     int
+	rightWidth    int
+	bodyHeight    int
+	profilesH     int
+	agentsH       int
+	reposH        int
+	tagsH         int
+	sessionsH     int
+	detailH       int
+	sessionsInner int
+	detailInner   int
+}
+
+func (m browseModel) geometry() geometry {
+	g := geometry{}
+
+	// One line for the footer, and one more for the prompt when a prompt
+	// is open.
+	g.bodyHeight = m.height - 1
 	if m.mode != modeNone {
-		avail-- // the input line
+		g.bodyHeight--
 	}
-	d := avail * 2 / 5
-	if d < 4 {
-		d = 4
+	if g.bodyHeight < 6 {
+		g.bodyHeight = 6
 	}
-	l := avail - d
-	if l < 1 {
-		l = 1
+
+	g.sidebar = m.width >= minSidebarWidth
+	if g.sidebar {
+		g.leftWidth = m.width * 3 / 10
+		if g.leftWidth < 22 {
+			g.leftWidth = 22
+		}
+		if g.leftWidth > 34 {
+			g.leftWidth = 34
+		}
 	}
-	return l
+	g.rightWidth = m.width - g.leftWidth
+
+	// Left column: Profiles and Agents are short, known-length lists and
+	// get only what they need; Repos and Tags share whatever is left, with
+	// Repos favoured because it is the longest list on a real machine.
+	if g.sidebar {
+		g.profilesH = boxHeight(len(m.profiles_.rows), 1, 4)
+		g.agentsH = boxHeight(len(m.agents.rows), 1, 5)
+		rest := g.bodyHeight - g.profilesH - g.agentsH
+		if rest < 8 {
+			// Too short to give all four panels a usable window: drop Tags
+			// and let Repos have the remainder, rather than rendering two
+			// panels one row tall each.
+			g.reposH = rest
+			g.tagsH = 0
+			if g.reposH < 3 {
+				g.agentsH += g.reposH - 3
+				g.reposH = 3
+			}
+		} else {
+			g.reposH = rest * 3 / 5
+			g.tagsH = rest - g.reposH
+		}
+	}
+
+	// Right column: the session list gets the larger share, the detail
+	// pane the rest - the same 3:2 split the stacked layout used.
+	g.sessionsH = g.bodyHeight * 3 / 5
+	if g.sessionsH < 4 {
+		g.sessionsH = 4
+	}
+	g.detailH = g.bodyHeight - g.sessionsH
+	if g.detailH < 4 {
+		g.detailH = 4
+		g.sessionsH = g.bodyHeight - g.detailH
+	}
+	g.sessionsInner = maxInt(g.sessionsH-2, 0)
+	g.detailInner = maxInt(g.detailH-2, 0)
+	return g
 }
 
-func (m browseModel) detailHeight() int {
-	avail := m.height - m.headerLines() - m.footerLines() - separatorLines
-	if m.mode != modeNone {
-		avail--
+// boxHeight is the outer height a panel needs to show n rows, clamped to
+// between min and max content rows.
+func boxHeight(n, minRows, maxRows int) int {
+	if n < minRows {
+		n = minRows
 	}
-	d := avail * 2 / 5
-	if d < 4 {
-		d = 4
+	if n > maxRows {
+		n = maxRows
 	}
-	return d
+	return n + 2
 }
 
-func (m browseModel) headerLines() int { return 2 }
-func (m browseModel) footerLines() int {
-	if m.notice != "" {
-		return 1
+func maxInt(a, b int) int {
+	if a > b {
+		return a
 	}
-	return 1
+	return b
 }
 
-// rowDecorationWidth is the number of columns View() always draws in front
-// of a row's own content: the two-column selection marker "▸ " on the
-// selected row, and equal padding "  " on every other row (design.md
-// decision 1 / fix-row-width-budget: the width handed to row rendering
-// must already exclude this, not have it added on afterwards - trimming a
-// styled row after the fact risks cutting inside an ANSI escape sequence).
+// facetInnerHeight is how many rows the given side panel can show - what
+// the movement keys page by.
+func (m browseModel) facetInnerHeight(p panelID) int {
+	g := m.geometry()
+	switch p {
+	case panelProfiles:
+		return maxInt(g.profilesH-2, 0)
+	case panelAgents:
+		return maxInt(g.agentsH-2, 0)
+	case panelRepos:
+		return maxInt(g.reposH-2, 0)
+	case panelTags:
+		return maxInt(g.tagsH-2, 0)
+	}
+	return 0
+}
+
+// ---------------------------------------------------------------------
+// View
+// ---------------------------------------------------------------------
+
+// rowDecorationWidth is the number of columns every list draws in front of
+// a row's own content: the two-column selection marker on the selected row
+// and equal padding on every other row. The width handed to row rendering
+// must already exclude this rather than have it added on afterwards -
+// trimming a styled row after the fact risks cutting inside an ANSI escape
+// sequence (change fix-row-width-budget).
 const rowDecorationWidth = 2
+
+// facetDecorationWidth is the same budget for a side panel's rows, which
+// carry one column more: the cursor mark, the "this value is applied" mark,
+// and a separating space.
+const facetDecorationWidth = 3
 
 func (m browseModel) View() string {
 	if m.help {
 		return m.helpView()
 	}
-	if m.mode == modeSelect {
-		return m.selectView()
+	g := m.geometry()
+
+	right := stackPanels(m.sessionsPanel(g), m.detailPanel(g))
+	body := right
+	if g.sidebar {
+		left := stackPanels(
+			m.facetPanel(panelProfiles, &m.profiles_, g.leftWidth, g.profilesH, ""),
+			m.facetPanel(panelAgents, &m.agents, g.leftWidth, g.agentsH, m.agents.Sel),
+			m.facetPanel(panelRepos, &m.repos, g.leftWidth, g.reposH, m.repos.Sel),
+			m.facetPanel(panelTags, &m.tags, g.leftWidth, g.tagsH, m.tags.Sel),
+		)
+		body = joinColumns(left, right)
 	}
-	opts := RenderOptions{Width: m.width, Style: m.style}
-	// The detail pane carries no decoration, so it renders at the full
-	// width; only list rows need the decoration reserved out of their
-	// budget before shortening runs (RenderRow itself decides what to
-	// shorten - never trim its output afterwards).
-	rowOpts := opts
-	rowOpts.Width -= rowDecorationWidth
+
+	// The action menu is a popup over the frame, not a pane that displaces
+	// it: it is a momentary question about the panel you are already
+	// looking at, and moving the layout out from under that question is
+	// exactly the wrong answer to it.
+	if m.mode == modeMenu {
+		body = overlay(body, m.menuPopup())
+	}
+
+	var b strings.Builder
+	b.WriteString(body)
+	b.WriteString("\n")
+	if m.mode != modeNone {
+		fmt.Fprintf(&b, "%s%s\n", m.inputLabel, m.input.View())
+	}
+	b.WriteString(m.footer())
+	return b.String()
+}
+
+// menuPopupWidth is the popup's width: wide enough for the longest action
+// label the menu ever offers, narrow enough to leave the frame underneath
+// recognisable.
+const menuPopupWidth = 34
+
+// menuPopup renders the action menu as a bordered box to be composited over
+// the frame. It sizes itself to what it is offering, so a menu narrowed by
+// typing shrinks to the matches rather than leaving the frame covered by
+// blank rows.
+func (m browseModel) menuPopup() string {
+	width := minInt(menuPopupWidth, maxInt(m.width-4, 12))
+	rows := minInt(maxInt(len(m.menuFiltered), 1), maxInt(m.height-6, 3))
+	box := panelBox{
+		Title:   m.focus.title() + " actions",
+		Width:   width,
+		Height:  rows + 2,
+		Focused: true,
+		Style:   m.style,
+	}
+	if len(m.menuFiltered) == 0 {
+		box.Lines = append(box.Lines, style(" no matching action", ansiDim, m.style))
+		return box.render()
+	}
+	top := 0
+	if m.menuCursor >= rows {
+		top = m.menuCursor - rows + 1
+	}
+	for i := top; i < minInt(top+rows, len(m.menuFiltered)); i++ {
+		marker := "  "
+		if i == m.menuCursor {
+			marker = "▸ "
+		}
+		line := marker + truncateToWidth(m.menuFiltered[i].label, box.innerWidth()-rowDecorationWidth)
+		if i == m.menuCursor && m.style {
+			line = highlightLine(padToWidth(line, box.innerWidth()))
+		}
+		box.Lines = append(box.Lines, line)
+	}
+	return box.render()
+}
+
+// facetPanel draws one side panel. sel is the value currently applied by
+// this panel, marked so the applied filter is distinguishable from wherever
+// the cursor happens to be sitting - the two are independent, and conflating
+// them is what makes a panel feel like it filters on hover.
+func (m browseModel) facetPanel(id panelID, f *facet, width, height int, sel string) panelBox {
+	box := panelBox{
+		Number:  id.jumpKey(),
+		Title:   id.title(),
+		Width:   width,
+		Height:  height,
+		Focused: m.focus == id,
+		Style:   m.style,
+	}
+	if height <= 0 {
+		return box
+	}
+	if f.filter != "" {
+		box.Count = "/" + truncateToWidth(sanitizeSingleLine(f.filter), 8)
+	} else if id == panelProfiles {
+		box.Count = ""
+	} else if sel != "" {
+		box.Count = "filtered"
+	}
+
+	inner := box.innerWidth()
+	h := box.innerHeight()
+	f.keepVisible(h)
+	end := minInt(f.top+h, len(f.rows))
+	for i := f.top; i < end; i++ {
+		r := f.rows[i]
+
+		// Three columns of decoration, always: a cursor mark, an "applied"
+		// mark, and a separating space. They are two independent facts -
+		// where the cursor is, and which value is actually filtering - and
+		// giving each its own column is what keeps them from being read as
+		// one. Only the focused panel draws a pointer; an unfocused panel
+		// marks its cursor row faintly, so five arrows are never on screen
+		// at once competing to be the one that Enter acts on.
+		cursorMark := " "
+		if i == f.cursor {
+			cursorMark = "·"
+			if m.focus == id {
+				cursorMark = "▸"
+			}
+		}
+
+		// The count is right-aligned against the panel edge; the label
+		// takes whatever is left. Both are sanitized: a repo path or a tag
+		// is free text from a session, and a control character in it would
+		// otherwise break the box open.
+		count := ""
+		if id != panelProfiles {
+			count = strconv.Itoa(r.Count)
+		}
+		labelWidth := inner - facetDecorationWidth - len(count)
+		if count != "" {
+			labelWidth--
+		}
+		if labelWidth < 1 {
+			labelWidth = 1
+		}
+		label := truncateToWidth(sanitizeSingleLine(r.Label), labelWidth)
+
+		// An applied value, and the active profile, are marked in the text
+		// itself rather than by colour alone, so the state survives
+		// NO_COLOR (spec session-search, "Styling disabled by the
+		// environment").
+		appliedMark := " "
+		if (id == panelProfiles && r.Value == m.profileName) ||
+			(id != panelProfiles && r.Value != "" && r.Value == sel) {
+			appliedMark = "●"
+			label = style(label, ansiBold, m.style)
+		}
+
+		line := cursorMark + appliedMark + " " + label
+		if count != "" {
+			pad := inner - visibleWidth(line) - len(count)
+			if pad < 1 {
+				pad = 1
+			}
+			line += strings.Repeat(" ", pad) + style(count, ansiDim, m.style)
+		}
+		if i == f.cursor && m.focus == id && m.style {
+			line = highlightLine(padToWidth(line, inner))
+		}
+		box.Lines = append(box.Lines, line)
+	}
+	if len(f.rows) == 0 {
+		box.Lines = append(box.Lines, style("   (none)", ansiDim, m.style))
+	}
+	return box
+}
+
+// sessionsPanel draws the session list.
+func (m browseModel) sessionsPanel(g geometry) panelBox {
+	box := panelBox{
+		Number:  panelSessions.jumpKey(),
+		Title:   panelSessions.title(),
+		Count:   m.sessionsCount(),
+		Width:   g.rightWidth,
+		Height:  g.sessionsH,
+		Focused: m.focus == panelSessions,
+		Style:   m.style,
+	}
+
+	rowOpts := RenderOptions{Width: box.innerWidth() - rowDecorationWidth, Style: m.style}
 	if rowOpts.Width < 1 {
 		// Never pass <= 0 through to RenderRow: 0/negative is that
 		// function's "width wasn't set at all, use the default" sentinel,
@@ -989,156 +1431,113 @@ func (m browseModel) View() string {
 		rowOpts.Width = 1
 	}
 
-	var b strings.Builder
-	// Header line 1: the active profile (always identifiable - spec
-	// session-search, "Active profile is visible while browsing") and every
-	// filter in effect (spec, "The filters currently in effect SHALL be
-	// visible while browsing"). repo, query, and the fuzzy filter below are
-	// free text typed or pasted directly into a prompt (design.md decision
-	// 3: the repo filter stays free text; the search phrase and fuzzy
-	// filter always have) and so can carry a control character the same way
-	// any other session text can - sanitized here for the same reason row
-	// text is (change fix-row-newlines-and-profile-switch, task 1.3: apply
-	// in every single-line context, including the header).
-	fmt.Fprintf(&b, "%s", style("profile: "+sanitizeSingleLine(m.profileName), ansiBold, m.style))
-	if m.repo != "" {
-		fmt.Fprintf(&b, "  repo: %s", sanitizeSingleLine(m.repo))
-	}
-	if m.agent != "" {
-		fmt.Fprintf(&b, "  agent: %s", sanitizeSingleLine(m.agent))
-	}
-	if m.tag != "" {
-		fmt.Fprintf(&b, "  tag: %s", sanitizeSingleLine(m.tag))
-	}
-	if m.query != "" {
-		fmt.Fprintf(&b, "  search: %q", sanitizeSingleLine(m.query))
-	}
-	if m.repo == "" && m.agent == "" && m.tag == "" && m.query == "" {
-		b.WriteString("  (no filters)")
-	}
-	b.WriteString("\n")
-
-	// Header line 2: the in-process fuzzy filter box, so the user always
-	// sees what typing will narrow by.
-	fmt.Fprintf(&b, "filter: %s\n", sanitizeSingleLine(m.fuzzyQuery))
-
-	b.WriteString(strings.Repeat("─", min(m.width, 120)) + "\n")
-
-	// List pane.
-	listH := m.listHeight()
 	if len(m.visible) == 0 {
-		b.WriteString("No session matched the filters in use.\n")
-	} else {
-		m.keepCursorVisible()
-		end := m.listTop + listH
-		if end > len(m.visible) {
-			end = len(m.visible)
-		}
-		for i := m.listTop; i < end; i++ {
-			line := RenderRow(m.visible[i], rowOpts)
-			if i == m.cursor {
-				if m.style {
-					line = highlightLine(line)
-				}
-				line = "▸ " + line
-			} else {
-				line = "  " + line
+		box.Lines = append(box.Lines, style("  no session matches the filters in use.", ansiDim, m.style))
+		return box
+	}
+	h := box.innerHeight()
+	top := m.listTop
+	if top > maxInt(len(m.visible)-h, 0) {
+		top = maxInt(len(m.visible)-h, 0)
+	}
+	end := minInt(top+h, len(m.visible))
+	for i := top; i < end; i++ {
+		line := RenderRow(m.visible[i], rowOpts)
+		if i == m.cursor {
+			if m.style {
+				line = highlightLine(line)
 			}
-			b.WriteString(line)
-			b.WriteString("\n")
+			line = "▸ " + line
+		} else {
+			line = "  " + line
 		}
+		box.Lines = append(box.Lines, line)
 	}
-	b.WriteString(strings.Repeat("─", min(m.width, 120)) + "\n")
-
-	// Detail pane.
-	if m.detail != nil {
-		m.detail.SetContent(m.detailText(opts))
-		b.WriteString(m.detail.View())
-		b.WriteString("\n")
-	}
-
-	// Input line.
-	if m.mode != modeNone {
-		fmt.Fprintf(&b, "%s%s", m.inputLabel, m.input.View())
-		b.WriteString("\n")
-	}
-
-	// Footer: a transient notice if there is one, otherwise the common
-	// actions (spec session-search, "Common actions are visible without
-	// being requested").
-	if m.notice != "" {
-		b.WriteString(style(m.notice, ansiDim, m.style))
-	} else {
-		b.WriteString(style(browseActionsHint(), ansiDim, m.style))
-	}
-	return b.String()
+	return box
 }
 
-// selectView draws the one selection mode (design.md decision 1): the
-// prompt's own label, the narrowing text typed so far, and the candidates
-// it currently matches with the highlighted one marked - the same "▸ "/"  "
-// decoration and one-line-per-entry invariant fix-row-width-budget
-// established for session rows, applied here to candidate rows too (task
-// 1.1's "reused by every prompt" extends to how a candidate is drawn, not
-// only to how it is chosen).
-func (m browseModel) selectView() string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "%s", style("profile: "+sanitizeSingleLine(m.profileName), ansiBold, m.style))
-	b.WriteString("\n")
-	fmt.Fprintf(&b, "%s%s\n", m.inputLabel, m.input.View())
-	b.WriteString(strings.Repeat("─", min(m.width, 120)) + "\n")
-
-	if len(m.selectFiltered) == 0 {
-		b.WriteString("No values match.\n")
-	} else {
-		h := m.listHeight()
-		top := 0
-		if m.selectCursor >= h {
-			top = m.selectCursor - h + 1
-		}
-		end := top + h
-		if end > len(m.selectFiltered) {
-			end = len(m.selectFiltered)
-		}
-		candidateWidth := m.width - rowDecorationWidth
-		if candidateWidth < 1 {
-			candidateWidth = 1
-		}
-		for i := top; i < end; i++ {
-			// A tag candidate is free text a user typed when creating a
-			// tag (modeAddTag stays free text - design.md decision 3) and
-			// so can carry a control character the same as any other
-			// session text (change fix-row-newlines-and-profile-switch,
-			// task 1.3: "the selection candidates").
-			line := truncateToWidth(sanitizeSingleLine(m.selectFiltered[i]), candidateWidth)
-			if i == m.selectCursor {
-				if m.style {
-					line = highlightLine(line)
-				}
-				line = "▸ " + line
-			} else {
-				line = "  " + line
-			}
-			b.WriteString(line)
-			b.WriteString("\n")
-		}
+// sessionsCount is the top-border annotation: how many sessions are listed,
+// and out of how many the profile holds when that is a smaller number than
+// the whole - so "am I looking at everything?" is answered without reading
+// four panels.
+func (m browseModel) sessionsCount() string {
+	if len(m.visible) == len(m.all) {
+		return strconv.Itoa(len(m.all))
 	}
-	b.WriteString(strings.Repeat("─", min(m.width, 120)) + "\n")
-
-	if m.notice != "" {
-		b.WriteString(style(m.notice, ansiDim, m.style))
-	} else {
-		b.WriteString(style("↑/↓ move  enter choose  esc cancel, applies nothing", ansiDim, m.style))
-	}
-	return b.String()
+	return fmt.Sprintf("%d/%d", len(m.visible), len(m.all))
 }
 
-func (m browseModel) detailText(opts RenderOptions) string {
+// detailPanel draws the right-hand pane: a tab strip in the top border and
+// the selected session's content beneath it.
+func (m browseModel) detailPanel(g geometry) panelBox {
+	box := panelBox{
+		Title:   m.tabStrip(),
+		Width:   g.rightWidth,
+		Height:  g.detailH,
+		Focused: m.focus == panelDetail,
+		Style:   m.style,
+	}
+	opts := RenderOptions{Width: box.innerWidth(), Style: m.style}
+	content := m.detailContent(opts)
+
+	// The viewport owns the scrolling so a long transcript of prompts or a
+	// long comment list can be read without leaving the pane.
+	m.detail.Width = box.innerWidth()
+	m.detail.Height = box.innerHeight()
+	m.detail.SetContent(content)
+	for _, line := range strings.Split(m.detail.View(), "\n") {
+		box.Lines = append(box.Lines, truncateVisible(line, box.innerWidth()))
+	}
+	return box
+}
+
+// tabStrip is the tab row, drawn into the detail panel's top border. The
+// active tab is bold; the others are dim, so the strip reads as one
+// control rather than three titles.
+func (m browseModel) tabStrip() string {
+	parts := make([]string, 0, numDetailTabs)
+	for t := detailTab(0); t < numDetailTabs; t++ {
+		// The active tab is bracketed as well as bold: with NO_COLOR set,
+		// bold is suppressed along with everything else, and a tab strip
+		// where nothing marks the active tab is not a tab strip (spec
+		// session-search, "Styling disabled by the environment").
+		if t == m.tab {
+			parts = append(parts, style("["+t.title()+"]", ansiBold, m.style))
+		} else {
+			parts = append(parts, style(" "+t.title()+" ", ansiDim, m.style))
+		}
+	}
+	return strings.Join(parts, "")
+}
+
+func (m browseModel) detailContent(opts RenderOptions) string {
 	it := m.current()
 	if it == nil {
 		return "No session selected."
 	}
+	switch m.tab {
+	case tabPrompts:
+		return renderItemPrompts(m.db, *it, opts)
+	case tabComments:
+		return renderItemComments(m.db, *it, opts)
+	}
 	return renderItemDetail(m.db, *it, opts)
+}
+
+// footer is the bottom line: a transient notice when there is one,
+// otherwise the actions available in the focused panel right now (spec
+// session-search, "Common actions are visible without being requested").
+func (m browseModel) footer() string {
+	if m.notice != "" {
+		return style(truncateToWidth(sanitizeSingleLine(m.notice), m.width), ansiDim, m.style)
+	}
+	var parts []string
+	for _, a := range browseActions {
+		if a.showsFor(m.focus) {
+			parts = append(parts, a.key+" "+a.label)
+		}
+	}
+	return style(truncateToWidth(strings.Join(parts, "  "), m.width), ansiDim, m.style)
 }
 
 // highlightLine renders a selected row in reverse video. style() emits one
@@ -1152,73 +1551,125 @@ func highlightLine(line string) string {
 	return ansiReverse + strings.ReplaceAll(line, ansiReset, ansiReset+ansiReverse) + ansiReset
 }
 
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 // ---------------------------------------------------------------------
-// Help and action table (spec session-search, "The browser's actions are
-// discoverable")
+// Help and the action table
 // ---------------------------------------------------------------------
 
 type browseAction struct {
-	key    string
-	label  string
-	common bool // shown in the footer hint without being requested
+	key string
+	// label is the footer form: short, because the footer is one line and
+	// shares it with every other action available right now. help is the
+	// descriptive form for the overlay, which has room for a sentence;
+	// when it is empty the label is used for both.
+	label string
+	help  string
+	// panels, when non-empty, restricts the footer hint to those panels.
+	// Empty means "everywhere". The help overlay always lists everything.
+	panels []panelID
+	// footer marks the small set of actions worth spending footer columns
+	// on; the rest are discoverable through `x` and `?`.
+	footer bool
 }
 
-// browseActions is the single binding table (design.md decision 3): the
-// footer hints and the help overlay are both derived from it, so the keys
-// advertised can never drift from the keys actually bound. It transcribes
-// design.md decision 2's binding table exactly - do not add, remove, or
-// substitute a key here without also changing handleBrowseKey/
-// updateInputMode to match, and vice versa.
-var browseActions = []browseAction{
-	{"j/k, ↑/↓", "move selection", true},
-	{"Ctrl-D/Ctrl-U", "move by half a screen", false},
-	{"g/G", "first/last session", false},
-	{"enter", "resume selected session", true},
-	{"q, Ctrl-C", "quit", true},
-	{"?", "help overlay", true},
-	{"/", "filter the listed sessions", true},
-	{"s", "set the search phrase", true},
-	{"r", "repository filter", false},
-	{"a", "agent filter", false},
-	{"t", "tag filter", false},
-	{"p", "switch profile", false},
-	{"x", "clear all filters", false},
-	{"R", "refresh the index", false},
-	{"m/M", "add/remove a tag", true},
-	{"c/C", "add/remove a comment", true},
-	{"esc", "cancel input, apply nothing", false},
+// helpText is what the overlay lists: the descriptive form when there is
+// one, the footer form otherwise.
+func (a browseAction) helpText() string {
+	if a.help != "" {
+		return a.help
+	}
+	return a.label
 }
 
-func browseActionsHint() string {
-	var parts []string
-	for _, a := range browseActions {
-		if a.common {
-			parts = append(parts, a.key+" "+a.label)
+// scope names the panels an action is specific to, for the help overlay -
+// an action bound to Enter means three different things in three places,
+// and a list that does not say which is a list that cannot be trusted.
+func (a browseAction) scope() string {
+	if len(a.panels) == 0 || len(a.panels) >= int(numPanels)-1 {
+		return ""
+	}
+	names := make([]string, 0, len(a.panels))
+	for _, p := range a.panels {
+		names = append(names, p.title())
+	}
+	return "  (" + strings.Join(names, ", ") + ")"
+}
+
+func (a browseAction) showsFor(p panelID) bool {
+	if !a.footer {
+		return false
+	}
+	if len(a.panels) == 0 {
+		return true
+	}
+	for _, q := range a.panels {
+		if q == p {
+			return true
 		}
 	}
-	return strings.Join(parts, "  ")
+	return false
+}
+
+// browseActions is the single binding table: the footer hints and the help
+// overlay are both derived from it, so the keys advertised can never drift
+// from the keys actually bound. Do not add, remove, or substitute a key
+// here without also changing handleBrowseKey to match, and vice versa.
+var browseActions = []browseAction{
+	{key: "1-5", label: "jump to panel", help: "focus the panel with that number"},
+	{key: "tab", label: "panel", help: "focus the next panel (shift-tab: previous)", footer: true},
+	{key: "j/k, ↑/↓", label: "move in panel"},
+	{key: "Ctrl-D/U", label: "move by half a panel"},
+	{key: "g/G", label: "first/last row"},
+	{key: "enter", label: "resume", help: "resume the selected session", panels: []panelID{panelSessions}, footer: true},
+	{key: "enter", label: "filter", help: "filter the sessions by the selected value", panels: []panelID{panelAgents, panelRepos, panelTags}, footer: true},
+	{key: "enter", label: "switch", help: "switch to the selected profile", panels: []panelID{panelProfiles}, footer: true},
+	{key: "esc", label: "clear filter", help: "clear what this panel is filtering by", panels: []panelID{panelSessions, panelAgents, panelRepos, panelTags}, footer: true},
+	{key: "[/]", label: "tab", help: "previous/next tab in the detail pane", panels: []panelID{panelSessions, panelDetail}, footer: true},
+	{key: "/", label: "narrow", help: "narrow the focused panel's rows as you type", footer: true},
+	{key: "s", label: "search phrase", help: "full-text search over your own prompts"},
+	{key: "x", label: "menu", help: "action menu for the focused panel", footer: true},
+	{key: "X", label: "clear all filters"},
+	{key: "R", label: "refresh the index"},
+	{key: "m/M", label: "add/remove a tag", help: "add/remove a tag on the selected session"},
+	{key: "c/C", label: "add/remove a comment", help: "add/remove a comment on the selected session"},
+	{key: "?", label: "keys", help: "this list", footer: true},
+	{key: "q, Ctrl-C", label: "quit", footer: true},
 }
 
 func (m browseModel) helpView() string {
 	var b strings.Builder
-	b.WriteString("lazyrecall browse - key bindings\n\n")
+	b.WriteString(style("lazyrecall - key bindings", ansiBold, m.style) + "\n\n")
 	for _, a := range browseActions {
-		fmt.Fprintf(&b, "  %-22s %s\n", a.key, a.label)
+		fmt.Fprintf(&b, "  %-14s %s%s\n", a.key, a.helpText(), a.scope())
 	}
+	b.WriteString("\nPanels: 1 Profiles  2 Agents  3 Repos  4 Tags  5 Sessions  (tab reaches the detail pane)\n")
 	b.WriteString("\n")
-	b.WriteString(style("? or esc: close this help", ansiDim, m.style))
+	b.WriteString(style("any key: close this help", ansiDim, m.style))
 	return b.String()
 }
 
-// renderItemDetail renders the detail pane for one selected session: its
-// composite identifier, handle, working directory, agent, end state, topic,
-// and its comments and tags (spec session-search, "Session detail is shown
-// alongside the list"), styled to the same standard as a directly printed
-// listing (spec, "The browser is styled") - reusing RenderRow's own colour
-// choices field-for-field so the detail pane and the row list never
-// disagree about what a field means visually. The identifier and the
-// handle are deliberately left unstyled: they are the copyable, plain-text
-// forms the non-interactive commands accept (task 4.7).
+// ---------------------------------------------------------------------
+// Detail tabs
+// ---------------------------------------------------------------------
+
+// renderItemDetail renders the Detail tab for one selected session: its
+// composite identifier, handle, working directory, agent, end state, name
+// and topic, and its tags - styled to the same standard as a directly
+// printed listing (spec session-search, "The browser is styled"), reusing
+// RenderRow's own colour choices field-for-field so the detail pane and the
+// row list never disagree about what a field means visually. The identifier
+// and the handle are deliberately left unstyled: they are the copyable,
+// plain-text forms the non-interactive commands accept.
+//
+// Comments moved to their own tab (change lazy-style-browser); db is kept
+// in the signature because every tab is dispatched through one function
+// and a caller should not have to know which tab needs the database.
 func renderItemDetail(db *sqlitex.Runner, it search.Item, opts RenderOptions) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "id:     %s\n", it.SessionID)
@@ -1243,6 +1694,9 @@ func renderItemDetail(db *sqlitex.Runner, it search.Item, opts RenderOptions) st
 	if it.LastActivityAt != nil {
 		active := fmt.Sprintf("%s (%s)", it.LastActivityAt.Format(time.RFC3339), relativeTime(*it.LastActivityAt))
 		fmt.Fprintf(&b, "active: %s\n", style(active, ansiDim, opts.Style))
+	}
+	if it.MessageCount != nil {
+		fmt.Fprintf(&b, "msgs:   %d\n", *it.MessageCount)
 	}
 	// The name (when the user set one in the source tool) and the derived
 	// topic are shown on lines of their own here, unlike the row, where
@@ -1269,17 +1723,86 @@ func renderItemDetail(db *sqlitex.Runner, it search.Item, opts RenderOptions) st
 	}
 	b.WriteString("\n")
 
-	comments, cErr := annotate.CommentsForLineage(db, it.LineageID)
-	fmt.Fprint(&b, "\ncomments:\n")
-	if cErr != nil {
-		fmt.Fprintf(&b, "  error: %v\n", cErr)
-	} else if len(comments) == 0 {
-		b.WriteString("  (none)\n")
-	} else {
-		for _, c := range comments {
-			fmt.Fprintf(&b, "  [%d] %s: %s\n", c.ID, c.CreatedAt.Format(time.RFC3339), c.Body)
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// renderItemComments renders the Comments tab: LazyRecall's own annotations
+// for the session's lineage, with the ids the `comment rm` action and the
+// non-interactive command both take.
+func renderItemComments(db *sqlitex.Runner, it search.Item, opts RenderOptions) string {
+	comments, err := annotate.CommentsForLineage(db, it.LineageID)
+	if err != nil {
+		return "comments: " + err.Error()
+	}
+	if len(comments) == 0 {
+		return style("No comments on this session. Press c to add one.", ansiDim, opts.Style)
+	}
+	var b strings.Builder
+	for _, c := range comments {
+		fmt.Fprintf(&b, "%s %s\n",
+			style(fmt.Sprintf("[%d]", c.ID), ansiDim, opts.Style),
+			style(c.CreatedAt.Format("2006-01-02 15:04"), ansiDim, opts.Style))
+		for _, line := range wrapToWidth(c.Body, opts.Width-2) {
+			fmt.Fprintf(&b, "  %s\n", line)
 		}
 	}
-
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// promptTabLimit is how many of a session's prompts the Prompts tab reads.
+// A long session can hold hundreds; the point of the tab is to recognise
+// the session, which the first handful settles.
+const promptTabLimit = 40
+
+// renderItemPrompts renders the Prompts tab: what the user actually asked
+// in this session, which is usually the only thing they remember about it.
+func renderItemPrompts(db *sqlitex.Runner, it search.Item, opts RenderOptions) string {
+	prompts, err := search.PromptsForSession(db, it.SessionID, promptTabLimit)
+	if err != nil {
+		return "prompts: " + err.Error()
+	}
+	if len(prompts) == 0 {
+		return style("No indexed prompts for this session.", ansiDim, opts.Style)
+	}
+	var b strings.Builder
+	for i, p := range prompts {
+		fmt.Fprintf(&b, "%s\n", style(fmt.Sprintf("%d.", i+1), ansiDim, opts.Style))
+		for _, line := range wrapToWidth(p, opts.Width-2) {
+			fmt.Fprintf(&b, "  %s\n", line)
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// wrapToWidth breaks s into lines of at most w display columns, on word
+// boundaries where it can. Comment and prompt bodies are the only free-form
+// paragraphs the browser shows; every other surface is one line per item.
+func wrapToWidth(s string, w int) []string {
+	if w < 8 {
+		w = 8
+	}
+	var out []string
+	for _, para := range strings.Split(sanitizeMultiLine(s), "\n") {
+		words := strings.Fields(para)
+		if len(words) == 0 {
+			out = append(out, "")
+			continue
+		}
+		line := ""
+		for _, word := range words {
+			switch {
+			case line == "":
+				line = word
+			case visibleWidth(line)+1+visibleWidth(word) <= w:
+				line += " " + word
+			default:
+				out = append(out, line)
+				line = word
+			}
+		}
+		if line != "" {
+			out = append(out, line)
+		}
+	}
+	return out
 }
