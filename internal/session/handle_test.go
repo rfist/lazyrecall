@@ -22,3 +22,17 @@ func TestIsHandle(t *testing.T) {
 		}
 	}
 }
+
+func TestOriginValid(t *testing.T) {
+	valid := []Origin{OriginInteractive, OriginAutomated, OriginUnknown}
+	for _, o := range valid {
+		if !o.Valid() {
+			t.Errorf("Valid(%q) = false, want true", o)
+		}
+	}
+	for _, o := range []Origin{"", "script", "sdk-cli"} {
+		if o.Valid() {
+			t.Errorf("Valid(%q) = true, want false", o)
+		}
+	}
+}

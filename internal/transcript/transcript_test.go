@@ -745,3 +745,95 @@ func TestClaudeVocabNoCustomTitle(t *testing.T) {
 		t.Errorf("CustomTitle = %v, want nil when the session was never renamed", *res.CustomTitle)
 	}
 }
+
+// The following cover who drove a session, read from the "entrypoint"
+// field Claude Code stamps on transcript records: "cli" is a person at a
+// terminal, "sdk-cli" is an SDK or script. The mapping is an allowlist of
+// known-automated markers, so an unseen value falls through to interactive
+// - backwards, and a future Claude Code version's sessions would silently
+// vanish from listings.
+
+func TestClaudeVocabOriginInteractive(t *testing.T) {
+	dir := t.TempDir()
+	content := `{"type":"user","message":{"role":"user","content":"hello"},"entrypoint":"cli","timestamp":"2026-01-01T00:00:00Z"}
+`
+	p := writeFile(t, dir, "s.jsonl", content)
+	vocab, _ := VocabFor("claude")
+	res, err := Scan(p, 0, vocab)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Origin != session.OriginInteractive {
+		t.Errorf("origin = %v, want interactive for entrypoint cli", res.Origin)
+	}
+}
+
+func TestClaudeVocabOriginAutomated(t *testing.T) {
+	dir := t.TempDir()
+	content := `{"type":"user","message":{"role":"user","content":"hello"},"entrypoint":"sdk-cli","timestamp":"2026-01-01T00:00:00Z"}
+`
+	p := writeFile(t, dir, "s.jsonl", content)
+	vocab, _ := VocabFor("claude")
+	res, err := Scan(p, 0, vocab)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Origin != session.OriginAutomated {
+		t.Errorf("origin = %v, want automated for entrypoint sdk-cli", res.Origin)
+	}
+}
+
+// TestClaudeVocabOriginUnseenValueFallsThroughToInteractive: an entrypoint
+// value this code has never seen must not be treated as automated - it
+// falls through to interactive, i.e. to visible.
+func TestClaudeVocabOriginUnseenValueFallsThroughToInteractive(t *testing.T) {
+	dir := t.TempDir()
+	content := `{"type":"user","message":{"role":"user","content":"hello"},"entrypoint":"vscode","timestamp":"2026-01-01T00:00:00Z"}
+`
+	p := writeFile(t, dir, "s.jsonl", content)
+	vocab, _ := VocabFor("claude")
+	res, err := Scan(p, 0, vocab)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Origin != session.OriginInteractive {
+		t.Errorf("origin = %v, want interactive for an unseen entrypoint value", res.Origin)
+	}
+}
+
+// TestClaudeVocabOriginAbsentIsUnknown: pi, omp, and hermes record no
+// entrypoint field, and a Claude transcript that omits it too must come out
+// unknown - the zero value - with no heuristic invented.
+func TestClaudeVocabOriginAbsentIsUnknown(t *testing.T) {
+	dir := t.TempDir()
+	content := `{"type":"user","message":{"role":"user","content":"hello"},"timestamp":"2026-01-01T00:00:00Z"}
+`
+	p := writeFile(t, dir, "s.jsonl", content)
+	vocab, _ := VocabFor("claude")
+	res, err := Scan(p, 0, vocab)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Origin != session.OriginUnknown {
+		t.Errorf("origin = %v, want unknown when no record carries an entrypoint", res.Origin)
+	}
+}
+
+// TestClaudeVocabOriginMixedRecordsTakeStrongestSignal: one automated
+// record marks the whole session automated, even when the other records
+// say interactive.
+func TestClaudeVocabOriginMixedRecordsTakeStrongestSignal(t *testing.T) {
+	dir := t.TempDir()
+	content := `{"type":"user","message":{"role":"user","content":"hello"},"entrypoint":"cli","timestamp":"2026-01-01T00:00:00Z"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn"},"entrypoint":"sdk-cli","timestamp":"2026-01-01T00:00:01Z"}
+`
+	p := writeFile(t, dir, "s.jsonl", content)
+	vocab, _ := VocabFor("claude")
+	res, err := Scan(p, 0, vocab)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Origin != session.OriginAutomated {
+		t.Errorf("origin = %v, want automated: one automated record decides the session", res.Origin)
+	}
+}
