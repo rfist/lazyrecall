@@ -210,3 +210,39 @@ func TestPathResolutionOrder(t *testing.T) {
 		t.Errorf("with LAZYRECALL_CONFIG set, Path() = %q, want %q", got, want)
 	}
 }
+
+// single_install decides whether a source names a profile of its own or is
+// bundled into the primary one, and a profile's name is its database
+// filename - so it is stated per source, never inferred. See
+// TestProfileNameDoesNotDependOnHowRootsWereConfigured in internal/profile
+// for the failure this prevents.
+func TestSingleInstallDefaultsAndOverride(t *testing.T) {
+	t.Setenv("LAZYRECALL_CONFIG", filepath.Join(t.TempDir(), "absent.toml"))
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]bool{
+		"claude": false, "pi": true, "omp": true, "hermes": true,
+	} {
+		if got := cfg.Sources[name].SingleInstall; got != want {
+			t.Errorf("%s single_install = %v, want %v", name, got, want)
+		}
+	}
+
+	path := writeConfig(t, "[sources.pi]\nroots = [\"/tmp/pi\"]\nsingle_install = false\n")
+	t.Setenv("LAZYRECALL_CONFIG", path)
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Sources["pi"].SingleInstall {
+		t.Error("the file set single_install = false for pi but it stayed true")
+	}
+	if got := cfg.Origins["sources.pi.single_install"]; got != OriginFile {
+		t.Errorf("origin for sources.pi.single_install = %q, want %q", got, OriginFile)
+	}
+	if got := cfg.Origins["sources.claude.single_install"]; got != OriginDefault {
+		t.Errorf("origin for an untouched source = %q, want %q", got, OriginDefault)
+	}
+}

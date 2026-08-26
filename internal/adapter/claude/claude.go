@@ -31,7 +31,7 @@ func New() *Adapter { return &Adapter{} }
 func (*Adapter) Name() string { return "claude" }
 
 func (a *Adapter) Discover(p profile.Profile) ([]adapter.Discovered, error) {
-	root := p.ClaudeRoot
+	root := p.Roots[a.Name()]
 	if root == "" {
 		return nil, &adapter.Unavailable{Reason: "no Claude config root for this profile"}
 	}

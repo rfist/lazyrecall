@@ -21,7 +21,7 @@ func TestDiscover(t *testing.T) {
 	}
 
 	a := New()
-	p := profile.Profile{Name: "default", PiRoot: root}
+	p := profile.Profile{Name: "default", Roots: map[string]string{"pi": root}}
 	discovered, err := a.Discover(p)
 	if err != nil {
 		t.Fatal(err)

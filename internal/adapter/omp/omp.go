@@ -29,7 +29,7 @@ func New(sqlite3Path string) *Adapter { return &Adapter{SQLite3Path: sqlite3Path
 func (*Adapter) Name() string { return "omp" }
 
 func (a *Adapter) Discover(p profile.Profile) ([]adapter.Discovered, error) {
-	root := p.OmpRoot
+	root := p.Roots[a.Name()]
 	if root == "" {
 		return nil, &adapter.Unavailable{Reason: "no omp root for this profile"}
 	}
@@ -91,10 +91,11 @@ type HistoryPrompt struct {
 // than fromID, read-only, and returns the new high-water id (task 6.1's
 // "monotonic key for database sources"; task 6.4).
 func (a *Adapter) PromptsSince(p profile.Profile, fromID int64) ([]HistoryPrompt, int64, error) {
-	if p.OmpRoot == "" {
+	root := p.Roots[a.Name()]
+	if root == "" {
 		return nil, fromID, nil
 	}
-	dbPath := filepath.Join(p.OmpRoot, "agent", "history.db")
+	dbPath := filepath.Join(root, "agent", "history.db")
 	if _, err := os.Stat(dbPath); err != nil {
 		return nil, fromID, nil
 	}

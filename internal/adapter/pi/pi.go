@@ -23,7 +23,7 @@ func New() *Adapter { return &Adapter{} }
 func (*Adapter) Name() string { return "pi" }
 
 func (a *Adapter) Discover(p profile.Profile) ([]adapter.Discovered, error) {
-	root := p.PiRoot
+	root := p.Roots[a.Name()]
 	if root == "" {
 		return nil, &adapter.Unavailable{Reason: "no pi root for this profile"}
 	}

@@ -71,16 +71,24 @@ func (o BrowserOptions) resolve(name string) (profile.Profile, error) {
 	if o.Resolve != nil {
 		return o.Resolve(name)
 	}
-	return profile.Resolve(profile.Discover(), name)
+	profiles, err := profile.Discover()
+	if err != nil {
+		return profile.Profile{}, err
+	}
+	return profile.Resolve(profiles, name)
 }
 
 // discoverProfiles uses the injected lister, defaulting to the standard
-// profile discovery when none was provided.
+// profile discovery when none was provided. The lister type has no error
+// slot (the browser's profile-switch panel wants a plain slice), so a
+// discovery failure yields an empty list; command paths surface the same
+// failure through the resolver instead.
 func (o BrowserOptions) discoverProfiles() []profile.Profile {
 	if o.Profiles != nil {
 		return o.Profiles()
 	}
-	return profile.Discover()
+	profiles, _ := profile.Discover()
+	return profiles
 }
 
 // RunBrowser runs the in-process browser to completion and returns the

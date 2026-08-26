@@ -29,12 +29,12 @@ func (r *Refresher) tier2ForSource(
 
 	switch sourceName {
 	case "claude":
-		if r.Profile.ClaudeRoot != "" {
+		if root := r.Profile.Roots["claude"]; root != "" {
 			from := int64(0)
 			if c, ok := cursors[cursorKey("claude", "*")]; ok && c.ByteOffset != nil {
 				from = *c.ByteOffset
 			}
-			prompts, newOffset, err := claudeadapter.PromptsSince(r.Profile.ClaudeRoot, from)
+			prompts, newOffset, err := claudeadapter.PromptsSince(root, from)
 			if err == nil {
 				for _, p := range prompts {
 					sid := "claude:" + r.Profile.Name + ":" + p.SessionID
@@ -46,7 +46,7 @@ func (r *Refresher) tier2ForSource(
 		}
 
 	case "omp":
-		if r.Profile.OmpRoot != "" {
+		if r.Profile.Roots["omp"] != "" {
 			from := int64(0)
 			if c, ok := cursors[cursorKey("omp", "*")]; ok && c.DBCursorKey != nil {
 				from = parseInt64(*c.DBCursorKey)
@@ -64,7 +64,7 @@ func (r *Refresher) tier2ForSource(
 		}
 
 	case "hermes":
-		if r.Profile.HermesRoot != "" {
+		if r.Profile.Roots["hermes"] != "" {
 			from := int64(0)
 			if c, ok := cursors[cursorKey("hermes", "*")]; ok && c.DBCursorKey != nil {
 				from = parseInt64(*c.DBCursorKey)

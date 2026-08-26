@@ -40,6 +40,18 @@ type Source struct {
 	Roots  []string `toml:"roots"`
 	Resume []string `toml:"resume"`  // argv template; "{id}" is replaced with the session id
 	EnvVar string   `toml:"env_var"` // env var to set to the profile's root when resuming
+
+	// SingleInstall marks a source that has exactly one installation per
+	// machine and so cannot be split work/personal. Such a source is
+	// bundled into one primary profile instead of naming a profile of its
+	// own (see internal/profile.Discover).
+	//
+	// It is stated rather than inferred from the number of configured
+	// roots, because a profile's name is its database filename: inferring
+	// it would let a user change which database they are using - and
+	// silently orphan every handle, comment, and tag in the old one - just
+	// by narrowing a roots list.
+	SingleInstall bool `toml:"single_install"`
 }
 
 // Hide is the standing rules that keep noise out of a listing. They are
@@ -94,16 +106,19 @@ func defaultSources() map[string]Source {
 			EnvVar: "CLAUDE_CONFIG_DIR",
 		},
 		"pi": {
-			Roots:  []string{"~/.pi"},
-			Resume: []string{"pi", "--session", "{id}"},
+			Roots:         []string{"~/.pi"},
+			Resume:        []string{"pi", "--session", "{id}"},
+			SingleInstall: true,
 		},
 		"omp": {
-			Roots:  []string{"~/.omp"},
-			Resume: []string{"omp", "--resume", "{id}"},
+			Roots:         []string{"~/.omp"},
+			Resume:        []string{"omp", "--resume", "{id}"},
+			SingleInstall: true,
 		},
 		"hermes": {
-			Roots:  []string{"~/.hermes"},
-			Resume: []string{"hermes", "--resume", "{id}"},
+			Roots:         []string{"~/.hermes"},
+			Resume:        []string{"hermes", "--resume", "{id}"},
+			SingleInstall: true,
 		},
 	}
 }
@@ -137,6 +152,7 @@ func defaultOrigins(sources map[string]Source) map[string]Origin {
 		m["sources."+name+".roots"] = OriginDefault
 		m["sources."+name+".resume"] = OriginDefault
 		m["sources."+name+".env_var"] = OriginDefault
+		m["sources."+name+".single_install"] = OriginDefault
 	}
 	return m
 }
@@ -214,9 +230,10 @@ func Load() (Config, error) {
 
 	for name, s := range file.Sources {
 		cfg.Sources[name] = Source{
-			Roots:  expandPaths(s.Roots),
-			Resume: s.Resume,
-			EnvVar: s.EnvVar,
+			Roots:         expandPaths(s.Roots),
+			Resume:        s.Resume,
+			EnvVar:        s.EnvVar,
+			SingleInstall: s.SingleInstall,
 		}
 		// Once a source's table appears, the whole source is file-owned -
 		// even the fields the table omits, which are zero because the table
@@ -224,6 +241,7 @@ func Load() (Config, error) {
 		cfg.Origins["sources."+name+".roots"] = OriginFile
 		cfg.Origins["sources."+name+".resume"] = OriginFile
 		cfg.Origins["sources."+name+".env_var"] = OriginFile
+		cfg.Origins["sources."+name+".single_install"] = OriginFile
 	}
 
 	return cfg, nil

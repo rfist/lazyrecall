@@ -32,8 +32,8 @@ func TestNoOperationReturnsSessionsFromMultipleProfiles(t *testing.T) {
 	writeFile(t, filepath.Join(personalRoot, "projects", "-personal-project", "p1.jsonl"),
 		`{"type":"user","message":{"role":"user","content":"personal-only content"},"cwd":"/personal/project","timestamp":"2026-01-01T00:00:00Z"}`+"\n")
 
-	work := profile.Profile{Name: "claude", ClaudeRoot: workRoot}
-	personal := profile.Profile{Name: "claude-personal", ClaudeRoot: personalRoot}
+	work := profile.Profile{Name: "claude", Roots: map[string]string{"claude": workRoot}}
+	personal := profile.Profile{Name: "claude-personal", Roots: map[string]string{"claude": personalRoot}}
 
 	rWork, err := New(work, bin)
 	if err != nil {

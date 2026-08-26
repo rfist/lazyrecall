@@ -68,7 +68,7 @@ INSERT INTO messages (session_id, role, content, finish_reason, timestamp) VALUE
 		t.Fatalf("seeding hermes db: %v: %s", err, out)
 	}
 
-	p := profile.Profile{Name: "write-safety", ClaudeRoot: claudeRoot, PiRoot: piRoot, OmpRoot: ompRoot, HermesRoot: hermesRoot}
+	p := profile.Profile{Name: "write-safety", Roots: map[string]string{"claude": claudeRoot, "pi": piRoot, "omp": ompRoot, "hermes": hermesRoot}}
 
 	sources := collectSourceFiles(t, home)
 	if len(sources) == 0 {

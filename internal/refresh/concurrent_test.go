@@ -23,7 +23,7 @@ func TestRefreshToleratesConcurrentTranscriptWrites(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	transcriptPath := filepath.Join(p.ClaudeRoot, "projects", "-work-repo", "c1.jsonl")
+	transcriptPath := filepath.Join(p.Roots["claude"], "projects", "-work-repo", "c1.jsonl")
 
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
