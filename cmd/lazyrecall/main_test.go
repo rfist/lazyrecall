@@ -258,7 +258,7 @@ func TestProfileNameFromMalformedIDReturnsEmpty(t *testing.T) {
 // environment override is ever needed and resolution always succeeds.
 func TestResumeProfileEnvNonClaudeSourceNeverVaries(t *testing.T) {
 	for _, source := range []string{"pi", "omp", "hermes"} {
-		env, ok, reason := resumeProfileEnv(source, "whatever-profile-name")
+		_, env, ok, reason := resumeSource(source, "whatever-profile-name")
 		if !ok {
 			t.Errorf("%s: expected ok=true, got reason %q", source, reason)
 		}
@@ -288,7 +288,7 @@ func TestResumeProfileEnvResolvesClaudeConfigDir(t *testing.T) {
 	t.Setenv("LAZYRECALL_OMP_HOME", filepath.Join(dir, "nope-omp"))
 	t.Setenv("LAZYRECALL_HERMES_HOME", filepath.Join(dir, "nope-hermes"))
 
-	env, ok, reason := resumeProfileEnv("claude", "claude-personal")
+	_, env, ok, reason := resumeSource("claude", "claude-personal")
 	if !ok {
 		t.Fatalf("expected ok=true, got reason %q", reason)
 	}
@@ -299,7 +299,7 @@ func TestResumeProfileEnvResolvesClaudeConfigDir(t *testing.T) {
 	// The other (default/work) installation must resolve to its own root,
 	// not the personal one - proving this isn't just always returning
 	// whichever root happens to be discovered first.
-	env2, ok2, reason2 := resumeProfileEnv("claude", "claude")
+	_, env2, ok2, reason2 := resumeSource("claude", "claude")
 	if !ok2 {
 		t.Fatalf("expected ok=true, got reason %q", reason2)
 	}
@@ -319,7 +319,7 @@ func TestResumeProfileEnvUnresolvedForUnknownProfile(t *testing.T) {
 	t.Setenv("LAZYRECALL_OMP_HOME", filepath.Join(dir, "nope-omp"))
 	t.Setenv("LAZYRECALL_HERMES_HOME", filepath.Join(dir, "nope-hermes"))
 
-	_, ok, reason := resumeProfileEnv("claude", "ghost-profile")
+	_, _, ok, reason := resumeSource("claude", "ghost-profile")
 	if ok {
 		t.Fatal("expected ok=false when no profile named ghost-profile can be discovered")
 	}

@@ -29,6 +29,17 @@ type Target struct {
 	RepoRootExists  *bool
 	Resumable       bool
 
+	// Resume is the already-resolved argv template this session's source
+	// uses to resume a session, with "{id}" standing in for the session id
+	// (internal/config: a source's Resume). It is resolved by the caller
+	// and passed in, exactly like ProfileEnv: resume stays a pure function
+	// of its Target and never reads the config itself. agentCommand
+	// substitutes "{id}" element-wise and hands the result to execAgent
+	// directly - an argv vector, never a shell command string. Empty/nil
+	// means the source has no configured resume command and cannot be
+	// resumed.
+	Resume []string
+
 	// ProfileEnv carries environment variable overrides needed to run the
 	// agent against the installation this session's own profile belongs to
 	// - e.g. CLAUDE_CONFIG_DIR, for a claude session whose profile is not
@@ -54,23 +65,29 @@ type Target struct {
 }
 
 // agentCommand is the program and argument vector that resumes a specific
-// session non-interactively in each agent's own CLI. argv[0] is
-// conventionally the program's own name, matching what that program would
-// see if invoked directly from a shell; the executable itself is resolved
-// separately, via exec.LookPath, before anything else happens (decision 2).
+// session non-interactively, built by substituting the session id into the
+// source's configured argv template (t.Resume; internal/config: a source's
+// Resume). argv[0] is conventionally the program's own name, matching what
+// that program would see if invoked directly from a shell; the executable
+// itself is resolved separately, via exec.LookPath, before anything else
+// happens (decision 2).
+//
+// The result is deliberately an argv vector, never a shell command string:
+// the config file is user-supplied input, and execAgent execs the program
+// directly with no shell in between, so metacharacters in a template
+// element (";", "&&", "|", ...) stay literal bytes of that one argument. A
+// shell string built from the same template would be parsed and executed,
+// turning a config file into a shell-injection surface - which is exactly
+// why substitution is strings.ReplaceAll per element and nothing more.
 func agentCommand(t Target) (program string, argv []string, ok bool) {
-	switch t.Source {
-	case "claude":
-		return "claude", []string{"claude", "--resume", t.SourceSessionID}, true
-	case "pi":
-		return "pi", []string{"pi", "--session", t.SourceSessionID}, true
-	case "omp":
-		return "omp", []string{"omp", "--resume", t.SourceSessionID}, true
-	case "hermes":
-		return "hermes", []string{"hermes", "--resume", t.SourceSessionID}, true
-	default:
+	if len(t.Resume) == 0 {
 		return "", nil, false
 	}
+	argv = make([]string, len(t.Resume))
+	for i, el := range t.Resume {
+		argv[i] = strings.ReplaceAll(el, "{id}", t.SourceSessionID)
+	}
+	return argv[0], argv, true
 }
 
 // Outcome describes why resumption did not place the user into the session.
