@@ -1,6 +1,10 @@
 /recall
 /lazyrecall
 
+# Release artifacts
+dist/
+*.tar.gz
+
 # Beads / Dolt files (added by bd init)
 .dolt/
 *.db
