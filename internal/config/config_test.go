@@ -146,6 +146,24 @@ func TestLoadExpandsTildeAndEnvVarsInPaths(t *testing.T) {
 	}
 }
 
+func TestHidePathsNormaliseDoubleGlob(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path := writeConfig(t, "[hide]\npaths = [\"/tmp/**/x\", \"~/scratch/**\"]\n")
+	t.Setenv("LAZYRECALL_CONFIG", path)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// SQLite GLOB's '*' already crosses '/', so '**' would be a meaningless
+	// doubling; it is collapsed to '*' on load.
+	want := []string{"/tmp/*/x", filepath.Join(home, "scratch", "*")}
+	if got := cfg.Hide.Paths; !reflect.DeepEqual(got, want) {
+		t.Errorf("hide paths = %v, want %v", got, want)
+	}
+}
+
 func TestLoadMalformedFileReturnsErrorWithLocation(t *testing.T) {
 	path := writeConfig(t, "min_messages = \n")
 	t.Setenv("LAZYRECALL_CONFIG", path)

@@ -182,7 +182,7 @@ func Path() string {
 func Load() (Config, error) {
 	cfg := defaultConfig()
 	cfg.Sources = expandSources(cfg.Sources)
-	cfg.Hide.Paths = expandPaths(cfg.Hide.Paths)
+	cfg.Hide.Paths = globPaths(cfg.Hide.Paths)
 	cfg.Origins = defaultOrigins(cfg.Sources)
 
 	path := Path()
@@ -220,7 +220,7 @@ func Load() (Config, error) {
 		cfg.Origins["hide.min_messages"] = OriginFile
 	}
 	if md.IsDefined("hide", "paths") {
-		cfg.Hide.Paths = expandPaths(file.Hide.Paths)
+		cfg.Hide.Paths = globPaths(file.Hide.Paths)
 		cfg.Origins["hide.paths"] = OriginFile
 	}
 	if md.IsDefined("browse", "show_archived") {
@@ -296,6 +296,19 @@ func expandSources(sources map[string]Source) map[string]Source {
 	for name, s := range sources {
 		s.Roots = expandPaths(s.Roots)
 		out[name] = s
+	}
+	return out
+}
+
+// globPaths expands and normalises hide path patterns at load. SQLite's GLOB
+// '*' already crosses '/', so '**' in a configured hide path would be a
+// meaningless doubling; collapsing it to '*' makes a '**' pattern behave
+// identically to the equivalent '*' one (and, unlike '**' in glob(3), the
+// two are not different pattern languages here).
+func globPaths(paths []string) []string {
+	out := make([]string, len(paths))
+	for i, p := range paths {
+		out[i] = strings.ReplaceAll(expandPath(p), "**", "*")
 	}
 	return out
 }

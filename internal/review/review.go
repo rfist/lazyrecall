@@ -22,9 +22,10 @@ type Entry struct {
 // Report returns every session in the active profile whose end state is
 // dangling, interrupted, or abandoned, most recently active first (spec
 // session-review, "Loose ends report"). Sessions whose end state is
-// completed are excluded entirely - not merely sorted last.
-func Report(db *sqlitex.Runner) ([]Entry, error) {
-	items, err := search.List(db, search.Filter{})
+// completed are excluded entirely - not merely sorted last. f's hide rules
+// and ShowAll flag apply exactly as they do to a listing.
+func Report(db *sqlitex.Runner, f search.Filter) ([]Entry, error) {
+	items, err := search.List(db, f)
 	if err != nil {
 		return nil, fmt.Errorf("review: listing sessions: %w", err)
 	}
@@ -35,6 +36,24 @@ func Report(db *sqlitex.Runner) ([]Entry, error) {
 		}
 	}
 	return out, nil
+}
+
+// ReportWithHidden returns the loose-ends report and how many sessions the
+// hide rules and the archive flag suppressed from it: one COUNT(*) over the
+// report's predicate (end states needing attention, f's filters) without
+// the hide clauses, minus the entries shown - the same counting shape
+// search.ListWithHidden uses, restricted to sessions the report would
+// actually have shown.
+func ReportWithHidden(db *sqlitex.Runner, f search.Filter) (entries []Entry, hidden int, err error) {
+	entries, err = Report(db, f)
+	if err != nil {
+		return nil, 0, err
+	}
+	total, err := search.CountBase(db, f, "s.end_state IN ('dangling', 'interrupted', 'abandoned')")
+	if err != nil {
+		return nil, 0, err
+	}
+	return entries, total - len(entries), nil
 }
 
 // EmptyMessage is shown when nothing needs attention (spec session-review,

@@ -9,19 +9,26 @@ import (
 	"strings"
 	"time"
 
+	"lazyrecall/internal/config"
 	"lazyrecall/internal/session"
 	"lazyrecall/internal/sqlitex"
 )
 
 // Filter narrows a listing or search. Zero values mean "no constraint on
 // this dimension." Filters combine with AND (spec session-search,
-// "Filtering", "Combining filters").
+// "Filtering", "Combining filters"). Hide carries the standing hide rules
+// from the config - its zero value applies nothing - and ShowAll disables
+// them together with the archive flag: a user who asks to see everything
+// sees everything.
 type Filter struct {
 	Agent string // "claude" | "pi" | "omp" | "hermes"
 	Since *time.Time
 	Until *time.Time
 	Repo  string // a git_common_root or a bare cwd, per GroupKey
 	Tag   string
+
+	Hide    config.Hide // the standing rules; zero value applies nothing
+	ShowAll bool        // true = apply no hide rule and show archived sessions
 }
 
 // Item is one session as shown in a listing or search result (spec
@@ -165,8 +172,18 @@ func (row itemRow) toItem() Item {
 // whereClauseFromFilter builds the shared filter predicate (task 7.6). All
 // values travel through the ParamFile mechanism - never string-interpolated
 // (the same rule that governs writes applies to reads: nothing a user typed
-// into a filter flag is trusted as SQL text).
+// into a filter flag is trusted as SQL text). The hide clauses come from
+// hideClausesFromFilter and are skipped wholesale when ShowAll is set.
 func whereClauseFromFilter(f Filter, params map[string]any) (string, []string) {
+	clauses := baseClausesFromFilter(f, params)
+	clauses = append(clauses, hideClausesFromFilter(f, params)...)
+	return "", clauses
+}
+
+// baseClausesFromFilter gathers the non-hide filter clauses (agent, since,
+// until, repo, tag): the predicate every listing shares before any hide rule
+// runs. The hidden-count queries are built from these clauses alone.
+func baseClausesFromFilter(f Filter, params map[string]any) []string {
 	var clauses []string
 	if f.Agent != "" {
 		params["agent"] = f.Agent
@@ -188,7 +205,32 @@ func whereClauseFromFilter(f Filter, params map[string]any) (string, []string) {
 		params["tag"] = f.Tag
 		clauses = append(clauses, "tag")
 	}
-	return "", clauses
+	return clauses
+}
+
+// hideClausesFromFilter gathers the hide-rule clauses: the archive flag and
+// every standing rule in f.Hide, skipped wholesale when ShowAll is set. Each
+// path pattern gets its own clause key (hide_path_0, hide_path_1, ...) so
+// buildPredicate can AND them without knowing the count ahead of time.
+func hideClausesFromFilter(f Filter, params map[string]any) []string {
+	if f.ShowAll {
+		return nil
+	}
+	var clauses []string
+	clauses = append(clauses, "hide_archived")
+	if f.Hide.NonInteractive {
+		clauses = append(clauses, "hide_non_interactive")
+	}
+	if f.Hide.MinMessages > 0 {
+		params["min_messages"] = f.Hide.MinMessages
+		clauses = append(clauses, "hide_min_messages")
+	}
+	for i, pat := range f.Hide.Paths {
+		key := fmt.Sprintf("hide_path_%d", i)
+		params[key] = pat
+		clauses = append(clauses, key)
+	}
+	return clauses
 }
 
 func buildPredicate(pf *sqlitex.ParamFile, clauses []string) string {
@@ -205,6 +247,28 @@ func buildPredicate(pf *sqlitex.ParamFile, clauses []string) string {
 			parts = append(parts, "(s.git_common_root = "+pf.Ref("repo")+" OR (s.git_common_root IS NULL AND s.cwd = "+pf.Ref("repo")+"))")
 		case "tag":
 			parts = append(parts, "EXISTS (SELECT 1 FROM tags tg WHERE tg.lineage_id = s.lineage_id AND tg.tag = "+pf.Ref("tag")+")")
+		case "hide_archived":
+			parts = append(parts, "l.archived_at IS NULL")
+		case "hide_non_interactive":
+			// Only the exact value 'automated' is hidden. 'unknown' must
+			// NEVER be hidden - pi, omp and hermes report unknown for every
+			// session, and hiding on absence of evidence would make three
+			// sources vanish. A NULL origin reads back as unknown, so it is
+			// guarded the same way rather than dropped by the comparison.
+			parts = append(parts, "(s.origin IS NULL OR s.origin != 'automated')")
+		case "hide_min_messages":
+			// Unknown is not "small": a NULL message_count means the source
+			// never recorded a count, and it must not be hidden by the
+			// threshold.
+			parts = append(parts, "(s.message_count IS NULL OR s.message_count >= "+pf.Ref("min_messages")+")")
+		default:
+			if strings.HasPrefix(c, "hide_path_") {
+				// A NULL cwd matches no pattern and must not be hidden.
+				// GLOB's '*' already crosses '/', so the '**' a config may
+				// carry is collapsed to '*' at load and behaves identically
+				// either way.
+				parts = append(parts, "(s.cwd IS NULL OR s.cwd NOT GLOB "+pf.Ref(c)+")")
+			}
 		}
 	}
 	if len(parts) == 0 {
@@ -242,6 +306,56 @@ ORDER BY s.last_activity_at DESC;`, itemColumns, itemFrom, predicate)
 		items[i] = row.toItem()
 	}
 	return items, nil
+}
+
+// CountBase returns how many sessions match f's non-hide predicate - the
+// user filters alone, before any hide rule or the archive flag runs. extra
+// is appended to the WHERE clause verbatim so a caller can extend the base
+// predicate with its own restriction (review counts only sessions needing
+// attention); it is a program constant, never user input. The count is one
+// COUNT(*) query, never a second full fetch of the rows, and is what lets
+// the commands report what the hide rules suppressed.
+func CountBase(db *sqlitex.Runner, f Filter, extra string) (int, error) {
+	params := map[string]any{}
+	clauses := baseClausesFromFilter(f, params)
+	pf, err := db.WriteParams(params)
+	if err != nil {
+		return 0, err
+	}
+	defer pf.Close()
+
+	predicate := buildPredicate(pf, clauses)
+	if extra != "" {
+		predicate += " AND " + extra
+	}
+	q := fmt.Sprintf(`SELECT COUNT(*) AS n FROM %s WHERE %s;`, itemFrom, predicate)
+
+	var rows []struct {
+		N int `json:"n"`
+	}
+	if err := db.Query(q, &rows); err != nil {
+		return 0, fmt.Errorf("search: counting sessions: %w", err)
+	}
+	if len(rows) == 0 {
+		return 0, nil
+	}
+	return rows[0].N, nil
+}
+
+// ListWithHidden returns the visible items and how many the hide rules and
+// the archive flag suppressed: one COUNT(*) over the same predicate without
+// the hide clauses, minus the visible count - never a second full fetch of
+// the rows.
+func ListWithHidden(db *sqlitex.Runner, f Filter) (items []Item, hidden int, err error) {
+	items, err = List(db, f)
+	if err != nil {
+		return nil, 0, err
+	}
+	total, err := CountBase(db, f, "")
+	if err != nil {
+		return nil, 0, err
+	}
+	return items, total - len(items), nil
 }
 
 // ListByLineageIDs returns the sessions belonging to any of the given

@@ -493,3 +493,106 @@ func TestArchiveCommandAcceptsShortHandle(t *testing.T) {
 		t.Fatal("expected handle 5's lineage to be archived after `archive 5`")
 	}
 }
+
+// runCaptured runs the command with stdout captured, returning what it
+// printed, so tests can assert on the human-readable output.
+func runCaptured(t *testing.T, args []string) (string, error) {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stdout
+	os.Stdout = w
+	runErr := run(args)
+	w.Close()
+	os.Stdout = old
+	out, _ := io.ReadAll(r)
+	return string(out), runErr
+}
+
+// TestListReportsHiddenAndAllFlagShowsEverything covers change
+// apply-config-hide-rules end to end: the standing rules from the config
+// are applied to `list` (the default config hides automated sessions), the
+// header says how much was suppressed instead of hiding silently, and
+// `--all` disables the rules and the note together.
+func TestListReportsHiddenAndAllFlagShowsEverything(t *testing.T) {
+	home := t.TempDir()
+	claudeRoot := filepath.Join(home, ".claude")
+	if err := os.MkdirAll(filepath.Join(claudeRoot, "projects"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("LAZYRECALL_HOME", filepath.Join(home, "data"))
+	t.Setenv("LAZYRECALL_CLAUDE_CONFIG_DIRS", claudeRoot)
+	t.Setenv("LAZYRECALL_PI_HOME", filepath.Join(home, "nope-pi"))
+	t.Setenv("LAZYRECALL_OMP_HOME", filepath.Join(home, "nope-omp"))
+	t.Setenv("LAZYRECALL_HERMES_HOME", filepath.Join(home, "nope-hermes"))
+
+	p, err := resolveProfile("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(profile.DataDir(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	db := &sqlitex.Runner{DBPath: profile.DBPath(p)}
+	if _, err := schema.Open(db); err != nil {
+		t.Fatal(err)
+	}
+	b := db.NewBatch()
+	if err := b.BulkInsert("sessions", []string{"id", "source", "source_session_id", "lineage_id", "end_state", "resumable", "origin"}, []map[string]any{
+		{"id": "claude:" + p.Name + ":auto", "source": "claude", "source_session_id": "auto", "lineage_id": "lin-auto", "end_state": "completed", "resumable": 1, "origin": "automated"},
+		{"id": "claude:" + p.Name + ":inter", "source": "claude", "source_session_id": "inter", "lineage_id": "lin-inter", "end_state": "completed", "resumable": 1, "origin": "interactive"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Run(); err != nil {
+		t.Fatal(err)
+	}
+
+	out, runErr := runCaptured(t, []string{"list", "--no-refresh"})
+	if runErr != nil {
+		t.Fatalf("run(list --no-refresh): %v", runErr)
+	}
+	if !strings.Contains(out, "1 hidden (--all to show)") {
+		t.Errorf("expected the header to report the hidden automated session, got:\n%s", out)
+	}
+
+	out, runErr = runCaptured(t, []string{"list", "--no-refresh", "--all"})
+	if runErr != nil {
+		t.Fatalf("run(list --no-refresh --all): %v", runErr)
+	}
+	if strings.Contains(out, "hidden") {
+		t.Errorf("--all must show everything without a hidden note, got:\n%s", out)
+	}
+}
+
+func TestPrintProfileHeaderHiddenNote(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stdout
+	os.Stdout = w
+	printProfileHeader("claude", 3)
+	w.Close()
+	os.Stdout = old
+	buf, _ := io.ReadAll(r)
+	if got := string(buf); got != "Profile: claude   3 hidden (--all to show)\n" {
+		t.Errorf("got %q, want the hidden note", got)
+	}
+
+	r, w, err = os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	printProfileHeader("claude", 0)
+	w.Close()
+	os.Stdout = old
+	buf, _ = io.ReadAll(r)
+	if got := string(buf); got != "Profile: claude\n" {
+		t.Errorf("got %q, want the plain header when nothing is hidden", got)
+	}
+}

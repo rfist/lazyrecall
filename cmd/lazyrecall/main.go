@@ -49,6 +49,7 @@ func run(args []string) error {
 	profileFlag := global.String("profile", "", "profile to operate under (default: the primary profile)")
 	jsonFlag := global.Bool("json", false, "machine-readable JSON output")
 	noRefresh := global.Bool("no-refresh", false, "skip the automatic refresh before answering")
+	allFlag := global.Bool("all", false, "apply no hide rule and show archived sessions")
 
 	// Bare `lazyrecall` is the browser, not a usage dump: the interactive
 	// interface is this tool's front door, the same way `lazygit` and
@@ -57,7 +58,7 @@ func run(args []string) error {
 	// falls back to a plain listing when output is not a terminal, so
 	// `lazyrecall | head` keeps working.
 	if len(args) == 0 {
-		return cmdBrowse(global, profileFlag, noRefresh, nil)
+		return cmdBrowse(global, profileFlag, allFlag, noRefresh, nil)
 	}
 	cmd, rest := args[0], args[1:]
 	if cmd == "-h" || cmd == "--help" || cmd == "help" {
@@ -74,15 +75,15 @@ func run(args []string) error {
 	// the same global flag set plus its own.
 	switch cmd {
 	case "list":
-		return cmdList(global, profileFlag, jsonFlag, noRefresh, rest)
+		return cmdList(global, profileFlag, jsonFlag, allFlag, noRefresh, rest)
 	case "search":
-		return cmdSearch(global, profileFlag, jsonFlag, noRefresh, rest)
+		return cmdSearch(global, profileFlag, jsonFlag, allFlag, noRefresh, rest)
 	case "review":
-		return cmdReview(global, profileFlag, jsonFlag, noRefresh, rest)
+		return cmdReview(global, profileFlag, jsonFlag, allFlag, noRefresh, rest)
 	case "resume":
 		return cmdResume(global, profileFlag, jsonFlag, noRefresh, rest)
 	case "browse":
-		return cmdBrowse(global, profileFlag, noRefresh, rest)
+		return cmdBrowse(global, profileFlag, allFlag, noRefresh, rest)
 	case "comment":
 		return cmdComment(global, profileFlag, noRefresh, rest)
 	case "tag":
@@ -116,16 +117,16 @@ func printUsage() {
 
 Usage:
   lazyrecall                  open the interactive browser
-  lazyrecall list      [--agent=NAME] [--repo=PATH] [--tag=NAME] [--since=DAYS] [--json] [--profile=NAME]
-  lazyrecall search    QUERY [--agent=NAME] [--repo=PATH] [--tag=NAME] [--json] [--profile=NAME]
-  lazyrecall review    [--json] [--profile=NAME]
+  lazyrecall list      [--agent=NAME] [--repo=PATH] [--tag=NAME] [--since=DAYS] [--all] [--json] [--profile=NAME]
+  lazyrecall search    QUERY [--agent=NAME] [--repo=PATH] [--tag=NAME] [--all] [--json] [--profile=NAME]
+  lazyrecall review    [--all] [--json] [--profile=NAME]
   lazyrecall resume    [SESSION_ID] [--profile=NAME]
   lazyrecall comment   add SESSION_ID TEXT... | list SESSION_ID | rm COMMENT_ID
   lazyrecall tag       add SESSION_ID TAG | rm SESSION_ID TAG | list
   lazyrecall archive   SESSION_ID | list
   lazyrecall unarchive SESSION_ID
   lazyrecall refresh   [--full] [--profile=NAME]
-  lazyrecall browse    [QUERY] [--agent=NAME] [--repo=PATH] [--tag=NAME] [--profile=NAME]
+  lazyrecall browse    [QUERY] [--agent=NAME] [--repo=PATH] [--tag=NAME] [--all] [--profile=NAME]
   lazyrecall profiles  [--json]
   lazyrecall config    path|init|show
   lazyrecall version, --version, -v
@@ -243,7 +244,7 @@ func buildFilter(agent, repo, tag *string, sinceDays *int) search.Filter {
 	return f
 }
 
-func cmdList(global *flag.FlagSet, profileFlag *string, jsonFlag, noRefresh *bool, args []string) error {
+func cmdList(global *flag.FlagSet, profileFlag *string, jsonFlag, allFlag, noRefresh *bool, args []string) error {
 	agent, repoF, tag, since := parseFilterFlags(global)
 	if _, err := parseInterleaved(global, args); err != nil {
 		return err
@@ -252,19 +253,25 @@ func cmdList(global *flag.FlagSet, profileFlag *string, jsonFlag, noRefresh *boo
 	if err != nil {
 		return err
 	}
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
 	db, err := openDB(p, *noRefresh, false)
 	if err != nil {
 		return err
 	}
 	f := buildFilter(agent, repoF, tag, since)
-	items, err := search.List(db, f)
+	f.Hide = cfg.Hide
+	f.ShowAll = *allFlag
+	items, hidden, err := search.ListWithHidden(db, f)
 	if err != nil {
 		return err
 	}
-	return outputItems(p, items, *jsonFlag, search.EmptyMessage(p.Name, f, ""))
+	return outputItems(p, items, *jsonFlag, hidden, search.EmptyMessage(p.Name, f, ""))
 }
 
-func cmdSearch(global *flag.FlagSet, profileFlag *string, jsonFlag, noRefresh *bool, args []string) error {
+func cmdSearch(global *flag.FlagSet, profileFlag *string, jsonFlag, allFlag, noRefresh *bool, args []string) error {
 	agent, repoF, tag, since := parseFilterFlags(global)
 	rest, err := parseInterleaved(global, args)
 	if err != nil {
@@ -279,19 +286,25 @@ func cmdSearch(global *flag.FlagSet, profileFlag *string, jsonFlag, noRefresh *b
 	if err != nil {
 		return err
 	}
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
 	db, err := openDB(p, *noRefresh, false)
 	if err != nil {
 		return err
 	}
 	f := buildFilter(agent, repoF, tag, since)
-	items, err := search.Search(db, query, f)
+	f.Hide = cfg.Hide
+	f.ShowAll = *allFlag
+	items, hidden, err := search.SearchWithHidden(db, query, f)
 	if err != nil {
 		return err
 	}
-	return outputItems(p, items, *jsonFlag, search.EmptyMessage(p.Name, f, query))
+	return outputItems(p, items, *jsonFlag, hidden, search.EmptyMessage(p.Name, f, query))
 }
 
-func cmdReview(global *flag.FlagSet, profileFlag *string, jsonFlag, noRefresh *bool, args []string) error {
+func cmdReview(global *flag.FlagSet, profileFlag *string, jsonFlag, allFlag, noRefresh *bool, args []string) error {
 	if err := global.Parse(args); err != nil {
 		return err
 	}
@@ -299,11 +312,15 @@ func cmdReview(global *flag.FlagSet, profileFlag *string, jsonFlag, noRefresh *b
 	if err != nil {
 		return err
 	}
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
 	db, err := openDB(p, *noRefresh, false)
 	if err != nil {
 		return err
 	}
-	entries, err := review.Report(db)
+	entries, hidden, err := review.ReportWithHidden(db, search.Filter{Hide: cfg.Hide, ShowAll: *allFlag})
 	if err != nil {
 		return err
 	}
@@ -312,7 +329,7 @@ func cmdReview(global *flag.FlagSet, profileFlag *string, jsonFlag, noRefresh *b
 			return cli.WriteReviewJSON(os.Stdout, entries)
 		})
 	}
-	fmt.Printf("Profile: %s\n", p.Name)
+	printProfileHeader(p.Name, hidden)
 	cli.WriteReviewHuman(os.Stdout, entries, review.EmptyMessage(p.Name), cli.DetermineOptions(os.Stdout))
 	return nil
 }
@@ -591,7 +608,7 @@ func cmdArchive(global *flag.FlagSet, profileFlag *string, noRefresh *bool, args
 		if err != nil {
 			return err
 		}
-		return outputItems(p, items, false, "No archived sessions.")
+		return outputItems(p, items, false, 0, "No archived sessions.")
 	}
 
 	// SESSION_ID accepts the short handle exactly like every other
@@ -845,16 +862,28 @@ const defaultConfigFile = `# LazyRecall configuration (lazyrecall config).
 # show_archived = false
 `
 
-func outputItems(p profile.Profile, items []search.Item, jsonOut bool, emptyMessage string) error {
+func outputItems(p profile.Profile, items []search.Item, jsonOut bool, hidden int, emptyMessage string) error {
 	if jsonOut {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
 		w := &jsonProfileWriter{enc: enc, profile: p.Name}
 		return w.writeItems(items)
 	}
-	fmt.Printf("Profile: %s\n", p.Name)
+	printProfileHeader(p.Name, hidden)
 	cli.WriteItemsHuman(os.Stdout, items, emptyMessage, cli.DetermineOptions(os.Stdout))
 	return nil
+}
+
+// printProfileHeader prints the "Profile:" header every human-readable
+// command starts with. When hide rules suppressed something, the header
+// says how much is missing and how to see it, so hiding is never silent;
+// the note never appears in --all mode, where nothing is suppressed.
+func printProfileHeader(name string, hidden int) {
+	if hidden > 0 {
+		fmt.Printf("Profile: %s   %d hidden (--all to show)\n", name, hidden)
+		return
+	}
+	fmt.Printf("Profile: %s\n", name)
 }
 
 // jsonProfileWriter wraps the item list with the active profile, so
@@ -899,7 +928,7 @@ func jsonEnvelope(profileName string, writeArray func() error) error {
 // rather than an installation gap (design.md decision 7): the system
 // reports that browsing requires a terminal and prints the equivalent
 // non-interactive listing.
-func cmdBrowse(global *flag.FlagSet, profileFlag *string, noRefresh *bool, args []string) error {
+func cmdBrowse(global *flag.FlagSet, profileFlag *string, allFlag, noRefresh *bool, args []string) error {
 	agent, repoF, tag, _ := parseFilterFlags(global)
 	positionals, err := parseInterleaved(global, args)
 	if err != nil {
@@ -911,6 +940,10 @@ func cmdBrowse(global *flag.FlagSet, profileFlag *string, noRefresh *bool, args 
 	if err != nil {
 		return err
 	}
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
 
 	if !cli.IsTerminal(os.Stdout) {
 		fmt.Fprintln(os.Stderr, "browsing requires a terminal; showing a non-interactive listing instead.")
@@ -918,17 +951,18 @@ func cmdBrowse(global *flag.FlagSet, profileFlag *string, noRefresh *bool, args 
 		if err != nil {
 			return err
 		}
-		f := search.Filter{Agent: *agent, Repo: *repoF, Tag: *tag}
+		f := search.Filter{Agent: *agent, Repo: *repoF, Tag: *tag, Hide: cfg.Hide, ShowAll: *allFlag}
 		var items []search.Item
+		var hidden int
 		if query != "" {
-			items, err = search.Search(db, query, f)
+			items, hidden, err = search.SearchWithHidden(db, query, f)
 		} else {
-			items, err = search.List(db, f)
+			items, hidden, err = search.ListWithHidden(db, f)
 		}
 		if err != nil {
 			return err
 		}
-		return outputItems(p, items, false, search.EmptyMessage(p.Name, f, query))
+		return outputItems(p, items, false, hidden, search.EmptyMessage(p.Name, f, query))
 	}
 
 	db, err := openDB(p, *noRefresh, false)
