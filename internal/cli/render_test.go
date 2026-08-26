@@ -59,6 +59,30 @@ func TestRenderRowOmitsAbsentTopic(t *testing.T) {
 	}
 }
 
+func TestWriteItemsJSONIncludesOriginAndOmitsEmpty(t *testing.T) {
+	items := []search.Item{
+		{SessionID: "claude:p:1", EndState: "completed", Origin: "interactive"},
+		{SessionID: "claude:p:2", EndState: "completed", Origin: "unknown"},
+		{SessionID: "claude:p:3", EndState: "completed"}, // zero value Origin
+	}
+	var buf bytes.Buffer
+	if err := WriteItemsJSON(&buf, items); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, `"origin": "interactive"`) {
+		t.Errorf("expected origin interactive in output, got:\n%s", out)
+	}
+	if !strings.Contains(out, `"origin": "unknown"`) {
+		t.Errorf("expected origin unknown in output, got:\n%s", out)
+	}
+	// The zero value ("") must be omitted by the omitempty tag, not emitted
+	// as an empty string.
+	if strings.Contains(out, `"origin": ""`) {
+		t.Errorf("expected an empty origin to be omitted, got:\n%s", out)
+	}
+}
+
 func TestWriteItemsHumanShowsEmptyMessage(t *testing.T) {
 	var buf bytes.Buffer
 	WriteItemsHuman(&buf, nil, "nothing here", DefaultRenderOptions)

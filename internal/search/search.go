@@ -46,9 +46,13 @@ type Item struct {
 	Topic          *string
 	// Name is the session name the user set inside the source tool, when
 	// there is one. Display prefers it over Topic (see cli.RenderRow).
-	Name         *string
-	LastPrompt   *string
-	EndState     session.EndState
+	Name       *string
+	LastPrompt *string
+	EndState   session.EndState
+	// Origin is who drove the session, always a member of the closed set
+	// session.Origin - a stored value outside the set (older build, or a
+	// hand-edited row) reads back as OriginUnknown, never as-is.
+	Origin       session.Origin
 	DirExists    *bool // nil = never checked (no cwd known); false = missing
 	MessageCount *int64
 	Resumable    bool
@@ -86,7 +90,7 @@ func (it Item) GroupKey() (key string, isRepo bool) {
 const itemFrom = `sessions s LEFT JOIN lineages l ON l.id = s.lineage_id`
 
 var itemColumns = `s.id, s.source, s.lineage_id, l.handle, s.cwd, s.git_branch, s.git_repo_root, s.git_common_root,
-	s.started_at, s.last_activity_at, s.topic, s.name, s.last_prompt, s.end_state, s.dir_exists, s.message_count, s.resumable,
+	s.started_at, s.last_activity_at, s.topic, s.name, s.last_prompt, s.end_state, s.origin, s.dir_exists, s.message_count, s.resumable,
 	l.archived_at IS NOT NULL AS archived`
 
 type itemRow struct {
@@ -104,6 +108,7 @@ type itemRow struct {
 	Name           *string `json:"name"`
 	LastPrompt     *string `json:"last_prompt"`
 	EndState       string  `json:"end_state"`
+	Origin         string  `json:"origin"`
 	DirExists      *int64  `json:"dir_exists"`
 	MessageCount   *int64  `json:"message_count"`
 	Resumable      int64   `json:"resumable"`
@@ -112,6 +117,13 @@ type itemRow struct {
 }
 
 func (row itemRow) toItem() Item {
+	// Normalise on the way out: an empty or unrecognised stored value (a
+	// database written by an older build, or a hand-edited row) must never
+	// escape the closed set - it reads back as unknown.
+	origin := session.Origin(row.Origin)
+	if !origin.Valid() {
+		origin = session.OriginUnknown
+	}
 	it := Item{
 		SessionID:     row.ID,
 		Source:        row.Source,
@@ -124,6 +136,7 @@ func (row itemRow) toItem() Item {
 		Name:          row.Name,
 		LastPrompt:    row.LastPrompt,
 		EndState:      session.EndState(row.EndState),
+		Origin:        origin,
 		MessageCount:  row.MessageCount,
 		Resumable:     row.Resumable != 0,
 		Archived:      row.Archived != 0,

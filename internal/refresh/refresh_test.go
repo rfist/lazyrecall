@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"lazyrecall/internal/profile"
+	"lazyrecall/internal/search"
 	"lazyrecall/internal/session"
 )
 
@@ -907,5 +908,78 @@ func TestSessionNameIndexedAndSurvivesIncrementalRefresh(t *testing.T) {
 	}
 	if got := nameNow(r); got == nil || *got != "retry-loop-v2" {
 		t.Fatalf("name = %v after an unrelated delta, want the name already known", got)
+	}
+}
+
+// TestOriginPersistedFromTranscript covers the origin persistence path end
+// to end: a scanned session's origin, classified from the claude
+// entrypoint field, reaches the sessions row and comes back out through
+// search.List - while a session whose records never named an origin is
+// stored as "unknown", never as an empty string or NULL.
+func TestOriginPersistedFromTranscript(t *testing.T) {
+	home := t.TempDir()
+	dataDir := t.TempDir()
+	os.Setenv("LAZYRECALL_HOME", dataDir)
+	t.Cleanup(func() { os.Unsetenv("LAZYRECALL_HOME") })
+
+	claudeRoot := filepath.Join(home, ".claude-personal")
+	writeFile(t, filepath.Join(claudeRoot, "history.jsonl"),
+		`{"display":"automated run","timestamp":1700000000000,"project":"/work/repo","sessionId":"c1"}`+"\n"+
+			`{"display":"manual run","timestamp":1700000000001,"project":"/work/repo","sessionId":"c2"}`+"\n")
+	// c1 is driven by an SDK: every record carries entrypoint "sdk-cli".
+	writeFile(t, filepath.Join(claudeRoot, "projects", "-work-repo", "c1.jsonl"),
+		`{"type":"user","message":{"role":"user","content":"run the batch job"},"cwd":"/work/repo","gitBranch":"main","entrypoint":"sdk-cli","timestamp":"2026-01-01T00:00:00Z"}`+"\n"+
+			`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Done."}],"stop_reason":"end_turn"},"entrypoint":"sdk-cli","timestamp":"2026-01-01T00:00:05Z"}`+"\n")
+	// c2 records no entrypoint at all, like the other sources do.
+	writeFile(t, filepath.Join(claudeRoot, "projects", "-work-repo", "c2.jsonl"),
+		`{"type":"user","message":{"role":"user","content":"hi there"},"cwd":"/work/repo","gitBranch":"main","timestamp":"2026-01-01T00:00:00Z"}`+"\n"+
+			`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Hello."}],"stop_reason":"end_turn"},"timestamp":"2026-01-01T00:00:05Z"}`+"\n")
+
+	p := profile.Profile{Name: "claude-personal", Roots: map[string]string{"claude": claudeRoot}}
+	r, err := New(p, sqlite3Path(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Refresh(Options{}); err != nil {
+		t.Fatal(err)
+	}
+
+	var rows []struct {
+		ID     string `json:"id"`
+		Origin string `json:"origin"`
+	}
+	if err := r.DB.Query(`SELECT id, origin FROM sessions ORDER BY id;`, &rows); err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("got %d session rows, want 2", len(rows))
+	}
+	byID := map[string]string{}
+	for _, row := range rows {
+		byID[row.ID] = row.Origin
+	}
+	if got := byID["claude:claude-personal:c1"]; got != string(session.OriginAutomated) {
+		t.Errorf("origin for the sdk-cli session = %q, want %q", got, session.OriginAutomated)
+	}
+	if got := byID["claude:claude-personal:c2"]; got != string(session.OriginUnknown) {
+		t.Errorf("origin for the no-entrypoint session = %q, want %q (never an empty string)", got, session.OriginUnknown)
+	}
+
+	items, err := search.List(r.DB, search.Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("search.List returned %d items, want 2", len(items))
+	}
+	itemByID := map[string]session.Origin{}
+	for _, it := range items {
+		itemByID[it.SessionID] = it.Origin
+	}
+	if itemByID["claude:claude-personal:c1"] != session.OriginAutomated {
+		t.Errorf("Item.Origin for the sdk-cli session = %q, want %q", itemByID["claude:claude-personal:c1"], session.OriginAutomated)
+	}
+	if itemByID["claude:claude-personal:c2"] != session.OriginUnknown {
+		t.Errorf("Item.Origin for the no-entrypoint session = %q, want %q", itemByID["claude:claude-personal:c2"], session.OriginUnknown)
 	}
 }

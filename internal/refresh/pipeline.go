@@ -72,6 +72,7 @@ type existingSessionRow struct {
 	GitRepoRoot     *string `json:"git_repo_root"`
 	GitCommonRoot   *string `json:"git_common_root"`
 	EndState        string  `json:"end_state"`
+	Origin          string  `json:"origin"`
 	CompactionCount *int64  `json:"compaction_count"`
 	CompactionJSON  *string `json:"compaction_json"`
 	MessageCount    *int64  `json:"message_count"`
@@ -97,7 +98,7 @@ type existingSessions struct {
 
 func (r *Refresher) loadExistingSessions() (existingSessions, error) {
 	var rows []existingSessionRow
-	if err := r.DB.Query(`SELECT id, source_session_id, transcript_path, topic, name, last_prompt, cwd, git_branch, git_repo_root, git_common_root, end_state, compaction_count, compaction_json, message_count, last_activity_at FROM sessions;`, &rows); err != nil {
+	if err := r.DB.Query(`SELECT id, source_session_id, transcript_path, topic, name, last_prompt, cwd, git_branch, git_repo_root, git_common_root, end_state, origin, compaction_count, compaction_json, message_count, last_activity_at FROM sessions;`, &rows); err != nil {
 		return existingSessions{}, err
 	}
 	out := existingSessions{
@@ -105,6 +106,14 @@ func (r *Refresher) loadExistingSessions() (existingSessions, error) {
 		ByTranscript: make(map[string]*session.Session, len(rows)),
 	}
 	for _, row := range rows {
+		// Normalize on the way in, same closed-set rule as the write
+		// boundary: a stored value that is not one of the known origins
+		// (an older build, or a hand-edited row) must never be merged back
+		// into a live session and re-persisted as-is.
+		origin := session.Origin(row.Origin)
+		if !origin.Valid() {
+			origin = session.OriginUnknown
+		}
 		s := &session.Session{
 			ID:              row.ID,
 			SourceSessionID: row.SourceSessionID,
@@ -116,6 +125,7 @@ func (r *Refresher) loadExistingSessions() (existingSessions, error) {
 			GitRepoRoot:     row.GitRepoRoot,
 			GitCommonRoot:   row.GitCommonRoot,
 			EndState:        session.EndState(row.EndState),
+			Origin:          origin,
 		}
 		if row.MessageCount != nil {
 			mc := *row.MessageCount
@@ -223,6 +233,18 @@ func (r *Refresher) applyTranscript(s session.Session, d adapter.Discovered, pri
 		s.LastPrompt = prior.LastPrompt
 	}
 
+	// Origin: this pass's scan either named one (the strongest signal any
+	// of its records carried - transcript.Scan already folded them, so one
+	// automated record decides), or a prior pass did, or the session stays
+	// unknown (sources that record no entrypoint field, or a delta whose
+	// records never carried one - the field rides the first record, so an
+	// incremental scan past it sees it only via prior).
+	if res.Origin != session.OriginUnknown {
+		s.Origin = res.Origin
+	} else if prior != nil {
+		s.Origin = prior.Origin
+	}
+
 	// The source's own recorded identifier, when this pass's delta included
 	// it (only ever the transcript's first line, so only a from-scratch or
 	// full-rebuild pass actually sees it) or a prior pass already recorded
@@ -295,6 +317,7 @@ func mergePrior(s *session.Session, prior *session.Session) {
 		s.SourceSessionID = prior.SourceSessionID
 	}
 	s.EndState = prior.EndState
+	s.Origin = prior.Origin
 	s.Compaction = prior.Compaction
 	s.MessageCount = prior.MessageCount
 	s.LastActivityAt = prior.LastActivityAt

@@ -33,7 +33,12 @@ import (
 // on the disposable sessions table, or the next refresh --full would
 // destroy it. NULL means not archived; a Unix-seconds value means archived
 // at that time.
-var CurrentVersion = 4
+//
+// v5 adds sessions.origin, who drove the session. It is index data read
+// back out of the transcripts (the claude entrypoint field), so it needs
+// no annotation migration - the version bump alone discards and rebuilds
+// the index, and the next refresh repopulates it.
+var CurrentVersion = 5
 
 // indexDDL creates the tables that are pure cache over the sources: safe to
 // drop and rebuild whenever CurrentVersion changes.
@@ -54,6 +59,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 	started_at        INTEGER,
 	last_activity_at  INTEGER,
 	end_state         TEXT NOT NULL,
+	origin            TEXT,
 	compaction_count  INTEGER,
 	compaction_json   TEXT,
 	transcript_path   TEXT,

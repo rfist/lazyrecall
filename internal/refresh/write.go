@@ -3,12 +3,14 @@ package refresh
 import (
 	"fmt"
 	"sort"
+
+	"lazyrecall/internal/session"
 )
 
 var sessionColumns = []string{
 	"id", "source", "source_session_id", "lineage_id", "continues_from",
 	"topic", "name", "last_prompt", "cwd", "git_branch", "git_repo_root", "git_common_root",
-	"started_at", "last_activity_at", "end_state", "compaction_count",
+	"started_at", "last_activity_at", "end_state", "origin", "compaction_count",
 	"compaction_json", "transcript_path", "message_count", "resumable", "dir_exists",
 }
 
@@ -23,6 +25,16 @@ var cursorColumns = []string{
 // formatted SQL string.
 func (r *Refresher) write(sessionRecords, promptRecords, cursorRecords []map[string]any) error {
 	lineageRecords := lineageRecordsFrom(sessionRecords, r.Profile.Name)
+
+	// origin is a closed set (session.Origin): normalize every record here,
+	// at the write boundary, so a session whose origin was never determined
+	// - or a record built by a path that never merged one - is stored as
+	// "unknown", never as an empty string or NULL. A hand-edited or
+	// older-build row already in the database is the read path's problem,
+	// not a write here.
+	for _, rec := range sessionRecords {
+		rec["origin"] = originValue(rec)
+	}
 
 	handleRecords, err := r.allocateHandles(lineageRecords)
 	if err != nil {
@@ -58,6 +70,17 @@ func (r *Refresher) write(sessionRecords, promptRecords, cursorRecords []map[str
 		return fmt.Errorf("refresh: writing to %s: %w", r.DB.DBPath, err)
 	}
 	return nil
+}
+
+// originValue returns the origin to store for one session record: the
+// record's own value when it is a member of the closed set, otherwise
+// "unknown". The merge logic upstream normally decides the value; this is
+// the invariant that keeps whatever reaches the database inside the set.
+func originValue(rec map[string]any) string {
+	if v, ok := rec["origin"].(string); ok && session.Origin(v).Valid() {
+		return v
+	}
+	return string(session.OriginUnknown)
 }
 
 // allocateHandles assigns the next handle(s) to whichever lineages in
