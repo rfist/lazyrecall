@@ -12,7 +12,7 @@ import (
 // resume-in-current-terminal): it runs the agent as a child with the
 // terminal passed straight through, waits for it, and exits this process
 // with the child's own status. The observable behaviour is the same as the
-// unix path - the agent runs in the current terminal and Recall does not
+// unix path - the agent runs in the current terminal and LazyRecall does not
 // remain running once it has - even though, unlike syscall.Exec, this
 // process technically stays alive (as the child's parent) for the agent's
 // lifetime rather than being replaced by it. It only returns to its caller

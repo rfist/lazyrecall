@@ -31,7 +31,7 @@ func (ompVocab) Classify(raw map[string]any) (Record, bool) {
 		// The session record's own "id" is omp's session identifier too
 		// (change fix-resume-session-identity, design.md decision 1/task
 		// 3.2). omp names its transcript files the same
-		// "<timestamp>_<uuid>.jsonl" way pi does, and Recall previously
+		// "<timestamp>_<uuid>.jsonl" way pi does, and LazyRecall previously
 		// passed that whole file-name stem to `omp --resume` here as well -
 		// it happened to keep working only because an unmatched --resume
 		// value makes omp silently start a brand-new session instead of

@@ -8,7 +8,7 @@ import (
 
 	"github.com/mattn/go-runewidth"
 
-	"recall/internal/search"
+	"lazyrecall/internal/search"
 )
 
 // All fixtures below are synthetic, hand-written data. strp is defined in

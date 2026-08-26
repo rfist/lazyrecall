@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"recall/internal/schema"
-	"recall/internal/sqlitex"
+	"lazyrecall/internal/schema"
+	"lazyrecall/internal/sqlitex"
 )
 
 // All fixtures below are synthetic, hand-written data - no real session
@@ -20,7 +20,7 @@ func testDB(t *testing.T) *sqlitex.Runner {
 		t.Skip("sqlite3 not on PATH")
 	}
 	dir := t.TempDir()
-	r := &sqlitex.Runner{BinPath: bin, DBPath: filepath.Join(dir, "recall.db"), TmpDir: dir}
+	r := &sqlitex.Runner{BinPath: bin, DBPath: filepath.Join(dir, "lazyrecall.db"), TmpDir: dir}
 	if _, err := schema.Open(r); err != nil {
 		t.Fatal(err)
 	}

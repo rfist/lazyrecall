@@ -23,7 +23,7 @@ func (piVocab) Classify(raw map[string]any) (Record, bool) {
 		// The session record's own "id" is the identifier pi itself uses
 		// for `pi --session` (change fix-resume-session-identity, design.md
 		// decision 1) - distinct from the transcript file's name, which pi
-		// prefixes with a timestamp Recall must never pass to pi. Confirmed
+		// prefixes with a timestamp LazyRecall must never pass to pi. Confirmed
 		// against a real transcript on this machine (structure only, never
 		// copied into this repository - see devdocs/fyi.md):
 		//   file : 2026-07-23T17-33-01-650Z_019f9009-af52-781d-a202-5c5927ec2c4c.jsonl

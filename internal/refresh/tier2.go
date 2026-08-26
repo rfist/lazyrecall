@@ -4,11 +4,11 @@ import (
 	"strconv"
 	"time"
 
-	"recall/internal/adapter"
-	claudeadapter "recall/internal/adapter/claude"
-	hermesadapter "recall/internal/adapter/hermes"
-	ompadapter "recall/internal/adapter/omp"
-	"recall/internal/transcript"
+	"lazyrecall/internal/adapter"
+	claudeadapter "lazyrecall/internal/adapter/claude"
+	hermesadapter "lazyrecall/internal/adapter/hermes"
+	ompadapter "lazyrecall/internal/adapter/omp"
+	"lazyrecall/internal/transcript"
 )
 
 // tier2ForSource ingests one source's prompts for the search index (task
@@ -25,7 +25,7 @@ func (r *Refresher) tier2ForSource(
 ) ([]map[string]any, []map[string]any, error) {
 	var promptRecords []map[string]any
 	var cursorRecords []map[string]any
-	covered := map[string]bool{} // recall session id -> got at least one prompt from the primary index
+	covered := map[string]bool{} // lazyrecall session id -> got at least one prompt from the primary index
 
 	switch sourceName {
 	case "claude":

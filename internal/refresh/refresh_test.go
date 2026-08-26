@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"recall/internal/profile"
-	"recall/internal/session"
+	"lazyrecall/internal/profile"
+	"lazyrecall/internal/session"
 )
 
 // All fixtures below are synthetic, hand-written test data - no real
@@ -34,7 +34,7 @@ func writeFile(t *testing.T, path, content string) {
 }
 
 // buildTestProfile lays out synthetic claude, pi, and omp session data
-// under a temp HOME plus recall's own data dir, and returns a Profile
+// under a temp HOME plus lazyrecall's own data dir, and returns a Profile
 // pointing at all of it (hermes is deliberately left unconfigured in most
 // tests - its own package covers its adapter behavior, and DB-per-profile
 // isolation is what this suite is verifying).
@@ -42,8 +42,8 @@ func buildTestProfile(t *testing.T) (profile.Profile, string) {
 	t.Helper()
 	home := t.TempDir()
 	dataDir := t.TempDir()
-	os.Setenv("RECALL_HOME", dataDir)
-	t.Cleanup(func() { os.Unsetenv("RECALL_HOME") })
+	os.Setenv("LAZYRECALL_HOME", dataDir)
+	t.Cleanup(func() { os.Unsetenv("LAZYRECALL_HOME") })
 
 	claudeRoot := filepath.Join(home, ".claude-personal")
 	writeFile(t, filepath.Join(claudeRoot, "history.jsonl"),
@@ -178,8 +178,8 @@ func TestMissingSourceDoesNotBlockOthers(t *testing.T) {
 	// installed"; task 5.6).
 	home := t.TempDir()
 	dataDir := t.TempDir()
-	os.Setenv("RECALL_HOME", dataDir)
-	t.Cleanup(func() { os.Unsetenv("RECALL_HOME") })
+	os.Setenv("LAZYRECALL_HOME", dataDir)
+	t.Cleanup(func() { os.Unsetenv("LAZYRECALL_HOME") })
 
 	piRoot := filepath.Join(home, "pi-home")
 	writeFile(t, filepath.Join(piRoot, "agent", "sessions", "--x--", "2026-01-01T00-00-00-000Z_p1.jsonl"),
@@ -353,13 +353,13 @@ func TestAnnotationsSurviveFullRebuildForAStillPresentSession(t *testing.T) {
 // TestPiSourceSessionIDComesFromRecordNotFileName covers change
 // fix-resume-session-identity, design.md decision 1: the transcript's file
 // name carries a timestamp prefix pi's own "id" field does not, and the
-// value Recall stores (and would hand to `pi --resume`) must be the bare id
+// value LazyRecall stores (and would hand to `pi --resume`) must be the bare id
 // alone.
 func TestPiSourceSessionIDComesFromRecordNotFileName(t *testing.T) {
 	home := t.TempDir()
 	dataDir := t.TempDir()
-	os.Setenv("RECALL_HOME", dataDir)
-	t.Cleanup(func() { os.Unsetenv("RECALL_HOME") })
+	os.Setenv("LAZYRECALL_HOME", dataDir)
+	t.Cleanup(func() { os.Unsetenv("LAZYRECALL_HOME") })
 
 	piRoot := filepath.Join(home, "pi-home")
 	// The file name is a timestamp joined to the id; the id the record
@@ -391,7 +391,7 @@ func TestPiSourceSessionIDComesFromRecordNotFileName(t *testing.T) {
 		t.Errorf("source_session_id = %q, want the bare record id, not the file-name stem", rows[0].SourceSessionID)
 	}
 	if rows[0].ID != "pi:default:019f9009-af52-781d-a202-5c5927ec2c4c" {
-		t.Errorf("id = %q, want Recall's composite id to reflect the corrected identifier", rows[0].ID)
+		t.Errorf("id = %q, want LazyRecall's composite id to reflect the corrected identifier", rows[0].ID)
 	}
 }
 
@@ -406,8 +406,8 @@ func TestPiSourceSessionIDComesFromRecordNotFileName(t *testing.T) {
 func TestIncrementalRefreshPreservesCorrectedIdentifierAndCursor(t *testing.T) {
 	home := t.TempDir()
 	dataDir := t.TempDir()
-	os.Setenv("RECALL_HOME", dataDir)
-	t.Cleanup(func() { os.Unsetenv("RECALL_HOME") })
+	os.Setenv("LAZYRECALL_HOME", dataDir)
+	t.Cleanup(func() { os.Unsetenv("LAZYRECALL_HOME") })
 
 	piRoot := filepath.Join(home, "pi-home")
 	transcriptPath := filepath.Join(piRoot, "agent", "sessions", "--x--", "2026-01-01T00-00-00-000Z_019f9009-af52-781d-a202-5c5927ec2c4c.jsonl")
@@ -484,8 +484,8 @@ func TestIncrementalRefreshPreservesCorrectedIdentifierAndCursor(t *testing.T) {
 func TestFullRebuildCorrectsPiIdentifierAndMigratesAnnotations(t *testing.T) {
 	home := t.TempDir()
 	dataDir := t.TempDir()
-	os.Setenv("RECALL_HOME", dataDir)
-	t.Cleanup(func() { os.Unsetenv("RECALL_HOME") })
+	os.Setenv("LAZYRECALL_HOME", dataDir)
+	t.Cleanup(func() { os.Unsetenv("LAZYRECALL_HOME") })
 
 	piRoot := filepath.Join(home, "pi-home")
 	transcriptPath := filepath.Join(piRoot, "agent", "sessions", "--x--", "2026-01-01T00-00-00-000Z_019f9009-af52-781d-a202-5c5927ec2c4c.jsonl")
@@ -587,8 +587,8 @@ func TestContinuationChainSharesLineage(t *testing.T) {
 	bin := sqlite3Path(t)
 	home := t.TempDir()
 	dataDir := t.TempDir()
-	os.Setenv("RECALL_HOME", dataDir)
-	t.Cleanup(func() { os.Unsetenv("RECALL_HOME") })
+	os.Setenv("LAZYRECALL_HOME", dataDir)
+	t.Cleanup(func() { os.Unsetenv("LAZYRECALL_HOME") })
 
 	hermesRoot := filepath.Join(home, "hermes-home")
 	dbPath := filepath.Join(hermesRoot, "state.db")
@@ -703,8 +703,8 @@ func TestHandleAllocatedOnFirstSightAndStableAcrossRebuild(t *testing.T) {
 func TestHandlesAreSequentialAndNeverReusedWithinAProfile(t *testing.T) {
 	home := t.TempDir()
 	dataDir := t.TempDir()
-	os.Setenv("RECALL_HOME", dataDir)
-	t.Cleanup(func() { os.Unsetenv("RECALL_HOME") })
+	os.Setenv("LAZYRECALL_HOME", dataDir)
+	t.Cleanup(func() { os.Unsetenv("LAZYRECALL_HOME") })
 
 	claudeRoot := filepath.Join(home, ".claude-personal")
 	writeFile(t, filepath.Join(claudeRoot, "projects", "-work-a", "a.jsonl"),
@@ -823,8 +823,8 @@ func TestFullRebuildDropsPreviouslyIngestedLocalCommandOutput(t *testing.T) {
 
 func TestProfileIsolationSeparateDatabaseFiles(t *testing.T) {
 	dataDir := t.TempDir()
-	os.Setenv("RECALL_HOME", dataDir)
-	t.Cleanup(func() { os.Unsetenv("RECALL_HOME") })
+	os.Setenv("LAZYRECALL_HOME", dataDir)
+	t.Cleanup(func() { os.Unsetenv("LAZYRECALL_HOME") })
 
 	p1 := profile.Profile{Name: "claude-personal"}
 	p2 := profile.Profile{Name: "claude"}

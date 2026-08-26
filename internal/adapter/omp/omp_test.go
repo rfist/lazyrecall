@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"recall/internal/profile"
+	"lazyrecall/internal/profile"
 )
 
 func TestDiscover(t *testing.T) {

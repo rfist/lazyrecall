@@ -14,10 +14,10 @@ import (
 	"strings"
 	"time"
 
-	"recall/internal/adapter"
-	"recall/internal/profile"
-	"recall/internal/session"
-	"recall/internal/sqlitex"
+	"lazyrecall/internal/adapter"
+	"lazyrecall/internal/profile"
+	"lazyrecall/internal/session"
+	"lazyrecall/internal/sqlitex"
 )
 
 type Adapter struct {

@@ -6,8 +6,8 @@
 package adapter
 
 import (
-	"recall/internal/profile"
-	"recall/internal/session"
+	"lazyrecall/internal/profile"
+	"lazyrecall/internal/session"
 )
 
 // Discovered is one session an adapter found, with whatever its source's

@@ -1,6 +1,6 @@
 // Package refresh is the orchestrator: it calls every adapter for the
 // active profile, drives the transcript reader incrementally, ingests each
-// source's tier-2 prompt index, writes everything to Recall's own database
+// source's tier-2 prompt index, writes everything to LazyRecall's own database
 // through sqlitex, and keeps lineages/orphans up to date. It is what "every
 // operation refreshes the index before answering" (design.md decision 6)
 // actually runs.
@@ -12,19 +12,20 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
-	"recall/internal/adapter"
-	claudeadapter "recall/internal/adapter/claude"
-	hermesadapter "recall/internal/adapter/hermes"
-	ompadapter "recall/internal/adapter/omp"
-	piadapter "recall/internal/adapter/pi"
-	"recall/internal/gitutil"
-	"recall/internal/profile"
-	"recall/internal/schema"
-	"recall/internal/session"
-	"recall/internal/sqlitex"
-	"recall/internal/transcript"
+	"lazyrecall/internal/adapter"
+	claudeadapter "lazyrecall/internal/adapter/claude"
+	hermesadapter "lazyrecall/internal/adapter/hermes"
+	ompadapter "lazyrecall/internal/adapter/omp"
+	piadapter "lazyrecall/internal/adapter/pi"
+	"lazyrecall/internal/gitutil"
+	"lazyrecall/internal/profile"
+	"lazyrecall/internal/schema"
+	"lazyrecall/internal/session"
+	"lazyrecall/internal/sqlitex"
+	"lazyrecall/internal/transcript"
 )
 
 // InactivityThreshold is how long a session with no clear terminal marker
@@ -56,18 +57,62 @@ type Summary struct {
 	Sources []SourceStatus
 }
 
-// Refresher runs refresh passes for one profile against one Recall
+// Refresher runs refresh passes for one profile against one LazyRecall
 // database.
 type Refresher struct {
 	Profile     profile.Profile
-	DB          *sqlitex.Runner // read-write, Recall's own database
+	DB          *sqlitex.Runner // read-write, LazyRecall's own database
 	SQLite3Path string
 	Now         func() time.Time
+}
+
+// migrateLegacyDataDir moves a pre-rename ~/.recall to the current data
+// directory the first time this version runs (change rename-to-lazyrecall).
+// Everything in there - the per-profile databases, and with them the short
+// handles, comments, and tags that are LazyRecall's own data and cannot be
+// re-derived from any source - would otherwise be orphaned by the rename.
+//
+// It runs only when the new location does not exist yet, so it can never
+// overwrite a live database, and only for the default location: a caller
+// that has set LAZYRECALL_HOME or RECALL_HOME has said where its data is,
+// and moving something else on top of that would be the opposite of what
+// it asked for.
+//
+// A failure here is reported and then ignored rather than returned. The
+// index is a cache of what the sources already hold; the worst case is a
+// rebuild on the next refresh, which is not worth refusing to start over.
+// (The annotations are the part that cannot be rebuilt - which is why the
+// old directory is left untouched on failure, for a later attempt or a
+// manual move, instead of being half-moved.)
+func migrateLegacyDataDir() {
+	if os.Getenv("LAZYRECALL_HOME") != "" || os.Getenv("RECALL_HOME") != "" {
+		return
+	}
+	newDir, oldDir := profile.DataDir(), profile.LegacyDataDir()
+	if newDir == oldDir {
+		return
+	}
+	if _, err := os.Stat(newDir); err == nil {
+		return
+	}
+	if fi, err := os.Stat(oldDir); err != nil || !fi.IsDir() {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(newDir), 0o755); err != nil {
+		fmt.Fprintf(os.Stderr, "lazyrecall: could not prepare %s (%v); leaving %s in place\n", newDir, err, oldDir)
+		return
+	}
+	if err := os.Rename(oldDir, newDir); err != nil {
+		fmt.Fprintf(os.Stderr, "lazyrecall: could not move %s to %s (%v); starting a fresh index\n", oldDir, newDir, err)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "lazyrecall: moved %s to %s\n", oldDir, newDir)
 }
 
 // New opens (creating and migrating if needed) the database for p and
 // returns a Refresher for it.
 func New(p profile.Profile, sqlite3Path string) (*Refresher, error) {
+	migrateLegacyDataDir()
 	dbPath := profile.DBPath(p)
 	if err := os.MkdirAll(profile.DataDir(), 0o755); err != nil {
 		return nil, fmt.Errorf("refresh: creating %s: %w", profile.DataDir(), err)
@@ -168,14 +213,14 @@ func (r *Refresher) Refresh(opts Options) (Summary, error) {
 			// authoritative about its own end state, nothing more to layer
 			// on here.
 
-			// Recall's own composite id is "<source>:<profile>:<source
+			// LazyRecall's own composite id is "<source>:<profile>:<source
 			// session id>" (session.Session.ID doc comment) - recomputed
 			// here now that applyTranscript may have corrected
 			// SourceSessionID from the file-derived value adapter.Discover
 			// supplied to the source's own recorded identifier (change
 			// fix-resume-session-identity, design.md decision 1). Everything
 			// downstream - the DB primary key, the lineage root, and the
-			// resume path's cmd/recall/main.go, which recovers
+			// resume path's cmd/lazyrecall/main.go, which recovers
 			// SourceSessionID by splitting this same composite id - must see
 			// the corrected value consistently.
 			s.ID = s.Source + ":" + r.Profile.Name + ":" + s.SourceSessionID

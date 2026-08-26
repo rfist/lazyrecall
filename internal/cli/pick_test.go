@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"recall/internal/search"
+	"lazyrecall/internal/search"
 )
 
 func strp(s string) *string { return &s }

@@ -5,7 +5,7 @@ import "strings"
 // claudeVocab maps Claude Code's transcript record shape. Record types seen
 // in the wild: "user", "assistant", "system" (subtype "compact_boundary"),
 // "ai-title", "custom-title", "last-prompt", "queue-operation",
-// "attachment". Only the first six carry anything Recall needs; the rest
+// "attachment". Only the first six carry anything LazyRecall needs; the rest
 // are recognized and
 // intentionally ignored (classified as not-ok, i.e. skipped) rather than
 // treated as malformed.

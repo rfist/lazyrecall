@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"recall/internal/search"
+	"lazyrecall/internal/search"
 )
 
 // Pick lets the user choose one session from items by printing a numbered
@@ -15,7 +15,7 @@ import (
 // session requires no other application" - change resume-in-current-terminal
 // removed the external fuzzy finder this used to prefer; the in-process
 // browser is the supported interactive picker now, this is only the
-// non-interactive fallback for `recall resume` with no session named).
+// non-interactive fallback for `lazyrecall resume` with no session named).
 // Returns the chosen item, or ok=false if the user entered nothing.
 func Pick(items []search.Item, in io.Reader, out io.Writer) (search.Item, bool, error) {
 	if len(items) == 0 {

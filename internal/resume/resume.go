@@ -1,11 +1,11 @@
 // Package resume takes a chosen session back to its agent, running directly
-// in the terminal Recall was invoked from (spec session-resume; design.md
+// in the terminal LazyRecall was invoked from (spec session-resume; design.md
 // decisions 1-3 of change resume-in-current-terminal). It changes to the
 // session's recorded working directory, then hands off to the agent that
-// produced it by replacing the running Recall process (syscall.Exec on unix,
+// produced it by replacing the running LazyRecall process (syscall.Exec on unix,
 // see exec_unix.go) or, where that is unavailable, by running the agent as a
 // child and exiting with its status (see exec_fallback.go). This supersedes
-// the earlier herdr-delegated design: Recall cannot leave its caller's shell
+// the earlier herdr-delegated design: LazyRecall cannot leave its caller's shell
 // in a directory after it exits, but it can run a program in one directly,
 // which is all resumption ever needed. Nothing here ever writes to a session
 // source - the only process that touches source data is the agent it hands
@@ -75,9 +75,9 @@ func agentCommand(t Target) (program string, argv []string, ok bool) {
 
 // Outcome describes why resumption did not place the user into the session.
 // Resume never returns a success value: when the agent actually starts, it
-// either replaces the Recall process outright or (on the child-process
-// fallback) runs to completion and Recall exits with its status - either way
-// there is no Recall left to report anything back to (spec session-resume,
+// either replaces the LazyRecall process outright or (on the child-process
+// fallback) runs to completion and LazyRecall exits with its status - either way
+// there is no LazyRecall left to report anything back to (spec session-resume,
 // "Resumption reports success only when the agent runs"). A value is only
 // ever returned along a failure path.
 type Outcome struct {
@@ -91,7 +91,7 @@ type Outcome struct {
 
 	// AlternativeOffered is the repository root offered in place of a
 	// missing working directory, when it still exists. Never a substitute
-	// directory Recall picked on its own - only ever this session's own
+	// directory LazyRecall picked on its own - only ever this session's own
 	// recorded repo root.
 	AlternativeOffered *string
 
@@ -154,13 +154,13 @@ func Resume(t Target) Outcome {
 
 	program, argv, ok := agentCommand(t)
 	if !ok {
-		return Outcome{Failed: true, Message: fmt.Sprintf("%q is not an agent recall knows how to resume.", t.Source)}
+		return Outcome{Failed: true, Message: fmt.Sprintf("%q is not an agent lazyrecall knows how to resume.", t.Source)}
 	}
 
 	// Resolve the program before touching anything else (decision 2; spec
 	// "makes no other change" when the program is missing) - this is the
 	// one dependency resumption genuinely has, and it belongs to the agent,
-	// not to Recall.
+	// not to LazyRecall.
 	path, err := exec.LookPath(program)
 	if err != nil {
 		return Outcome{Failed: true, Message: fmt.Sprintf("%s is not installed; the session cannot be resumed without it.", program)}

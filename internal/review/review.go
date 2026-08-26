@@ -7,9 +7,9 @@ package review
 import (
 	"fmt"
 
-	"recall/internal/search"
-	"recall/internal/session"
-	"recall/internal/sqlitex"
+	"lazyrecall/internal/search"
+	"lazyrecall/internal/session"
+	"lazyrecall/internal/sqlitex"
 )
 
 // Entry is one unfinished session in the loose-ends report (spec

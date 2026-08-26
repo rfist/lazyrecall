@@ -10,8 +10,8 @@ import (
 	"io"
 	"time"
 
-	"recall/internal/review"
-	"recall/internal/search"
+	"lazyrecall/internal/review"
+	"lazyrecall/internal/search"
 )
 
 // jsonItem is the machine-readable shape of one session (task 11.2). Field
