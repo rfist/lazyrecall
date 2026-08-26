@@ -387,11 +387,12 @@ func cmdResume(global *flag.FlagSet, profileFlag *string, jsonFlag, noRefresh *b
 	// resume-in-current-terminal, design.md decision 1), so anything below
 	// this call only ever runs on a failure path - there is no LazyRecall left
 	// to report success from.
-	profileEnv, profileOK, profileReason := resumeProfileEnv(target.Source, profileNameFrom(target.SessionID))
+	tpl, profileEnv, profileOK, profileReason := resumeSource(target.Source, profileNameFrom(target.SessionID))
 	out := resume.Resume(resume.Target{
 		Source: target.Source, SourceSessionID: sourceSessionIDFrom(target.SessionID),
 		CWD: target.CWD, GitRepoRoot: target.GitRepoRoot, DirExists: target.DirExists,
 		Resumable:               target.Resumable,
+		Resume:                  tpl,
 		ProfileEnv:              profileEnv,
 		ProfileUnresolved:       !profileOK,
 		ProfileUnresolvedReason: profileReason,
@@ -431,7 +432,25 @@ func profileNameFrom(compositeID string) string {
 	return ""
 }
 
-// resumeProfileEnv resolves the environment overrides needed to start
+// resumeSource resolves everything a session's source needs to be resumed
+// from a single config load: the argv template the resume command is built
+// from (cfg.Sources[source].Resume, passed through as Target.Resume) and
+// the environment override for the session's own profile (profileEnvFor).
+// The two come from the same config file, so resolving them together keeps
+// the resume command from reading and parsing it twice. An empty template
+// means the source has no configured resume command; resume reports that
+// source as one it does not know how to resume.
+func resumeSource(source, profileName string) (tpl []string, env map[string]string, ok bool, reason string) {
+	cfg, err := config.Load()
+	if err != nil {
+		return nil, nil, false, fmt.Sprintf("loading config: %v", err)
+	}
+	tpl = cfg.Sources[source].Resume
+	env, ok, reason = profileEnvFor(cfg, source, profileName)
+	return tpl, env, ok, reason
+}
+
+// profileEnvFor resolves the environment overrides needed to start
 // source's agent against the installation profileName's session belongs to
 // (design.md decision 3: apply the session's profile configuration to the
 // environment). Which env var points at the active root is configured per
@@ -441,11 +460,7 @@ func profileNameFrom(compositeID string) string {
 // ok=true with a nil env unconditionally, leaving other sources unaffected
 // (task 2.2). ok=false means the profile's configuration could not be
 // determined; the caller must not start the agent in that case (task 2.3).
-func resumeProfileEnv(source, profileName string) (env map[string]string, ok bool, reason string) {
-	cfg, err := config.Load()
-	if err != nil {
-		return nil, false, fmt.Sprintf("loading config: %v", err)
-	}
+func profileEnvFor(cfg config.Config, source, profileName string) (env map[string]string, ok bool, reason string) {
 	envVar := cfg.Sources[source].EnvVar
 	if envVar == "" {
 		return nil, true, ""
@@ -1002,11 +1017,12 @@ func cmdBrowse(global *flag.FlagSet, profileFlag *string, allFlag, noRefresh *bo
 	// p.Run() returning, so that has already happened before Resume can
 	// replace this process - there is no later point at which it could
 	// still be undone.
-	profileEnv, profileOK, profileReason := resumeProfileEnv(selected.Source, profileNameFrom(selected.SessionID))
+	tpl, profileEnv, profileOK, profileReason := resumeSource(selected.Source, profileNameFrom(selected.SessionID))
 	out := resume.Resume(resume.Target{
 		Source: selected.Source, SourceSessionID: sourceSessionIDFrom(selected.SessionID),
 		CWD: selected.CWD, GitRepoRoot: selected.GitRepoRoot, DirExists: selected.DirExists,
 		Resumable:               selected.Resumable,
+		Resume:                  tpl,
 		ProfileEnv:              profileEnv,
 		ProfileUnresolved:       !profileOK,
 		ProfileUnresolvedReason: profileReason,

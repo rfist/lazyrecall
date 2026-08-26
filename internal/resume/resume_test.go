@@ -4,8 +4,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+
+	"lazyrecall/internal/config"
 )
 
 func strp(s string) *string { return &s }
@@ -54,7 +57,7 @@ func TestResumeReportsMissingAgentProgram(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	dir := t.TempDir()
 
-	out := Resume(Target{Source: "claude", SourceSessionID: "abc", Resumable: true, CWD: strp(dir)})
+	out := Resume(Target{Source: "claude", SourceSessionID: "abc", Resumable: true, CWD: strp(dir), Resume: []string{"claude", "--resume", "{id}"}})
 	if !out.Failed {
 		t.Fatalf("expected Failed, got %+v", out)
 	}
@@ -108,7 +111,7 @@ func TestResumeChangesDirectoryBeforeInvokingAgent(t *testing.T) {
 	}
 	t.Cleanup(func() { execAgent = oldExec })
 
-	Resume(Target{Source: "claude", SourceSessionID: "abc-123", Resumable: true, CWD: strp(target)})
+	Resume(Target{Source: "claude", SourceSessionID: "abc-123", Resumable: true, CWD: strp(target), Resume: []string{"claude", "--resume", "{id}"}})
 
 	if !strings.HasSuffix(gotPath, string(filepath.Separator)+"claude") {
 		t.Errorf("expected the resolved claude binary path, got %q", gotPath)
@@ -137,11 +140,12 @@ func TestResumeChangesDirectoryBeforeInvokingAgent(t *testing.T) {
 func TestResumeOtherSourcesPassTheirOwnArguments(t *testing.T) {
 	cases := []struct {
 		source string
+		tpl    []string
 		want   []string
 	}{
-		{"pi", []string{"pi", "--session", "abc-123"}},
-		{"omp", []string{"omp", "--resume", "abc-123"}},
-		{"hermes", []string{"hermes", "--resume", "abc-123"}},
+		{"pi", []string{"pi", "--session", "{id}"}, []string{"pi", "--session", "abc-123"}},
+		{"omp", []string{"omp", "--resume", "{id}"}, []string{"omp", "--resume", "abc-123"}},
+		{"hermes", []string{"hermes", "--resume", "{id}"}, []string{"hermes", "--resume", "abc-123"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.source, func(t *testing.T) {
@@ -156,7 +160,7 @@ func TestResumeOtherSourcesPassTheirOwnArguments(t *testing.T) {
 			}
 			t.Cleanup(func() { execAgent = oldExec })
 
-			Resume(Target{Source: tc.source, SourceSessionID: "abc-123", Resumable: true, CWD: strp(dir)})
+			Resume(Target{Source: tc.source, SourceSessionID: "abc-123", Resumable: true, CWD: strp(dir), Resume: tc.tpl})
 
 			if len(gotArgv) != len(tc.want) {
 				t.Fatalf("argv = %v, want %v", gotArgv, tc.want)
@@ -223,6 +227,7 @@ func TestResumeAppliesProfileEnvOverridingExistingValue(t *testing.T) {
 
 	Resume(Target{
 		Source: "claude", SourceSessionID: "abc", Resumable: true, CWD: strp(dir),
+		Resume:     []string{"claude", "--resume", "{id}"},
 		ProfileEnv: map[string]string{"CLAUDE_CONFIG_DIR": "/home/x/.claude-personal"},
 	})
 
@@ -259,7 +264,7 @@ func TestResumeWithNoProfileEnvLeavesEnvironmentUntouched(t *testing.T) {
 	}
 	t.Cleanup(func() { execAgent = oldExec })
 
-	Resume(Target{Source: "pi", SourceSessionID: "abc", Resumable: true, CWD: strp(dir)})
+	Resume(Target{Source: "pi", SourceSessionID: "abc", Resumable: true, CWD: strp(dir), Resume: []string{"pi", "--session", "{id}"}})
 
 	found := false
 	for _, kv := range gotEnv {
@@ -321,11 +326,132 @@ func TestResumeReportsFailureWhenAgentCannotBeStarted(t *testing.T) {
 	}
 	t.Cleanup(func() { execAgent = oldExec })
 
-	out := Resume(Target{Source: "claude", SourceSessionID: "abc", Resumable: true, CWD: strp(dir)})
+	out := Resume(Target{Source: "claude", SourceSessionID: "abc", Resumable: true, CWD: strp(dir), Resume: []string{"claude", "--resume", "{id}"}})
 	if !out.Failed {
 		t.Fatalf("expected Failed, got %+v", out)
 	}
 	if !strings.Contains(out.Message, "boom") {
 		t.Errorf("expected the underlying error to be reported, got %q", out.Message)
+	}
+}
+
+// TestAgentCommandUsesConfigDefaults pins the contract between the built-in
+// config defaults and the commands agentCommand emits: the four default
+// templates (internal/config defaultSources) must produce exactly the
+// resume commands they produce today. The templates are read from the real
+// config defaults (with HOME pinned to a temp dir so no file can interfere),
+// so a future edit to the defaults fails loudly here instead of silently
+// changing what `lazyrecall resume` runs.
+func TestAgentCommandUsesConfigDefaults(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("LAZYRECALL_CONFIG", "")
+	t.Setenv("XDG_CONFIG_HOME", "")
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		source      string
+		wantProgram string
+		wantArgv    []string
+	}{
+		{"claude", "claude", []string{"claude", "--resume", "abc-123"}},
+		{"pi", "pi", []string{"pi", "--session", "abc-123"}},
+		{"omp", "omp", []string{"omp", "--resume", "abc-123"}},
+		{"hermes", "hermes", []string{"hermes", "--resume", "abc-123"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.source, func(t *testing.T) {
+			tpl := cfg.Sources[tc.source].Resume
+			if len(tpl) == 0 {
+				t.Fatalf("the default config has no resume template for %s", tc.source)
+			}
+			program, argv, ok := agentCommand(Target{Source: tc.source, SourceSessionID: "abc-123", Resume: tpl})
+			if !ok {
+				t.Fatalf("expected the default template for %s to be resumable", tc.source)
+			}
+			if program != tc.wantProgram {
+				t.Errorf("program = %q, want %q", program, tc.wantProgram)
+			}
+			if !reflect.DeepEqual(argv, tc.wantArgv) {
+				t.Errorf("argv = %q, want %q", argv, tc.wantArgv)
+			}
+		})
+	}
+}
+
+// TestAgentCommandSubstitutesEmbeddedPlaceholder covers the "{id}" in the
+// middle of an element (internal/config: "argv template; {id} is replaced
+// with the session id") - substitution is whole-element via
+// strings.ReplaceAll, not only a standalone "{id}" element.
+func TestAgentCommandSubstitutesEmbeddedPlaceholder(t *testing.T) {
+	program, argv, ok := agentCommand(Target{
+		Source: "myagent", SourceSessionID: "sess-77",
+		Resume: []string{"myagent", "--session={id}"},
+	})
+	if !ok {
+		t.Fatal("expected the custom template to be resumable")
+	}
+	if program != "myagent" {
+		t.Errorf("program = %q, want %q", program, "myagent")
+	}
+	want := []string{"myagent", "--session=sess-77"}
+	if !reflect.DeepEqual(argv, want) {
+		t.Errorf("argv = %q, want %q", argv, want)
+	}
+}
+
+// TestResumeEmptyTemplateDoesNotAttemptToExec covers the "no configured
+// resume command" outcome: a source whose template is empty or missing must
+// be reported as one lazyrecall does not know how to resume, and execAgent
+// must never be reached - there is no command to exec.
+func TestResumeEmptyTemplateDoesNotAttemptToExec(t *testing.T) {
+	dir := t.TempDir()
+	called := false
+	oldExec := execAgent
+	execAgent = func(path string, argv []string, env []string) error {
+		called = true
+		return nil
+	}
+	t.Cleanup(func() { execAgent = oldExec })
+
+	out := Resume(Target{Source: "unknown", SourceSessionID: "abc", Resumable: true, CWD: strp(dir)})
+	if !out.Failed {
+		t.Fatalf("expected Failed, got %+v", out)
+	}
+	if called {
+		t.Error("execAgent must never be called when the source has no resume template")
+	}
+	want := `"unknown" is not an agent lazyrecall knows how to resume.`
+	if out.Message != want {
+		t.Errorf("message = %q, want %q", out.Message, want)
+	}
+}
+
+// TestResumeTemplateMetacharactersStayLiteralArgv covers the injection
+// surface: a template whose elements contain shell metacharacters is handed
+// to execAgent as literal argv elements, never parsed by a shell. The
+// assertion is on the argv the exec double receives - the same vector
+// execAgent would pass straight to the program.
+func TestResumeTemplateMetacharactersStayLiteralArgv(t *testing.T) {
+	fakeAgentOnPath(t, "myagent")
+	dir := t.TempDir()
+
+	var gotArgv []string
+	oldExec := execAgent
+	execAgent = func(path string, argv []string, env []string) error {
+		gotArgv = argv
+		return nil
+	}
+	t.Cleanup(func() { execAgent = oldExec })
+
+	Resume(Target{
+		Source: "myagent", SourceSessionID: "abc", Resumable: true, CWD: strp(dir),
+		Resume: []string{"myagent", "--resume={id}", ";", "echo pwned && rm -rf /", "|", "sh"},
+	})
+
+	want := []string{"myagent", "--resume=abc", ";", "echo pwned && rm -rf /", "|", "sh"}
+	if !reflect.DeepEqual(gotArgv, want) {
+		t.Errorf("argv = %q, want the metacharacters passed through as literal elements %q", gotArgv, want)
 	}
 }

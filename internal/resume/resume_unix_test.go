@@ -115,7 +115,7 @@ func TestResumeReplacesProcessWithAgent(t *testing.T) {
 // stub's own exit code.
 func runResumeHelper(t *testing.T) {
 	cwd := os.Getenv(helperCWDVar)
-	out := Resume(Target{Source: "claude", SourceSessionID: "abc-123", Resumable: true, CWD: &cwd})
+	out := Resume(Target{Source: "claude", SourceSessionID: "abc-123", Resumable: true, CWD: &cwd, Resume: []string{"claude", "--resume", "{id}"}})
 	t.Logf("resume helper: Resume unexpectedly returned: %+v", out)
 	os.Exit(97)
 }
