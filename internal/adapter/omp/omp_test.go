@@ -22,7 +22,7 @@ func TestDiscover(t *testing.T) {
 	}
 
 	a := New("sqlite3")
-	p := profile.Profile{Name: "default", OmpRoot: root}
+	p := profile.Profile{Name: "default", Roots: map[string]string{"omp": root}}
 	discovered, err := a.Discover(p)
 	if err != nil {
 		t.Fatal(err)
@@ -55,7 +55,7 @@ INSERT INTO history (prompt, created_at, cwd, session_id) VALUES ('synthetic pro
 	}
 
 	a := New(bin)
-	p := profile.Profile{Name: "default", OmpRoot: root}
+	p := profile.Profile{Name: "default", Roots: map[string]string{"omp": root}}
 	prompts, cursor, err := a.PromptsSince(p, 0)
 	if err != nil {
 		t.Fatal(err)

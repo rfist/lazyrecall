@@ -387,3 +387,43 @@ func TestUnknownCommandStillErrors(t *testing.T) {
 		t.Errorf("the error %q does not name the unknown command", err)
 	}
 }
+
+// TestConfigShowMarksFileAndDefaultOrigins covers the provenance display
+// of `lazyrecall config show`: a value set by the config file must be shown
+// as (file) and one never touched as (default) - printed with its source,
+// not just printed.
+func TestConfigShowMarksFileAndDefaultOrigins(t *testing.T) {
+	home := t.TempDir()
+	cfgDir := filepath.Join(home, ".config", "lazyrecall")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.toml"), []byte("[hide]\nmin_messages = 5\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("LAZYRECALL_CONFIG", "")
+	t.Setenv("LAZYRECALL_PROFILE", "")
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stdout
+	os.Stdout = w
+	runErr := run([]string{"config", "show"})
+	w.Close()
+	os.Stdout = old
+	if runErr != nil {
+		t.Fatalf("run(config show): %v", runErr)
+	}
+	out, _ := io.ReadAll(r)
+	got := string(out)
+
+	if !strings.Contains(got, "hide.min_messages = 5    (file)") {
+		t.Errorf("expected the file-set value attributed to the file, got:\n%s", got)
+	}
+	if !strings.Contains(got, "browse.show_archived = false    (default)") {
+		t.Errorf("expected an untouched value attributed to the default, got:\n%s", got)
+	}
+}

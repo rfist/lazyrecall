@@ -27,7 +27,7 @@ func TestDiscoverFindsTranscriptsWithoutDecodingDirNames(t *testing.T) {
 	}
 
 	a := New()
-	p := profile.Profile{Name: "claude-personal", ClaudeRoot: root}
+	p := profile.Profile{Name: "claude-personal", Roots: map[string]string{"claude": root}}
 	discovered, err := a.Discover(p)
 	if err != nil {
 		t.Fatal(err)
@@ -73,7 +73,7 @@ func TestUnreadableProjectsSubdirIsSkippedNotFatal(t *testing.T) {
 	t.Cleanup(func() { os.Chmod(badDir, 0o755) }) // let t.TempDir() clean up
 
 	a := New()
-	p := profile.Profile{Name: "claude-personal", ClaudeRoot: root}
+	p := profile.Profile{Name: "claude-personal", Roots: map[string]string{"claude": root}}
 	discovered, err := a.Discover(p)
 	if err != nil {
 		t.Fatalf("one unreadable subdir must not fail discovery for the rest of the source: %v", err)

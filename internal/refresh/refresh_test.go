@@ -52,7 +52,7 @@ func buildTestProfile(t *testing.T) (profile.Profile, string) {
 		`{"type":"user","message":{"role":"user","content":"help me fix the flaky retry test"},"cwd":"/work/repo","gitBranch":"main","timestamp":"2026-01-01T00:00:00Z"}`+"\n"+
 			`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Fixed the retry loop."}],"stop_reason":"end_turn"},"timestamp":"2026-01-01T00:00:05Z"}`+"\n")
 
-	p := profile.Profile{Name: "claude-personal", ClaudeRoot: claudeRoot}
+	p := profile.Profile{Name: "claude-personal", Roots: map[string]string{"claude": claudeRoot}}
 	return p, sqlite3Path(t)
 }
 
@@ -119,7 +119,7 @@ func TestIncrementalRefreshOnlyReadsWhatChanged(t *testing.T) {
 	}
 
 	// Append a new prompt to the same session, as a live agent would.
-	transcriptPath := filepath.Join(p.ClaudeRoot, "projects", "-work-repo", "c1.jsonl")
+	transcriptPath := filepath.Join(p.Roots["claude"], "projects", "-work-repo", "c1.jsonl")
 	f, err := os.OpenFile(transcriptPath, os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		t.Fatal(err)
@@ -186,7 +186,7 @@ func TestMissingSourceDoesNotBlockOthers(t *testing.T) {
 		`{"type":"session","cwd":"/x","timestamp":"2026-01-01T00:00:00Z"}`+"\n"+
 			`{"type":"message","message":{"role":"user","content":[{"type":"text","text":"synthetic prompt"}]},"timestamp":"2026-01-01T00:00:01Z"}`+"\n")
 
-	p := profile.Profile{Name: "default", PiRoot: piRoot}
+	p := profile.Profile{Name: "default", Roots: map[string]string{"pi": piRoot}}
 	r, err := New(p, sqlite3Path(t))
 	if err != nil {
 		t.Fatal(err)
@@ -252,10 +252,10 @@ func TestOrphanedLineageRetainsAnnotations(t *testing.T) {
 	}
 
 	// The session disappears from its source entirely.
-	if err := os.RemoveAll(filepath.Join(p.ClaudeRoot, "projects")); err != nil {
+	if err := os.RemoveAll(filepath.Join(p.Roots["claude"], "projects")); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(p.ClaudeRoot, "history.jsonl"), []byte(""), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(p.Roots["claude"], "history.jsonl"), []byte(""), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -368,7 +368,7 @@ func TestPiSourceSessionIDComesFromRecordNotFileName(t *testing.T) {
 		`{"type":"session","id":"019f9009-af52-781d-a202-5c5927ec2c4c","cwd":"/x","timestamp":"2026-01-01T00:00:00Z"}`+"\n"+
 			`{"type":"message","message":{"role":"user","content":[{"type":"text","text":"hello"}]},"timestamp":"2026-01-01T00:00:01Z"}`+"\n")
 
-	p := profile.Profile{Name: "default", PiRoot: piRoot}
+	p := profile.Profile{Name: "default", Roots: map[string]string{"pi": piRoot}}
 	r, err := New(p, sqlite3Path(t))
 	if err != nil {
 		t.Fatal(err)
@@ -426,7 +426,7 @@ func TestIncrementalRefreshPreservesCorrectedIdentifierAndCursor(t *testing.T) {
 		`{"type":"session","id":"019f9009-af52-781d-a202-5c5927ec2c4c","cwd":"/x","timestamp":"2026-01-01T00:00:00Z","pad":"`+pad+`"}`+"\n"+
 			`{"type":"message","message":{"role":"user","content":[{"type":"text","text":"hello"}]},"timestamp":"2026-01-01T00:00:01Z"}`+"\n")
 
-	p := profile.Profile{Name: "default", PiRoot: piRoot}
+	p := profile.Profile{Name: "default", Roots: map[string]string{"pi": piRoot}}
 	r, err := New(p, sqlite3Path(t))
 	if err != nil {
 		t.Fatal(err)
@@ -493,7 +493,7 @@ func TestFullRebuildCorrectsPiIdentifierAndMigratesAnnotations(t *testing.T) {
 		`{"type":"session","id":"019f9009-af52-781d-a202-5c5927ec2c4c","cwd":"/x","timestamp":"2026-01-01T00:00:00Z"}`+"\n"+
 			`{"type":"message","message":{"role":"user","content":[{"type":"text","text":"hello"}]},"timestamp":"2026-01-01T00:00:01Z"}`+"\n")
 
-	p := profile.Profile{Name: "default", PiRoot: piRoot}
+	p := profile.Profile{Name: "default", Roots: map[string]string{"pi": piRoot}}
 	r, err := New(p, sqlite3Path(t))
 	if err != nil {
 		t.Fatal(err)
@@ -608,7 +608,7 @@ INSERT INTO messages (session_id, role, content, finish_reason, timestamp) VALUE
 		t.Fatalf("seeding: %v: %s", err, out)
 	}
 
-	p := profile.Profile{Name: "hermes-only", HermesRoot: hermesRoot}
+	p := profile.Profile{Name: "hermes-only", Roots: map[string]string{"hermes": hermesRoot}}
 	r, err := New(p, bin)
 	if err != nil {
 		t.Fatal(err)
@@ -714,7 +714,7 @@ func TestHandlesAreSequentialAndNeverReusedWithinAProfile(t *testing.T) {
 		`{"type":"user","message":{"role":"user","content":"second session prompt"},"cwd":"/work/b","timestamp":"2026-01-02T00:00:00Z"}`+"\n"+
 			`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn"},"timestamp":"2026-01-02T00:00:01Z"}`+"\n")
 
-	p := profile.Profile{Name: "claude-personal", ClaudeRoot: claudeRoot}
+	p := profile.Profile{Name: "claude-personal", Roots: map[string]string{"claude": claudeRoot}}
 	r, err := New(p, sqlite3Path(t))
 	if err != nil {
 		t.Fatal(err)
@@ -854,7 +854,7 @@ func TestProfileIsolationSeparateDatabaseFiles(t *testing.T) {
 // already known rather than dropping it back to unknown.
 func TestSessionNameIndexedAndSurvivesIncrementalRefresh(t *testing.T) {
 	p, bin := buildTestProfile(t)
-	transcript := filepath.Join(p.ClaudeRoot, "projects", "-work-repo", "c1.jsonl")
+	transcript := filepath.Join(p.Roots["claude"], "projects", "-work-repo", "c1.jsonl")
 	appendLine := func(line string) {
 		t.Helper()
 		f, err := os.OpenFile(transcript, os.O_APPEND|os.O_WRONLY, 0o644)

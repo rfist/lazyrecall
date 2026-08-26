@@ -49,7 +49,7 @@ type sessionRow struct {
 }
 
 func (a *Adapter) Discover(p profile.Profile) ([]adapter.Discovered, error) {
-	root := p.HermesRoot
+	root := p.Roots[a.Name()]
 	if root == "" {
 		return nil, &adapter.Unavailable{Reason: "no hermes root for this profile"}
 	}
@@ -174,10 +174,11 @@ type PromptEntry struct {
 // greater than fromID, read-only (task 5.5, "prompts from messages with
 // role user"; task 6.1's monotonic-key cursor for database sources).
 func (a *Adapter) PromptsSince(p profile.Profile, fromID int64) ([]PromptEntry, int64, error) {
-	if p.HermesRoot == "" {
+	root := p.Roots[a.Name()]
+	if root == "" {
 		return nil, fromID, nil
 	}
-	dbPath := filepath.Join(p.HermesRoot, "state.db")
+	dbPath := filepath.Join(root, "state.db")
 	if _, err := os.Stat(dbPath); err != nil {
 		return nil, fromID, nil
 	}

@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,6 +17,7 @@ import (
 
 	"lazyrecall/internal/annotate"
 	"lazyrecall/internal/cli"
+	"lazyrecall/internal/config"
 	"lazyrecall/internal/profile"
 	"lazyrecall/internal/refresh"
 	"lazyrecall/internal/resume"
@@ -89,6 +91,8 @@ func run(args []string) error {
 		return cmdRefresh(global, profileFlag, rest)
 	case "profiles":
 		return cmdProfiles(*jsonFlag)
+	case "config":
+		return cmdConfig(global, rest)
 	default:
 		printUsage()
 		return fmt.Errorf("unknown command %q", cmd)
@@ -117,6 +121,7 @@ Usage:
   lazyrecall refresh   [--full] [--profile=NAME]
   lazyrecall browse    [QUERY] [--agent=NAME] [--repo=PATH] [--tag=NAME] [--profile=NAME]
   lazyrecall profiles  [--json]
+  lazyrecall config    path|init|show
   lazyrecall version, --version, -v
 
 With no SESSION_ID, "lazyrecall resume" opens a numbered picker to choose from.
@@ -134,9 +139,14 @@ composite identifier.
 }
 
 // resolveProfile discovers profiles and picks the active one, printing it
-// is left to callers (spec session-index, "Active profile is visible").
+// is left to callers (spec session-index, "Active profile is visible"). A
+// config file that cannot be parsed surfaces here, before any profile work
+// happens: it is the first thing every command path shares.
 func resolveProfile(requested string) (profile.Profile, error) {
-	profiles := profile.Discover()
+	profiles, err := profile.Discover()
+	if err != nil {
+		return profile.Profile{}, err
+	}
 	return profile.Resolve(profiles, requested)
 }
 
@@ -400,28 +410,36 @@ func profileNameFrom(compositeID string) string {
 
 // resumeProfileEnv resolves the environment overrides needed to start
 // source's agent against the installation profileName's session belongs to
-// (design.md decision 3: "internal/profile already models each profile's
-// Claude configuration root ... apply the session's profile configuration
-// to the environment"). Only claude currently varies by profile on this
-// machine - every discovered Claude config root is its own profile
-// (internal/profile doc comment), while pi/omp/hermes are each bundled into
-// exactly one profile and never duplicated - so every other source returns
-// ok=true with a nil env unconditionally (task 2.2: "apply only what the
-// session's profile requires, leaving other sources unaffected"). ok=false
-// means the profile's configuration could not be determined; the caller
-// must not start the agent in that case (task 2.3).
+// (design.md decision 3: apply the session's profile configuration to the
+// environment). Which env var points at the active root is configured per
+// source (internal/config: a source's EnvVar). A source with no EnvVar
+// never varies per profile on this machine - pi/omp/hermes are each
+// bundled into exactly one profile (internal/profile) - so it returns
+// ok=true with a nil env unconditionally, leaving other sources unaffected
+// (task 2.2). ok=false means the profile's configuration could not be
+// determined; the caller must not start the agent in that case (task 2.3).
 func resumeProfileEnv(source, profileName string) (env map[string]string, ok bool, reason string) {
-	if source != "claude" {
+	cfg, err := config.Load()
+	if err != nil {
+		return nil, false, fmt.Sprintf("loading config: %v", err)
+	}
+	envVar := cfg.Sources[source].EnvVar
+	if envVar == "" {
 		return nil, true, ""
 	}
-	for _, p := range profile.Discover() {
+	discovered, err := profile.Discover()
+	if err != nil {
+		return nil, false, fmt.Sprintf("discovering profiles: %v", err)
+	}
+	for _, p := range discovered {
 		if p.Name != profileName {
 			continue
 		}
-		if p.ClaudeRoot == "" {
-			return nil, false, fmt.Sprintf("profile %q has no Claude configuration root", profileName)
+		root := p.Roots[source]
+		if root == "" {
+			return nil, false, fmt.Sprintf("profile %q has no %s configuration root", profileName, source)
 		}
-		return map[string]string{"CLAUDE_CONFIG_DIR": p.ClaudeRoot}, true, ""
+		return map[string]string{envVar: root}, true, ""
 	}
 	return nil, false, fmt.Sprintf("no discovered profile named %q", profileName)
 }
@@ -571,7 +589,10 @@ func cmdRefresh(global *flag.FlagSet, profileFlag *string, args []string) error 
 // ("claude: map[claude:/Users/...]") - not something intended to be read,
 // and not a reliable way to learn a profile's name from the command line.
 func cmdProfiles(jsonOut bool) error {
-	profiles := profile.Discover()
+	profiles, err := profile.Discover()
+	if err != nil {
+		return err
+	}
 	if jsonOut {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
@@ -598,6 +619,156 @@ func cmdProfiles(jsonOut bool) error {
 	}
 	return nil
 }
+
+// discoverProfilesForBrowser feeds the browser's profile-switch panel,
+// which takes a plain slice with no error slot: a discovery failure here is
+// best-effort (the panel simply offers nothing), while every command path
+// surfaces the same failure through resolveProfile.
+func discoverProfilesForBrowser() []profile.Profile {
+	profiles, _ := profile.Discover()
+	return profiles
+}
+
+// ---------------------------------------------------------------------
+// lazyrecall config (change sources-become-data)
+// ---------------------------------------------------------------------
+
+// cmdConfig implements `lazyrecall config path|init|show`: path prints
+// where the config file resolves to and whether it exists, init writes a
+// commented-out default config there (refusing to clobber an existing
+// one), and show prints the effective config with each value's provenance.
+// The provenance display exists because the precedence chain (flag > env >
+// file > default) is otherwise something every reader has to reconstruct
+// by hand; the Origins map lets this command say where each value came
+// from instead (internal/config).
+func cmdConfig(global *flag.FlagSet, args []string) error {
+	rest, err := parseInterleaved(global, args)
+	if err != nil {
+		return err
+	}
+	if len(rest) == 0 {
+		return fmt.Errorf("usage: lazyrecall config path|init|show")
+	}
+	switch rest[0] {
+	case "path":
+		path := config.Path()
+		fmt.Println(path)
+		if _, err := os.Stat(path); err == nil {
+			fmt.Println("exists")
+		} else if os.IsNotExist(err) {
+			fmt.Println("does not exist")
+		} else {
+			return err
+		}
+		return nil
+	case "init":
+		path := config.Path()
+		if _, err := os.Stat(path); err == nil {
+			return fmt.Errorf("config file already exists at %s", path)
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(path, []byte(defaultConfigFile), 0o644); err != nil {
+			return err
+		}
+		fmt.Printf("wrote %s\n", path)
+		return nil
+	case "show":
+		cfg, err := config.Load()
+		if err != nil {
+			return err
+		}
+		// Provenance is about the effective config, so the env layer is
+		// applied before printing (a LAZYRECALL_PROFILE set in the shell
+		// should show as the env it actually came from).
+		cfg.ApplyEnv()
+		return showConfig(cfg)
+	default:
+		return fmt.Errorf("unknown config subcommand %q", rest[0])
+	}
+}
+
+// showConfig prints every configurable key with its effective value and
+// provenance, in sorted-key order, so the whole effective config is visible
+// at once with each value attributed to the layer that set it.
+func showConfig(cfg config.Config) error {
+	values := map[string]any{
+		"default_profile":      cfg.DefaultProfile,
+		"hide.non_interactive": cfg.Hide.NonInteractive,
+		"hide.min_messages":    cfg.Hide.MinMessages,
+		"hide.paths":           cfg.Hide.Paths,
+		"browse.show_archived": cfg.Browse.ShowArchived,
+	}
+	names := make([]string, 0, len(cfg.Sources))
+	for name := range cfg.Sources {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		values["sources."+name+".roots"] = cfg.Sources[name].Roots
+		values["sources."+name+".resume"] = cfg.Sources[name].Resume
+		values["sources."+name+".env_var"] = cfg.Sources[name].EnvVar
+	}
+
+	keys := make([]string, 0, len(values))
+	for k := range values {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		fmt.Printf("%s = %v    (%s)\n", k, values[k], cfg.Origins[k])
+	}
+	return nil
+}
+
+// defaultConfigFile is what `lazyrecall config init` writes: the built-in
+// defaults as a commented template, so the file the user ends up with is
+// exactly the configuration they would otherwise have had implicitly, with
+// every knob visible. The table headers are commented out too, not just
+// the values: a bare [sources.X] header would make that source file-owned
+// and zero every field it omits (internal/config: a source table replaces
+// the defaults entirely), so an untouched file must not change behavior -
+// it is a starting point for editing, not a new effective config.
+const defaultConfigFile = `# LazyRecall configuration (lazyrecall config).
+# Every setting here is optional: with no config file, LazyRecall runs on
+# exactly these defaults. Uncomment a line to change it.
+
+# The profile used when neither --profile nor LAZYRECALL_PROFILE is set.
+# default_profile = "claude-personal"
+
+# [sources.claude]
+# roots = ["~/.claude-personal", "~/.claude"]
+# resume = ["claude", "--resume", "{id}"]
+# env_var = "CLAUDE_CONFIG_DIR"
+
+# [sources.pi]
+# roots = ["~/.pi"]
+# resume = ["pi", "--session", "{id}"]
+
+# [sources.omp]
+# roots = ["~/.omp"]
+# resume = ["omp", "--resume", "{id}"]
+
+# [sources.hermes]
+# roots = ["~/.hermes"]
+# resume = ["hermes", "--resume", "{id}"]
+
+# [hide]
+# non_interactive = true
+# min_messages = 0
+# paths = []
+
+# NOTE: raising hide.min_messages above 0 can hide a genuinely dangling
+# session. A dangling session is by definition a short one - the exchange
+# stopped mid-turn - so a threshold that hides short sessions also hides
+# real problems from the review listing.
+
+# [browse]
+# show_archived = false
+`
 
 func outputItems(p profile.Profile, items []search.Item, jsonOut bool, emptyMessage string) error {
 	if jsonOut {
@@ -699,7 +870,7 @@ func cmdBrowse(global *flag.FlagSet, profileFlag *string, noRefresh *bool, args 
 		Query:       query,
 		Style:       os.Getenv("NO_COLOR") == "",
 		Resolve:     resolveProfile,
-		Profiles:    profile.Discover,
+		Profiles:    discoverProfilesForBrowser,
 	})
 	if err != nil {
 		return err

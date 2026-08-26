@@ -3,22 +3,20 @@
 // profile per invocation (spec session-index, "Profile isolation";
 // design.md decision 1).
 //
-// Design note on profile granularity (not dictated verbatim by the spec,
-// recorded here and in devdocs/fyi.md):
-//
-// Of the four sources, only Claude Code is known to have more than one
-// config root on the author's machine ($CLAUDE_CONFIG_DIR-selected
-// ~/.claude for work, ~/.claude-personal for personal). pi, omp, and hermes
-// each have exactly one canonical root and no work/personal split anywhere
-// in the planning artifacts. So: every discovered Claude config root is its
-// own profile (task 5.2). pi/omp/hermes are bundled into exactly one
-// "primary" profile - never duplicated across profiles, never silently
-// attached to a work profile - so that a session from a single-install
-// source is never presented under two different profile identities. The
-// primary profile defaults to whichever Claude root is personal-looking
-// (name contains "personal"), and can be overridden explicitly. If no
-// Claude root exists at all, a synthetic "default" profile carries
-// pi/omp/hermes alone.
+// Where the roots come from is the config file (internal/config), whose
+// built-in defaults reproduce the program's historical hardcoded roots.
+// Each configured source is probed in the order its roots are listed and
+// the ones that exist are kept. A source with more than one configured
+// root produces one profile per root that exists - that is how claude and
+// claude-personal become two profiles. A source with exactly one root is
+// attached to exactly one "primary" profile, never duplicated across
+// profiles and never silently attached to a work profile, so a session
+// from a single-install source is never presented under two different
+// profile identities (design note recorded in devdocs/fyi.md). The primary
+// profile defaults to whichever discovered profile's name contains
+// "personal" and can be overridden explicitly; if no such profile exists
+// at all, a synthetic "default" profile carries the single-install
+// sources alone.
 package profile
 
 import (
@@ -27,6 +25,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"lazyrecall/internal/config"
 )
 
 // Profile is one isolated identity: a bundle of config roots, at most one
@@ -36,34 +36,18 @@ type Profile struct {
 	// Name identifies the profile in output and in the database filename.
 	Name string
 
-	// ClaudeRoot is this profile's Claude config root ($CLAUDE_CONFIG_DIR
-	// equivalent), or "" if this profile has no Claude data.
-	ClaudeRoot string
-
-	// PiRoot, OmpRoot, HermesRoot are "" unless this is the primary profile
-	// that bundles the machine's single-instance sources.
-	PiRoot     string
-	OmpRoot    string
-	HermesRoot string
+	// Roots maps a source name ("claude", "pi", ...) to that source's
+	// config root for this profile. A key with a non-empty value means
+	// this profile has data for that source; an absent key means it does
+	// not. The named fields this used to be (ClaudeRoot, PiRoot, ...) are
+	// gone because the set of sources is no longer fixed: it comes from
+	// the config, and a map is the shape that cannot drift out of sync
+	// with it (change sources-become-data).
+	Roots map[string]string
 }
 
 // Sources returns the (source name, root) pairs this profile has data for.
-func (p Profile) Sources() map[string]string {
-	m := map[string]string{}
-	if p.ClaudeRoot != "" {
-		m["claude"] = p.ClaudeRoot
-	}
-	if p.PiRoot != "" {
-		m["pi"] = p.PiRoot
-	}
-	if p.OmpRoot != "" {
-		m["omp"] = p.OmpRoot
-	}
-	if p.HermesRoot != "" {
-		m["hermes"] = p.HermesRoot
-	}
-	return m
-}
+func (p Profile) Sources() map[string]string { return p.Roots }
 
 func homeDir() string {
 	if h := os.Getenv("HOME"); h != "" {
@@ -94,78 +78,109 @@ func exists(dir string) bool {
 	return err == nil && fi.IsDir()
 }
 
-// candidateClaudeRoots returns the Claude config roots to probe: an
-// explicit override list (LAZYRECALL_CLAUDE_CONFIG_DIRS, colon-separated)
-// if set, else the two conventional defaults.
-func candidateClaudeRoots() []string {
-	if v := env("CLAUDE_CONFIG_DIRS"); v != "" {
-		var out []string
-		for _, p := range strings.Split(v, ":") {
-			if p != "" {
-				out = append(out, p)
+// sourceRoots returns the roots to probe for a configured source: the
+// pre-config environment override when one is set, else the source's own
+// configured roots. The env overrides (LAZYRECALL_CLAUDE_CONFIG_DIRS,
+// LAZYRECALL_PI_HOME, ...) predate the config file and remain the only way
+// to point discovery at synthetic roots in tests and scripts, so a value
+// they set must keep meaning exactly what it always meant.
+func sourceRoots(cfg config.Config, name string) []string {
+	if name == "claude" {
+		if v := env("CLAUDE_CONFIG_DIRS"); v != "" {
+			var out []string
+			for _, p := range strings.Split(v, ":") {
+				if p != "" {
+					out = append(out, p)
+				}
 			}
+			return out
 		}
-		return out
+		return cfg.Sources[name].Roots
 	}
-	home := homeDir()
-	return []string{
-		filepath.Join(home, ".claude-personal"),
-		filepath.Join(home, ".claude"),
+	if v := env(strings.ToUpper(name) + "_HOME"); v != "" {
+		return []string{v}
 	}
+	return cfg.Sources[name].Roots
 }
 
-func claudeProfileName(root string) string {
+// sourceRootExists is the existence test a source's roots must pass to be
+// discovered. claude alone needs the stricter shape check: a stray empty
+// directory named ".claude*" must still not count as a real install.
+func sourceRootExists(name, root string) bool {
+	if name == "claude" {
+		return looksLikeClaudeRoot(root)
+	}
+	return exists(root)
+}
+
+// profileName derives a profile's name from its config root, so
+// ~/.claude-personal and ~/.claude become the profiles "claude-personal"
+// and "claude".
+func profileName(root string) string {
 	base := filepath.Base(root)
 	return strings.TrimPrefix(base, ".")
 }
 
-// Discover finds every profile present on the machine. It never returns an
-// error for an absent source - an absent source simply contributes nothing
-// (spec session-index, "Source discovery").
-func Discover() []Profile {
-	home := homeDir()
+// Discover finds every profile present on the machine, driven by the
+// config's source roots (internal/config). It never fails because a source
+// is absent - an absent source simply contributes nothing (spec
+// session-index, "Source discovery") - but a config file that cannot be
+// parsed is a hard error, surfaced here rather than swallowed: the user
+// wrote that file and expects it to be in effect.
+func Discover() ([]Profile, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return nil, err
+	}
 
-	var claudeRoots []string
-	for _, c := range candidateClaudeRoots() {
-		if looksLikeClaudeRoot(c) {
-			claudeRoots = append(claudeRoots, c)
+	// Iterate source names sorted so profile creation order is
+	// deterministic regardless of map iteration order.
+	names := make([]string, 0, len(cfg.Sources))
+	for name := range cfg.Sources {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	var profiles []Profile
+	type singleRoot struct {
+		source string
+		root   string
+	}
+	var singles []singleRoot
+
+	for _, name := range names {
+		roots := sourceRoots(cfg, name)
+		var existing []string
+		for _, root := range roots {
+			if sourceRootExists(name, root) {
+				existing = append(existing, root)
+			}
+		}
+		// A source that can have more than one installation names a
+		// profile per root that exists; a single-install source is
+		// attached to the primary profile below rather than naming one of
+		// its own. Which it is comes from the config, never from counting
+		// the roots the user happened to list: a profile's name is its
+		// database filename, so inferring it would let someone change
+		// which database they are using - orphaning every handle,
+		// comment, and tag in the old one - just by narrowing a roots
+		// list (change sources-become-data).
+		if !cfg.Sources[name].SingleInstall {
+			for _, root := range existing {
+				profiles = append(profiles, Profile{Name: profileName(root), Roots: map[string]string{name: root}})
+			}
+		} else {
+			for _, root := range existing {
+				singles = append(singles, singleRoot{name, root})
+			}
 		}
 	}
 
-	piRoot := env("PI_HOME")
-	if piRoot == "" {
-		piRoot = filepath.Join(home, ".pi")
-	}
-	if !exists(piRoot) {
-		piRoot = ""
-	}
-
-	ompRoot := env("OMP_HOME")
-	if ompRoot == "" {
-		ompRoot = filepath.Join(home, ".omp")
-	}
-	if !exists(ompRoot) {
-		ompRoot = ""
-	}
-
-	hermesRoot := env("HERMES_HOME")
-	if hermesRoot == "" {
-		hermesRoot = filepath.Join(home, ".hermes")
-	}
-	if !exists(hermesRoot) {
-		hermesRoot = ""
-	}
-
-	var profiles []Profile
-	for _, root := range claudeRoots {
-		profiles = append(profiles, Profile{Name: claudeProfileName(root), ClaudeRoot: root})
-	}
-
-	// Attach the single-instance sources to exactly one profile: the
-	// primary. Prefer a Claude root whose name suggests "personal"; fall
-	// back to the first discovered Claude root; if there is no Claude root
-	// at all, synthesize a "default" profile.
-	if piRoot != "" || ompRoot != "" || hermesRoot != "" {
+	// Attach the single-install roots to exactly one profile: the primary.
+	// Prefer a profile whose name suggests "personal"; fall back to the
+	// first discovered profile; if there is no profile at all, synthesize
+	// a "default" one to carry them.
+	if len(singles) > 0 {
 		primaryIdx := -1
 		for i, p := range profiles {
 			if strings.Contains(p.Name, "personal") {
@@ -177,32 +192,59 @@ func Discover() []Profile {
 			primaryIdx = 0
 		}
 		if primaryIdx >= 0 {
-			profiles[primaryIdx].PiRoot = piRoot
-			profiles[primaryIdx].OmpRoot = ompRoot
-			profiles[primaryIdx].HermesRoot = hermesRoot
+			roots := profiles[primaryIdx].Roots
+			if roots == nil {
+				roots = map[string]string{}
+				profiles[primaryIdx].Roots = roots
+			}
+			for _, s := range singles {
+				roots[s.source] = s.root
+			}
 		} else {
-			profiles = append(profiles, Profile{
-				Name:       "default",
-				PiRoot:     piRoot,
-				OmpRoot:    ompRoot,
-				HermesRoot: hermesRoot,
-			})
+			roots := map[string]string{}
+			for _, s := range singles {
+				roots[s.source] = s.root
+			}
+			profiles = append(profiles, Profile{Name: "default", Roots: roots})
 		}
 	}
 
 	sort.Slice(profiles, func(i, j int) bool { return profiles[i].Name < profiles[j].Name })
-	return profiles
+	return profiles, nil
+}
+
+// configuredSourceNames lists the sources the config actually defines, sorted.
+// The "nothing was found" error names them because the set is no longer fixed:
+// telling a user with a codex-only config that no "Claude, pi, omp, or hermes"
+// directory was found would name four sources they never configured and omit
+// the one they did.
+func configuredSourceNames() []string {
+	cfg, err := config.Load()
+	if err != nil {
+		return nil
+	}
+	names := make([]string, 0, len(cfg.Sources))
+	for name := range cfg.Sources {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // Resolve picks exactly one active profile (spec session-index, "Profile
 // isolation": "Exactly one profile SHALL be active for any operation").
-// requested, when non-empty, must name a discovered profile exactly.
-// Otherwise LAZYRECALL_PROFILE is consulted, and failing that the primary
-// profile (the one bundling pi/omp/hermes, if any) is used, and failing
-// that, if exactly one profile was discovered, that one is used.
+// Resolution order: the explicitly requested name, then the
+// LAZYRECALL_PROFILE/RECALL_PROFILE environment, then the config file's
+// default_profile, then the primary profile (the one bundling the
+// single-install sources), and finally - where nothing gave a reason to
+// prefer any one profile - the first profile by name. That last step is
+// what makes a machine with two Claude installs and none of the others
+// usable: before it existed, such a machine was a hard error with no way
+// out from inside the tool. A requested name that matches nothing is still
+// a hard error listing the real choices, never a silent fallback.
 func Resolve(profiles []Profile, requested string) (Profile, error) {
 	if len(profiles) == 0 {
-		return Profile{}, fmt.Errorf("no session sources found on this machine: no Claude, pi, omp, or hermes config directories were discovered")
+		return Profile{}, fmt.Errorf("no session sources found on this machine: none of the configured sources (%s) has a config directory here", strings.Join(configuredSourceNames(), ", "))
 	}
 
 	if requested == "" {
@@ -221,20 +263,28 @@ func Resolve(profiles []Profile, requested string) (Profile, error) {
 		return Profile{}, fmt.Errorf("no such profile %q; available profiles: %s", requested, strings.Join(names, ", "))
 	}
 
+	cfg, err := config.Load()
+	if err != nil {
+		return Profile{}, err
+	}
+	if cfg.DefaultProfile != "" {
+		for _, p := range profiles {
+			if p.Name == cfg.DefaultProfile {
+				return p, nil
+			}
+		}
+		// A default_profile that names a profile absent from this machine
+		// falls through to the built-in rule: the setting is a preference,
+		// and a stale one must not make the tool refuse to run.
+	}
+
 	for _, p := range profiles {
-		if p.PiRoot != "" || p.OmpRoot != "" || p.HermesRoot != "" {
+		if len(p.Roots) > 1 {
 			return p, nil
 		}
 	}
-	if len(profiles) == 1 {
-		return profiles[0], nil
-	}
 
-	names := make([]string, len(profiles))
-	for i, p := range profiles {
-		names[i] = p.Name
-	}
-	return Profile{}, fmt.Errorf("multiple profiles found (%s) and none is the default; pass --profile or set LAZYRECALL_PROFILE", strings.Join(names, ", "))
+	return profiles[0], nil
 }
 
 // env reads one of this program's environment overrides, preferring the
