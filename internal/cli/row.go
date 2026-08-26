@@ -447,3 +447,34 @@ func stateColor(s session.EndState) string {
 		return ansiDim
 	}
 }
+
+// sanitizeMultiLine is sanitizeSingleLine's counterpart for the two
+// surfaces that legitimately show a paragraph - the browser's comment and
+// prompt tabs. Newlines are kept, because they are the structure the reader
+// is there to see; every other control character is replaced the same way
+// sanitizeSingleLine replaces it, so nothing in a session's text can move
+// the cursor, repaint the screen, or break out of the pane it is drawn in.
+func sanitizeMultiLine(s string) string {
+	if s == "" {
+		return s
+	}
+	var b strings.Builder
+	inControlRun := false
+	for _, r := range s {
+		if r == '\n' {
+			b.WriteRune('\n')
+			inControlRun = false
+			continue
+		}
+		if unicode.IsControl(r) {
+			if !inControlRun {
+				b.WriteString(singleLineSeparator)
+				inControlRun = true
+			}
+			continue
+		}
+		inControlRun = false
+		b.WriteRune(r)
+	}
+	return b.String()
+}

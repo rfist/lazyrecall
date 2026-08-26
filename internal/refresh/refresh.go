@@ -85,7 +85,7 @@ type Refresher struct {
 // old directory is left untouched on failure, for a later attempt or a
 // manual move, instead of being half-moved.)
 func migrateLegacyDataDir() {
-	if os.Getenv("LAZYRECALL_HOME") != "" || os.Getenv("RECALL_HOME") != "" {
+	if profile.DataDirExplicit() {
 		return
 	}
 	newDir, oldDir := profile.DataDir(), profile.LegacyDataDir()

@@ -162,10 +162,10 @@ func TestProfilesCommandIsReadable(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(claudeRoot, "history.jsonl"), nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("RECALL_CLAUDE_CONFIG_DIRS", claudeRoot)
-	t.Setenv("RECALL_PI_HOME", filepath.Join(dir, "nope-pi"))
-	t.Setenv("RECALL_OMP_HOME", filepath.Join(dir, "nope-omp"))
-	t.Setenv("RECALL_HERMES_HOME", filepath.Join(dir, "nope-hermes"))
+	t.Setenv("LAZYRECALL_CLAUDE_CONFIG_DIRS", claudeRoot)
+	t.Setenv("LAZYRECALL_PI_HOME", filepath.Join(dir, "nope-pi"))
+	t.Setenv("LAZYRECALL_OMP_HOME", filepath.Join(dir, "nope-omp"))
+	t.Setenv("LAZYRECALL_HERMES_HOME", filepath.Join(dir, "nope-hermes"))
 
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -278,10 +278,10 @@ func TestResumeProfileEnvResolvesClaudeConfigDir(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	t.Setenv("RECALL_CLAUDE_CONFIG_DIRS", work+":"+personal)
-	t.Setenv("RECALL_PI_HOME", filepath.Join(dir, "nope-pi"))
-	t.Setenv("RECALL_OMP_HOME", filepath.Join(dir, "nope-omp"))
-	t.Setenv("RECALL_HERMES_HOME", filepath.Join(dir, "nope-hermes"))
+	t.Setenv("LAZYRECALL_CLAUDE_CONFIG_DIRS", work+":"+personal)
+	t.Setenv("LAZYRECALL_PI_HOME", filepath.Join(dir, "nope-pi"))
+	t.Setenv("LAZYRECALL_OMP_HOME", filepath.Join(dir, "nope-omp"))
+	t.Setenv("LAZYRECALL_HERMES_HOME", filepath.Join(dir, "nope-hermes"))
 
 	env, ok, reason := resumeProfileEnv("claude", "claude-personal")
 	if !ok {
@@ -309,10 +309,10 @@ func TestResumeProfileEnvResolvesClaudeConfigDir(t *testing.T) {
 // indexed), resolution must fail rather than guess.
 func TestResumeProfileEnvUnresolvedForUnknownProfile(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("RECALL_CLAUDE_CONFIG_DIRS", filepath.Join(dir, "nope-claude"))
-	t.Setenv("RECALL_PI_HOME", filepath.Join(dir, "nope-pi"))
-	t.Setenv("RECALL_OMP_HOME", filepath.Join(dir, "nope-omp"))
-	t.Setenv("RECALL_HERMES_HOME", filepath.Join(dir, "nope-hermes"))
+	t.Setenv("LAZYRECALL_CLAUDE_CONFIG_DIRS", filepath.Join(dir, "nope-claude"))
+	t.Setenv("LAZYRECALL_PI_HOME", filepath.Join(dir, "nope-pi"))
+	t.Setenv("LAZYRECALL_OMP_HOME", filepath.Join(dir, "nope-omp"))
+	t.Setenv("LAZYRECALL_HERMES_HOME", filepath.Join(dir, "nope-hermes"))
 
 	_, ok, reason := resumeProfileEnv("claude", "ghost-profile")
 	if ok {
@@ -320,5 +320,70 @@ func TestResumeProfileEnvUnresolvedForUnknownProfile(t *testing.T) {
 	}
 	if reason == "" {
 		t.Error("expected a non-empty reason")
+	}
+}
+
+// Bare `lazyrecall` is the browser, not a usage dump (change
+// rename-to-lazyrecall). Stdout in a test is a pipe, not a terminal, so
+// cmdBrowse takes its documented non-terminal path and prints the plain
+// listing - which is exactly what makes `lazyrecall | head` keep working.
+func TestBareInvocationBrowsesInsteadOfPrintingUsage(t *testing.T) {
+	home := t.TempDir()
+	claudeRoot := filepath.Join(home, ".claude")
+	if err := os.MkdirAll(filepath.Join(claudeRoot, "projects"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("LAZYRECALL_HOME", filepath.Join(home, "data"))
+	t.Setenv("LAZYRECALL_CLAUDE_CONFIG_DIRS", claudeRoot)
+	t.Setenv("LAZYRECALL_PI_HOME", filepath.Join(home, "nope-pi"))
+	t.Setenv("LAZYRECALL_OMP_HOME", filepath.Join(home, "nope-omp"))
+	t.Setenv("LAZYRECALL_HERMES_HOME", filepath.Join(home, "nope-hermes"))
+
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	errR, errW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldOut, oldErr := os.Stdout, os.Stderr
+	os.Stdout, os.Stderr = outW, errW
+
+	runErr := run(nil)
+
+	outW.Close()
+	errW.Close()
+	os.Stdout, os.Stderr = oldOut, oldErr
+	stdout, _ := io.ReadAll(outR)
+	stderr, _ := io.ReadAll(errR)
+	if runErr != nil {
+		t.Fatalf("run(nil): %v", runErr)
+	}
+
+	combined := string(stdout) + string(stderr)
+	if strings.Contains(combined, "Usage:") {
+		t.Errorf("bare invocation printed usage instead of browsing:\n%s", combined)
+	}
+	if !strings.Contains(combined, "requires a terminal") {
+		t.Errorf("bare invocation did not take the browse command's non-terminal path:\n%s", combined)
+	}
+}
+
+// An unrecognised first argument is still an error naming the commands,
+// never a silent fallthrough into the browser or a search.
+func TestUnknownCommandStillErrors(t *testing.T) {
+	old := os.Stderr
+	_, w, _ := os.Pipe()
+	os.Stderr = w
+	err := run([]string{"bogus"})
+	w.Close()
+	os.Stderr = old
+	if err == nil {
+		t.Fatal("an unknown command returned no error")
+	}
+	if !strings.Contains(err.Error(), "bogus") {
+		t.Errorf("the error %q does not name the unknown command", err)
 	}
 }

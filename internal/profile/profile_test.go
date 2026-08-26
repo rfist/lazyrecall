@@ -41,11 +41,11 @@ func TestDiscoverTwoClaudeInstallsAreSeparateProfiles(t *testing.T) {
 	mkClaudeRoot(t, personal)
 
 	withEnv(t, map[string]string{
-		"HOME":                      home,
-		"RECALL_CLAUDE_CONFIG_DIRS": work + ":" + personal,
-		"RECALL_PI_HOME":            "",
-		"RECALL_OMP_HOME":           "",
-		"RECALL_HERMES_HOME":        "",
+		"HOME":                          home,
+		"LAZYRECALL_CLAUDE_CONFIG_DIRS": work + ":" + personal,
+		"LAZYRECALL_PI_HOME":            "",
+		"LAZYRECALL_OMP_HOME":           "",
+		"LAZYRECALL_HERMES_HOME":        "",
 	})
 
 	profiles := Discover()
@@ -77,12 +77,12 @@ func TestResolveRejectsAmbiguityWithoutADefault(t *testing.T) {
 	mkClaudeRoot(t, a)
 	mkClaudeRoot(t, b)
 	withEnv(t, map[string]string{
-		"HOME":                      home,
-		"RECALL_CLAUDE_CONFIG_DIRS": a + ":" + b,
-		"RECALL_PI_HOME":            "",
-		"RECALL_OMP_HOME":           "",
-		"RECALL_HERMES_HOME":        "",
-		"LAZYRECALL_PROFILE":        "",
+		"HOME":                          home,
+		"LAZYRECALL_CLAUDE_CONFIG_DIRS": a + ":" + b,
+		"LAZYRECALL_PI_HOME":            "",
+		"LAZYRECALL_OMP_HOME":           "",
+		"LAZYRECALL_HERMES_HOME":        "",
+		"LAZYRECALL_PROFILE":            "",
 	})
 	profiles := Discover()
 	if _, err := Resolve(profiles, ""); err == nil {
@@ -97,11 +97,11 @@ func TestResolveHonorsExplicitRequest(t *testing.T) {
 	mkClaudeRoot(t, a)
 	mkClaudeRoot(t, b)
 	withEnv(t, map[string]string{
-		"HOME":                      home,
-		"RECALL_CLAUDE_CONFIG_DIRS": a + ":" + b,
-		"RECALL_PI_HOME":            "",
-		"RECALL_OMP_HOME":           "",
-		"RECALL_HERMES_HOME":        "",
+		"HOME":                          home,
+		"LAZYRECALL_CLAUDE_CONFIG_DIRS": a + ":" + b,
+		"LAZYRECALL_PI_HOME":            "",
+		"LAZYRECALL_OMP_HOME":           "",
+		"LAZYRECALL_HERMES_HOME":        "",
 	})
 	profiles := Discover()
 	p, err := Resolve(profiles, "claude-beta")
@@ -124,11 +124,11 @@ func TestSingleInstanceSourcesNeverDuplicateAcrossProfiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	withEnv(t, map[string]string{
-		"HOME":                      home,
-		"RECALL_CLAUDE_CONFIG_DIRS": work + ":" + personal,
-		"RECALL_PI_HOME":            piHome,
-		"RECALL_OMP_HOME":           "",
-		"RECALL_HERMES_HOME":        "",
+		"HOME":                          home,
+		"LAZYRECALL_CLAUDE_CONFIG_DIRS": work + ":" + personal,
+		"LAZYRECALL_PI_HOME":            piHome,
+		"LAZYRECALL_OMP_HOME":           "",
+		"LAZYRECALL_HERMES_HOME":        "",
 	})
 	profiles := Discover()
 	withPi := 0
@@ -149,5 +149,44 @@ func TestDBPathIsOnePerProfile(t *testing.T) {
 	p2 := Profile{Name: "claude-personal"}
 	if DBPath(p1) == DBPath(p2) {
 		t.Fatal("distinct profiles must resolve to distinct database files")
+	}
+}
+
+// The data directory's name changed with the rename, and the pre-rename
+// environment variable stays honoured so an environment that still sets it
+// cannot silently start indexing into a second, empty database (change
+// rename-to-lazyrecall).
+func TestDataDirResolutionOrder(t *testing.T) {
+	home := t.TempDir()
+
+	withEnv(t, map[string]string{"HOME": home, "LAZYRECALL_HOME": "", "RECALL_HOME": ""})
+	if got, want := DataDir(), filepath.Join(home, ".lazyrecall"); got != want {
+		t.Errorf("default DataDir() = %q, want %q", got, want)
+	}
+
+	withEnv(t, map[string]string{"HOME": home, "LAZYRECALL_HOME": "", "RECALL_HOME": "/legacy"})
+	if got := DataDir(); got != "/legacy" {
+		t.Errorf("with only RECALL_HOME set, DataDir() = %q, want /legacy", got)
+	}
+
+	withEnv(t, map[string]string{"HOME": home, "LAZYRECALL_HOME": "/current", "RECALL_HOME": "/legacy"})
+	if got := DataDir(); got != "/current" {
+		t.Errorf("LAZYRECALL_HOME must win over RECALL_HOME, got %q", got)
+	}
+
+	withEnv(t, map[string]string{"HOME": home})
+	if got, want := LegacyDataDir(), filepath.Join(home, ".recall"); got != want {
+		t.Errorf("LegacyDataDir() = %q, want %q", got, want)
+	}
+}
+
+func TestEnvProfilePrefersTheCurrentVariable(t *testing.T) {
+	withEnv(t, map[string]string{"LAZYRECALL_PROFILE": "", "RECALL_PROFILE": "old"})
+	if got := envProfile(); got != "old" {
+		t.Errorf("with only RECALL_PROFILE set, envProfile() = %q, want old", got)
+	}
+	withEnv(t, map[string]string{"LAZYRECALL_PROFILE": "new", "RECALL_PROFILE": "old"})
+	if got := envProfile(); got != "new" {
+		t.Errorf("LAZYRECALL_PROFILE must win, got %q", got)
 	}
 }
