@@ -14,6 +14,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"lazyrecall/internal/annotate"
+	"lazyrecall/internal/config"
 	"lazyrecall/internal/profile"
 	"lazyrecall/internal/schema"
 	"lazyrecall/internal/search"
@@ -722,6 +723,194 @@ func TestFooterShowsTheFocusedPanelsActions(t *testing.T) {
 	}
 	if !strings.Contains(got, "filter") {
 		t.Errorf("Agents footer %q does not say what Enter does", got)
+	}
+}
+
+// ---------------------------------------------------------------------
+// Archive and show-all
+// ---------------------------------------------------------------------
+
+// "a" archives the selected session and "a" again unarchives it. With
+// showAll on the row stays put across the toggle, so the second press is
+// unambiguously about the same session.
+func TestArchiveKeyToggles(t *testing.T) {
+	db := browseTestDB(t)
+	seedFixture(t, db)
+	m := newTestBrowser(db, "claude-personal", BrowserOptions{
+		ShowAll: true, Resolve: testResolve("claude-personal"), Profiles: testProfiles("claude-personal"),
+	})
+	m = update(t, m, keyRunes("5"))
+	target := m.visible[0].LineageID
+
+	m = update(t, m, keyRunes("a"))
+	if got, err := annotate.IsArchived(m.db, target); err != nil {
+		t.Fatal(err)
+	} else if !got {
+		t.Fatal("a did not archive the selected session")
+	}
+	if !strings.Contains(m.notice, "archived") {
+		t.Errorf("no notice that the session was archived: %q", m.notice)
+	}
+	if !strings.Contains(m.View(), "[archived]") {
+		t.Error("an archived session's row does not show the [archived] marker")
+	}
+
+	m = update(t, m, keyRunes("a"))
+	if got, err := annotate.IsArchived(m.db, target); err != nil {
+		t.Fatal(err)
+	} else if got {
+		t.Fatal("a did not unarchive the selected session")
+	}
+	if !strings.Contains(m.notice, "unarchived") {
+		t.Errorf("no notice that the session was unarchived: %q", m.notice)
+	}
+}
+
+// With the archive flag in force (showAll off), archiving the selected
+// session reloads the list and the row leaves it.
+func TestArchiveKeyRemovesTheRow(t *testing.T) {
+	m := fixtureBrowser(t)
+	m = update(t, m, keyRunes("5"))
+	target := m.visible[0].LineageID
+	m = update(t, m, keyRunes("a"))
+	for _, it := range m.visible {
+		if it.LineageID == target {
+			t.Errorf("archived session %s is still listed", target)
+		}
+	}
+	if len(m.visible) != 6 {
+		t.Errorf("after archiving one of 7 sessions %d remain, want 6", len(m.visible))
+	}
+}
+
+// "." toggles showAll, and with it on the sessions the hide rules
+// suppressed reappear; toggling again hides them.
+func TestDotTogglesShowAll(t *testing.T) {
+	db := browseTestDB(t)
+	seedFixture(t, db)
+	m := newTestBrowser(db, "claude-personal", BrowserOptions{
+		Hide:    config.Hide{MinMessages: 44},
+		Resolve: testResolve("claude-personal"), Profiles: testProfiles("claude-personal"),
+	})
+	before := len(m.visible)
+	if before == 7 {
+		t.Fatalf("the hide rule hid nothing; the fixture has %d sessions", before)
+	}
+	m = update(t, m, keyRunes("."))
+	if !m.showAll {
+		t.Error(". did not turn showAll on")
+	}
+	if len(m.visible) != 7 {
+		t.Errorf("with showAll on %d sessions are listed, want all 7", len(m.visible))
+	}
+	m = update(t, m, keyRunes("."))
+	if m.showAll {
+		t.Error(". did not turn showAll off")
+	}
+	if len(m.visible) != before {
+		t.Errorf("after toggling showAll off %d sessions are listed, want %d", len(m.visible), before)
+	}
+}
+
+// The Sessions border reports how many sessions the rules suppressed, and
+// stops reporting it the moment showAll is on - the same contract the
+// command-line header keeps ("--all to show").
+func TestSessionsBorderShowsHiddenCount(t *testing.T) {
+	db := browseTestDB(t)
+	seedFixture(t, db)
+	m := newTestBrowser(db, "claude-personal", BrowserOptions{
+		Hide:    config.Hide{MinMessages: 44},
+		Resolve: testResolve("claude-personal"), Profiles: testProfiles("claude-personal"),
+	})
+	m = update(t, m, tea.WindowSizeMsg{Width: 100, Height: 26})
+	border := strings.Split(m.sessionsPanel(m.geometry()).render(), "\n")[0]
+	if !strings.Contains(border, "4 hidden") {
+		t.Errorf("border %q does not show the suppressed count", border)
+	}
+	m = update(t, m, keyRunes("."))
+	border = strings.Split(m.sessionsPanel(m.geometry()).render(), "\n")[0]
+	if strings.Contains(border, "hidden") {
+		t.Errorf("border %q shows a suppressed count with showAll on", border)
+	}
+}
+
+// The [archived] marker is text, not colour, so a NO_COLOR user still sees
+// which rows are archived.
+func TestArchivedMarkerWithoutStyling(t *testing.T) {
+	db := browseTestDB(t)
+	seedFixture(t, db)
+	if err := annotate.Archive(db, "L0"); err != nil {
+		t.Fatal(err)
+	}
+	m := newTestBrowser(db, "claude-personal", BrowserOptions{
+		Style: false, ShowAll: true,
+		Resolve: testResolve("claude-personal"), Profiles: testProfiles("claude-personal"),
+	})
+	m = update(t, m, tea.WindowSizeMsg{Width: 100, Height: 26})
+	v := m.View()
+	if !strings.Contains(v, "[archived]") {
+		t.Error("an archived session's row does not show [archived] without styling")
+	}
+	if strings.Contains(v, "\x1b") {
+		t.Error("unstyled output contains an escape sequence")
+	}
+}
+
+// "a" with no session selected does nothing and must not panic - the empty
+// profile is a real, reachable state, not a test-only corner.
+func TestArchiveWithNoSelectionDoesNothing(t *testing.T) {
+	m := newTestBrowser(browseTestDB(t), "p", BrowserOptions{})
+	m = update(t, m, keyRunes("5"))
+	if m.current() != nil {
+		t.Fatal("expected no session to be selected in an empty profile")
+	}
+	m = update(t, m, keyRunes("a"))
+	if m.notice != "" {
+		t.Errorf("a with no selection set a notice: %q", m.notice)
+	}
+}
+
+// The frame must still fit the terminal at every size while a hidden count
+// is in the Sessions border (showAll off) and while an archived row with
+// its [archived] marker is on screen (showAll on) - the two surfaces this
+// change added to the width budget.
+func TestViewFitsWithHiddenCountAndArchivedRow(t *testing.T) {
+	sizes := [][2]int{{100, 40}, {100, 26}, {120, 30}, {80, 24}, {76, 20}, {70, 20}, {60, 14}, {40, 10}}
+	for _, styled := range []bool{false, true} {
+		for _, showAll := range []bool{false, true} {
+			for _, size := range sizes {
+				w, h := size[0], size[1]
+				db := browseTestDB(t)
+				seedFixture(t, db)
+				if err := annotate.Archive(db, "L0"); err != nil {
+					t.Fatal(err)
+				}
+				m := newTestBrowser(db, "claude-personal", BrowserOptions{
+					Style: styled, ShowAll: showAll, Hide: config.Hide{MinMessages: 44},
+					Resolve: testResolve("claude-personal"), Profiles: testProfiles("claude-personal"),
+				})
+				m = update(t, m, tea.WindowSizeMsg{Width: w, Height: h})
+				view := m.View()
+				lines := strings.Split(view, "\n")
+				if len(lines) > h {
+					t.Errorf("styled=%v showAll=%v %dx%d: frame is %d lines, taller than the terminal", styled, showAll, w, h, len(lines))
+				}
+				for i, l := range lines {
+					if got := visibleWidth(l); got > w {
+						t.Errorf("styled=%v showAll=%v %dx%d: line %d is %d columns wide: %q", styled, showAll, w, h, i, got, l)
+					}
+				}
+				// Prove the exercised surface is actually on screen, so the
+				// fit claim is about a frame that really carries it.
+				if showAll {
+					if !strings.Contains(view, "[archived]") {
+						t.Errorf("styled=%v showAll=%v %dx%d: no archived row drawn", styled, showAll, w, h)
+					}
+				} else if !strings.Contains(view, "hidden") {
+					t.Errorf("styled=%v showAll=%v %dx%d: the border does not show the hidden count", styled, showAll, w, h)
+				}
+			}
+		}
 	}
 }
 
