@@ -54,6 +54,54 @@ ORDER BY s.last_activity_at DESC, rank;`, itemColumns, pf.Ref("query"), predicat
 	return items, nil
 }
 
+// SearchWithHidden returns the search hits and how many the hide rules and
+// the archive flag suppressed: one COUNT(DISTINCT) over the same predicate
+// without the hide clauses, minus the visible hits - a session with several
+// matching prompts still counts once, exactly as Search shows it once.
+func SearchWithHidden(db *sqlitex.Runner, query string, f Filter) (items []Item, hidden int, err error) {
+	items, err = Search(db, query, f)
+	if err != nil {
+		return nil, 0, err
+	}
+	total, err := countSearchHits(db, query, f)
+	if err != nil {
+		return nil, 0, err
+	}
+	return items, total - len(items), nil
+}
+
+// countSearchHits counts the sessions matching query and f's non-hide
+// predicate. COUNT(DISTINCT s.id) mirrors Search's de-duplication, so a
+// session with several matching prompts contributes one candidate.
+func countSearchHits(db *sqlitex.Runner, query string, f Filter) (int, error) {
+	params := map[string]any{"query": sqlitex.FTS5Phrase(query)}
+	clauses := baseClausesFromFilter(f, params)
+	pf, err := db.WriteParams(params)
+	if err != nil {
+		return 0, err
+	}
+	defer pf.Close()
+
+	predicate := buildPredicate(pf, clauses)
+	q := fmt.Sprintf(`
+SELECT COUNT(DISTINCT s.id) AS n
+FROM prompt_fts
+JOIN sessions s ON s.id = prompt_fts.session_id
+LEFT JOIN lineages l ON l.id = s.lineage_id
+WHERE prompt_fts MATCH %s AND %s;`, pf.Ref("query"), predicate)
+
+	var rows []struct {
+		N int `json:"n"`
+	}
+	if err := db.Query(q, &rows); err != nil {
+		return 0, fmt.Errorf("search: counting search hits: %w", err)
+	}
+	if len(rows) == 0 {
+		return 0, nil
+	}
+	return rows[0].N, nil
+}
+
 // PromptsForSession returns the user's own prompts for one session, oldest
 // first, as they were indexed for full-text search. The browser's Prompts
 // tab shows them so a session can be recognised by what was actually asked

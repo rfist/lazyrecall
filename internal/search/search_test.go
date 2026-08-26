@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"lazyrecall/internal/config"
 	"lazyrecall/internal/schema"
 	"lazyrecall/internal/session"
 	"lazyrecall/internal/sqlitex"
@@ -407,6 +408,171 @@ func contains(s, sub string) bool {
 		}
 		return false
 	})()
+}
+
+// The following cover the hide rules (change apply-config-hide-rules):
+// List/Search must exclude what the config's hide rules and the archive
+// flag say to exclude, must never hide 'unknown' or a NULL message_count,
+// and ListWithHidden/SearchWithHidden must report how much was suppressed.
+
+// hideSeed seeds the six-session fixture the hide-rule tests share: one
+// automated, one interactive, one unknown, one archived, one with a NULL
+// message_count, and one whose cwd matches a hide pattern. All synthetic.
+func hideSeed(t *testing.T, db *sqlitex.Runner) {
+	t.Helper()
+	b := db.NewBatch()
+	if err := b.BulkInsert("lineages", []string{"id", "profile", "orphaned", "archived_at"}, []map[string]any{
+		{"id": "lin-archived", "profile": "p", "orphaned": 0, "archived_at": 1000},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Run(); err != nil {
+		t.Fatal(err)
+	}
+	for _, rec := range []map[string]any{
+		{"id": "s:auto", "source": "claude", "source_session_id": "auto", "lineage_id": "lin-auto",
+			"end_state": "completed", "resumable": 1, "last_activity_at": 100, "origin": "automated", "message_count": 10},
+		{"id": "s:inter", "source": "claude", "source_session_id": "inter", "lineage_id": "lin-inter",
+			"end_state": "completed", "resumable": 1, "last_activity_at": 200, "origin": "interactive", "message_count": 10, "cwd": "/home/me/work"},
+		{"id": "s:unknown", "source": "claude", "source_session_id": "unknown", "lineage_id": "lin-unknown",
+			"end_state": "completed", "resumable": 1, "last_activity_at": 300, "origin": "unknown", "message_count": 10},
+		{"id": "s:archived", "source": "claude", "source_session_id": "archived", "lineage_id": "lin-archived",
+			"end_state": "completed", "resumable": 1, "last_activity_at": 400, "origin": "interactive", "message_count": 10},
+		// deliberately no message_count -> the column stores NULL
+		{"id": "s:nullmsg", "source": "claude", "source_session_id": "nullmsg", "lineage_id": "lin-nullmsg",
+			"end_state": "completed", "resumable": 1, "last_activity_at": 500, "origin": "interactive"},
+		{"id": "s:scratch", "source": "claude", "source_session_id": "scratch", "lineage_id": "lin-scratch",
+			"end_state": "completed", "resumable": 1, "last_activity_at": 600, "origin": "interactive", "message_count": 10, "cwd": "/home/me/scratch/proj"},
+	} {
+		seedSession(t, db, rec)
+	}
+}
+
+func TestListAppliesDefaultHideRules(t *testing.T) {
+	db := testDB(t)
+	hideSeed(t, db)
+
+	items, hidden, err := ListWithHidden(db, Filter{Hide: config.Hide{NonInteractive: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hidden != 2 {
+		t.Fatalf("hidden = %d, want 2 (automated + archived)", hidden)
+	}
+	byID := map[string]bool{}
+	for _, it := range items {
+		byID[it.SessionID] = true
+	}
+	if byID["s:auto"] {
+		t.Error("the automated session must be hidden by the non_interactive rule")
+	}
+	if byID["s:archived"] {
+		t.Error("the archived session must be hidden by the archive rule")
+	}
+	// unknown is never hidden - pi, omp and hermes report it for every
+	// session, and hiding on absence of evidence would make three sources
+	// vanish.
+	if !byID["s:unknown"] {
+		t.Error("the unknown-origin session must never be hidden")
+	}
+	if !byID["s:inter"] || !byID["s:nullmsg"] || !byID["s:scratch"] {
+		t.Errorf("the interactive sessions must remain visible, got %v", byID)
+	}
+}
+
+func TestListAllHideRules(t *testing.T) {
+	db := testDB(t)
+	hideSeed(t, db)
+	hide := config.Hide{NonInteractive: true, MinMessages: 5, Paths: []string{"/home/me/scratch/*"}}
+
+	items, hidden, err := ListWithHidden(db, Filter{Hide: hide})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hidden != 3 {
+		t.Fatalf("hidden = %d, want 3 (automated + archived + scratch)", hidden)
+	}
+	byID := map[string]bool{}
+	for _, it := range items {
+		byID[it.SessionID] = true
+	}
+	if byID["s:scratch"] {
+		t.Error("a session under a matching hide path must be hidden")
+	}
+	// A NULL message_count is unknown, not small: the threshold must not
+	// hide it.
+	if !byID["s:nullmsg"] {
+		t.Error("a NULL message_count must survive MinMessages")
+	}
+	if !byID["s:unknown"] {
+		t.Error("the unknown-origin session must never be hidden")
+	}
+}
+
+func TestShowAllDefeatsHideRules(t *testing.T) {
+	db := testDB(t)
+	hideSeed(t, db)
+	hide := config.Hide{NonInteractive: true, MinMessages: 5, Paths: []string{"/home/me/scratch/*"}}
+
+	items, hidden, err := ListWithHidden(db, Filter{Hide: hide, ShowAll: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hidden != 0 {
+		t.Fatalf("hidden = %d, want 0 under --all", hidden)
+	}
+	if len(items) != 6 {
+		t.Fatalf("got %d items, want all 6", len(items))
+	}
+}
+
+func TestSearchAppliesHideRules(t *testing.T) {
+	db := testDB(t)
+	hideSeed(t, db)
+	for _, id := range []string{"s:auto", "s:inter", "s:unknown", "s:archived", "s:nullmsg", "s:scratch"} {
+		seedPrompt(t, db, id, "hide-me token")
+	}
+	hide := config.Hide{NonInteractive: true, MinMessages: 5, Paths: []string{"/home/me/scratch/*"}}
+
+	hits, hidden, err := SearchWithHidden(db, "hide-me", Filter{Hide: hide})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hidden != 3 {
+		t.Fatalf("hidden = %d, want 3", hidden)
+	}
+	byID := map[string]bool{}
+	for _, it := range hits {
+		byID[it.SessionID] = true
+	}
+	if byID["s:auto"] || byID["s:archived"] || byID["s:scratch"] {
+		t.Errorf("hidden sessions leaked into the search hits: %v", byID)
+	}
+	if !byID["s:unknown"] || !byID["s:nullmsg"] {
+		t.Errorf("unknown and NULL-message_count sessions must stay searchable: %v", byID)
+	}
+}
+
+// GLOB's '*' already crosses '/', so '**' hides exactly what '*' hides -
+// the config collapses the former to the latter at load, and either spelling
+// behaves identically against the data. The fixture's archived session is
+// hidden by the archive flag under both spellings, so the expected count is
+// two either way.
+func TestDoubleGlobPathHidesLikeSingleGlob(t *testing.T) {
+	db := testDB(t)
+	hideSeed(t, db)
+
+	_, hiddenStar, err := ListWithHidden(db, Filter{Hide: config.Hide{Paths: []string{"/home/me/scratch/*"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, hiddenDouble, err := ListWithHidden(db, Filter{Hide: config.Hide{Paths: []string{"/home/me/scratch/**"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hiddenStar != 2 || hiddenDouble != 2 {
+		t.Fatalf("'**' must hide identically to '*', got %d and %d (want 2 each)", hiddenStar, hiddenDouble)
+	}
 }
 
 // TestOriginNormalisedOnReadOut covers the origin closed-set invariant on
