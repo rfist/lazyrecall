@@ -53,6 +53,11 @@ type Item struct {
 	MessageCount *int64
 	Resumable    bool
 	Tags         []string
+	// Archived is true when the user archived the session (change
+	// add-archive-facility). The flag lives on lineages, so it survives a
+	// full index rebuild; it is shown by `archive list` and tagged on the
+	// machine-readable output.
+	Archived bool
 
 	// MatchSnippet is set only by Search: the surrounding text of the
 	// match, for the user to recognize the session (spec session-search,
@@ -81,7 +86,8 @@ func (it Item) GroupKey() (key string, isRepo bool) {
 const itemFrom = `sessions s LEFT JOIN lineages l ON l.id = s.lineage_id`
 
 var itemColumns = `s.id, s.source, s.lineage_id, l.handle, s.cwd, s.git_branch, s.git_repo_root, s.git_common_root,
-	s.started_at, s.last_activity_at, s.topic, s.name, s.last_prompt, s.end_state, s.dir_exists, s.message_count, s.resumable`
+	s.started_at, s.last_activity_at, s.topic, s.name, s.last_prompt, s.end_state, s.dir_exists, s.message_count, s.resumable,
+	l.archived_at IS NOT NULL AS archived`
 
 type itemRow struct {
 	ID             string  `json:"id"`
@@ -101,6 +107,7 @@ type itemRow struct {
 	DirExists      *int64  `json:"dir_exists"`
 	MessageCount   *int64  `json:"message_count"`
 	Resumable      int64   `json:"resumable"`
+	Archived       int64   `json:"archived"`
 	Tags           *string `json:"tags"`
 }
 
@@ -119,6 +126,7 @@ func (row itemRow) toItem() Item {
 		EndState:      session.EndState(row.EndState),
 		MessageCount:  row.MessageCount,
 		Resumable:     row.Resumable != 0,
+		Archived:      row.Archived != 0,
 	}
 	if row.Handle != nil {
 		it.Handle = *row.Handle
@@ -223,7 +231,49 @@ ORDER BY s.last_activity_at DESC;`, itemColumns, itemFrom, predicate)
 	return items, nil
 }
 
-// EmptyMessage is what to show the user when a listing or search returned
+// ListByLineageIDs returns the sessions belonging to any of the given
+// lineages, most recently active first, rendered through the same row path
+// as List - `archive list` uses it to show archived sessions via the normal
+// listing rather than a bespoke format. An empty id list yields no rows.
+func ListByLineageIDs(db *sqlitex.Runner, ids []string) ([]Item, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	params := make(map[string]any, len(ids))
+	keys := make([]string, len(ids))
+	for i, id := range ids {
+		key := fmt.Sprintf("lin_%d", i)
+		params[key] = id
+		keys[i] = key
+	}
+	pf, err := db.WriteParams(params)
+	if err != nil {
+		return nil, err
+	}
+	defer pf.Close()
+
+	refs := make([]string, len(keys))
+	for i, k := range keys {
+		refs[i] = pf.Ref(k)
+	}
+	inClause := "l.id IN (" + strings.Join(refs, ", ") + ")"
+	q := fmt.Sprintf(`
+SELECT %s, (SELECT group_concat(tag, char(31)) FROM tags WHERE tags.lineage_id = s.lineage_id) AS tags
+FROM %s
+WHERE %s
+ORDER BY s.last_activity_at DESC;`, itemColumns, itemFrom, inClause)
+
+	var rows []itemRow
+	if err := db.Query(q, &rows); err != nil {
+		return nil, fmt.Errorf("search: listing sessions by lineage: %w", err)
+	}
+	items := make([]Item, len(rows))
+	for i, row := range rows {
+		items[i] = row.toItem()
+	}
+	return items, nil
+}
+
 // nothing, naming the profile and the scope that was searched (spec
 // session-search, "No session matches", "Filter matches nothing").
 func EmptyMessage(profileName string, f Filter, query string) string {

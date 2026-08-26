@@ -8,6 +8,11 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"lazyrecall/internal/annotate"
+	"lazyrecall/internal/profile"
+	"lazyrecall/internal/schema"
+	"lazyrecall/internal/sqlitex"
 )
 
 // newTestFlagSet builds the same FlagSet configuration every real
@@ -425,5 +430,66 @@ func TestConfigShowMarksFileAndDefaultOrigins(t *testing.T) {
 	}
 	if !strings.Contains(got, "browse.show_archived = false    (default)") {
 		t.Errorf("expected an untouched value attributed to the default, got:\n%s", got)
+	}
+}
+
+// TestArchiveCommandAcceptsShortHandle covers change add-archive-facility:
+// `lazyrecall archive SESSION_ID` must accept the short handle exactly like
+// every other command, resolving it through annotate.LineageForIdentifier
+// and archiving the lineage it names. The lineage is seeded directly into
+// the profile's database (so the test needs no real session source), and
+// --no-refresh keeps the command from touching the sources.
+func TestArchiveCommandAcceptsShortHandle(t *testing.T) {
+	home := t.TempDir()
+	claudeRoot := filepath.Join(home, ".claude")
+	if err := os.MkdirAll(filepath.Join(claudeRoot, "projects"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("LAZYRECALL_HOME", filepath.Join(home, "data"))
+	t.Setenv("LAZYRECALL_CLAUDE_CONFIG_DIRS", claudeRoot)
+	t.Setenv("LAZYRECALL_PI_HOME", filepath.Join(home, "nope-pi"))
+	t.Setenv("LAZYRECALL_OMP_HOME", filepath.Join(home, "nope-omp"))
+	t.Setenv("LAZYRECALL_HERMES_HOME", filepath.Join(home, "nope-hermes"))
+
+	p, err := resolveProfile("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// refresh.New creates the data directory itself, but this test seeds the
+	// database before the command ever runs - so the directory has to exist
+	// first.
+	if err := os.MkdirAll(profile.DataDir(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	db := &sqlitex.Runner{DBPath: profile.DBPath(p)}
+	if _, err := schema.Open(db); err != nil {
+		t.Fatal(err)
+	}
+	b := db.NewBatch()
+	if err := b.BulkInsert("lineages", []string{"id", "profile", "orphaned", "handle"}, []map[string]any{
+		{"id": "lin1", "profile": p.Name, "orphaned": 0, "handle": 5},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.BulkInsert("sessions", []string{"id", "source", "source_session_id", "lineage_id", "end_state", "resumable"}, []map[string]any{
+		{"id": "claude:" + p.Name + ":s1", "source": "claude", "source_session_id": "s1", "lineage_id": "lin1", "end_state": "completed", "resumable": 1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Run(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := run([]string{"archive", "--no-refresh", "5"}); err != nil {
+		t.Fatalf("run(archive 5): %v", err)
+	}
+
+	archived, err := annotate.IsArchived(db, "lin1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !archived {
+		t.Fatal("expected handle 5's lineage to be archived after `archive 5`")
 	}
 }

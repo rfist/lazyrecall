@@ -238,3 +238,92 @@ func TestHandleSurvivesIndexRebuild(t *testing.T) {
 		t.Fatalf("expected handle 7 to survive a rebuild, got %+v", rows)
 	}
 }
+
+// TestV3ToV4MigrationAddsArchiveColumnKeepsData covers change
+// add-archive-facility: an existing database at schema version 3 (with
+// lineages, comments, and tags already populated) must, on the next Open,
+// gain the lineages.archived_at column with all of that annotation data
+// intact. Archive state is user data, so it must be migrated forward
+// exactly like every other annotation - never rebuilt.
+func TestV3ToV4MigrationAddsArchiveColumnKeepsData(t *testing.T) {
+	r := testRunner(t)
+
+	// Hand-build a v3-shaped database: schema_meta at version 3, lineages
+	// with handles (the v2 shape), comments, tags, and a v3 index table -
+	// without ever going through the current archive-aware annotationDDL.
+	v3DDL := `
+CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+INSERT INTO schema_meta (key, value) VALUES ('schema_version', '3');
+CREATE TABLE lineages (id TEXT PRIMARY KEY, profile TEXT NOT NULL, orphaned INTEGER NOT NULL DEFAULT 0, handle INTEGER);
+CREATE UNIQUE INDEX idx_lineages_handle_profile ON lineages(profile, handle);
+CREATE TABLE comments (id INTEGER PRIMARY KEY AUTOINCREMENT, lineage_id TEXT NOT NULL, body TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+CREATE INDEX idx_comments_lineage ON comments(lineage_id);
+CREATE TABLE tags (lineage_id TEXT NOT NULL, tag TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (lineage_id, tag));
+CREATE INDEX idx_tags_tag ON tags(tag);
+CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT NOT NULL, source_session_id TEXT NOT NULL, lineage_id TEXT NOT NULL, end_state TEXT NOT NULL, name TEXT);
+INSERT INTO lineages (id, profile, orphaned, handle) VALUES ('lin_1', 'p', 0, 1);
+INSERT INTO comments (lineage_id, body, created_at, updated_at) VALUES ('lin_1', 'keep me', 1, 1);
+INSERT INTO tags (lineage_id, tag, created_at) VALUES ('lin_1', 'urgent', 1);
+`
+	if err := r.Exec(v3DDL); err != nil {
+		t.Fatalf("seeding v3 database: %v", err)
+	}
+
+	v, err := Open(r)
+	if err != nil {
+		t.Fatalf("Open (migrating v3 -> current): %v", err)
+	}
+	if v != CurrentVersion {
+		t.Fatalf("got version %d, want %d", v, CurrentVersion)
+	}
+
+	var cols []struct {
+		Name string `json:"name"`
+	}
+	if err := r.Query(`PRAGMA table_info(lineages);`, &cols); err != nil {
+		t.Fatal(err)
+	}
+	hasArchivedAt := false
+	for _, c := range cols {
+		if c.Name == "archived_at" {
+			hasArchivedAt = true
+		}
+	}
+	if !hasArchivedAt {
+		t.Errorf("expected lineages.archived_at to exist after migration, columns: %+v", cols)
+	}
+
+	// The annotation data seeded at v3 must be intact, with archived_at
+	// untouched (NULL - nothing was ever archived).
+	var comments []struct {
+		LineageID string `json:"lineage_id"`
+		Body      string `json:"body"`
+	}
+	if err := r.Query(`SELECT lineage_id, body FROM comments;`, &comments); err != nil {
+		t.Fatal(err)
+	}
+	if len(comments) != 1 || comments[0].Body != "keep me" {
+		t.Errorf("expected the comment to survive migration, got %+v", comments)
+	}
+
+	var tags []struct {
+		LineageID string `json:"lineage_id"`
+		Tag       string `json:"tag"`
+	}
+	if err := r.Query(`SELECT lineage_id, tag FROM tags;`, &tags); err != nil {
+		t.Fatal(err)
+	}
+	if len(tags) != 1 || tags[0].Tag != "urgent" {
+		t.Errorf("expected the tag to survive migration, got %+v", tags)
+	}
+
+	var archived []struct {
+		ArchivedAt *int64 `json:"archived_at"`
+	}
+	if err := r.Query(`SELECT archived_at FROM lineages WHERE id = 'lin_1';`, &archived); err != nil {
+		t.Fatal(err)
+	}
+	if len(archived) != 1 || archived[0].ArchivedAt != nil {
+		t.Errorf("expected a fresh lineage to be unarchived (archived_at NULL), got %+v", archived)
+	}
+}

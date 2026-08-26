@@ -26,7 +26,14 @@ import (
 // transcripts, so it needs no annotation migration - the version bump
 // alone discards and rebuilds the index, and the next refresh repopulates
 // it.
-var CurrentVersion = 3
+//
+// v4 adds lineages.archived_at, the archive flag (change
+// add-archive-facility). Archiving is a decision the user made, so it
+// lives on the durable lineages table like every other annotation - never
+// on the disposable sessions table, or the next refresh --full would
+// destroy it. NULL means not archived; a Unix-seconds value means archived
+// at that time.
+var CurrentVersion = 4
 
 // indexDDL creates the tables that are pure cache over the sources: safe to
 // drop and rebuild whenever CurrentVersion changes.
@@ -85,10 +92,11 @@ CREATE TABLE IF NOT EXISTS cursors (
 // never dropped by a schema-version rebuild - only migrated forward.
 const annotationDDL = `
 CREATE TABLE IF NOT EXISTS lineages (
-	id       TEXT PRIMARY KEY,
-	profile  TEXT NOT NULL,
-	orphaned INTEGER NOT NULL DEFAULT 0,
-	handle   INTEGER
+	id          TEXT PRIMARY KEY,
+	profile     TEXT NOT NULL,
+	orphaned    INTEGER NOT NULL DEFAULT 0,
+	handle      INTEGER,
+	archived_at INTEGER
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_lineages_handle_profile ON lineages(profile, handle);
 
@@ -156,6 +164,15 @@ WITH ordered AS (
 UPDATE lineages
 SET handle = (SELECT rn FROM ordered WHERE ordered.lineage_id = lineages.id)
 WHERE id IN (SELECT lineage_id FROM ordered);
+`,
+	// v4 (change add-archive-facility): adds the archive timestamp to the
+	// durable lineages table - a Unix-seconds value meaning "archived at
+	// this time", NULL meaning not archived. Archive state is the user's
+	// decision, so it must survive an index rebuild exactly like every
+	// other annotation; a boolean on the disposable sessions table would
+	// be wiped by the next refresh --full.
+	4: `
+ALTER TABLE lineages ADD COLUMN archived_at INTEGER;
 `,
 }
 
