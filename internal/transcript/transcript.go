@@ -11,6 +11,8 @@ import (
 	"io"
 	"os"
 	"time"
+
+	"lazyrecall/internal/session"
 )
 
 // Kind is the normalized vocabulary every source's records are mapped into
@@ -56,6 +58,12 @@ type Record struct {
 	Text       *string // prompt text, topic text, or assistant text, depending on Kind
 	StopReason *string // assistant stop/finish reason, when the source records one
 	Compaction *CompactionInfo
+
+	// Origin is who drove the session this record belongs to, when the
+	// source records it on its records (Claude Code's "entrypoint" field).
+	// The zero value (OriginUnknown) is what sources that record no such
+	// field produce.
+	Origin session.Origin
 
 	// SourceID is the session's own identifier, as the source itself
 	// recorded it inside the transcript - never derived from the
@@ -134,6 +142,14 @@ type Result struct {
 	// updated by KindUserPrompt and KindLastPrompt records.
 	LastPrompt *string
 
+	// Origin is the strongest origin signal any record in this scan
+	// carried, so a session counts as automated if any of its records says
+	// so. Callers merge it across scans like Topic/CustomTitle. It is
+	// always one of the closed set - OriginUnknown when no record named
+	// an origin (the zero value of session.Origin is an empty string, not
+	// OriginUnknown, so Scan never reports that).
+	Origin session.Origin
+
 	// Prompts collects every KindUserPrompt's text seen in this scan, in
 	// order. This is the tier-2 search-index source for sources with no
 	// prompt index of their own (pi), and the fallback tier-2 source for
@@ -190,6 +206,11 @@ func Scan(path string, fromOffset int64, vocab Vocab) (Result, error) {
 
 	var res Result
 	res.EndOffset = fromOffset
+	// The zero value is an empty string, not OriginUnknown, so seed the
+	// classification: a scan whose records never name an origin (pi, omp,
+	// hermes - they record no entrypoint field at all) stays unknown
+	// rather than leaking an empty value.
+	res.Origin = session.OriginUnknown
 
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 16*1024*1024) // transcripts can have long lines (embedded file content)
@@ -221,6 +242,15 @@ func Scan(path string, fromOffset int64, vocab Vocab) (Result, error) {
 		}
 		if res.SourceID == nil && rec.SourceID != nil {
 			res.SourceID = rec.SourceID
+		}
+		// A session takes the strongest origin signal its records carry: one
+		// automated record is enough to mark the whole session automated, and
+		// a later interactive record never overrides that. Records carrying
+		// no signal (or an explicit unknown) leave res.Origin untouched.
+		if rec.Origin == session.OriginAutomated {
+			res.Origin = session.OriginAutomated
+		} else if rec.Origin == session.OriginInteractive && res.Origin != session.OriginAutomated {
+			res.Origin = session.OriginInteractive
 		}
 
 		switch rec.Kind {

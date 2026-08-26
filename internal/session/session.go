@@ -51,6 +51,24 @@ func (s EndState) NeedsAttention() bool {
 	return false
 }
 
+// Origin is who drove a session: a person at a terminal, or a script.
+type Origin string
+
+const (
+	OriginInteractive Origin = "interactive"
+	OriginAutomated   Origin = "automated"
+	OriginUnknown     Origin = "unknown"
+)
+
+// Valid reports whether o is one of the closed set of origins.
+func (o Origin) Valid() bool {
+	switch o {
+	case OriginInteractive, OriginAutomated, OriginUnknown:
+		return true
+	}
+	return false
+}
+
 // CompactionEvent describes one compaction, when the source records enough
 // detail to report it (spec session-review, "Compaction detail available").
 type CompactionEvent struct {
@@ -154,6 +172,10 @@ type Session struct {
 
 	// EndState is this session's classification from the closed set above.
 	EndState EndState
+
+	// Origin is who drove the session - a person at a terminal or a script
+	// - when the source records enough to tell.
+	Origin Origin
 
 	// Compaction is nil when the source has no concept of compaction at
 	// all; otherwise it reports how many times (possibly zero) this session
