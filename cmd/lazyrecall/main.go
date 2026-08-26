@@ -993,8 +993,15 @@ func cmdBrowse(global *flag.FlagSet, profileFlag *string, allFlag, noRefresh *bo
 		Tag:         *tag,
 		Query:       query,
 		Style:       os.Getenv("NO_COLOR") == "",
-		Resolve:     resolveProfile,
-		Profiles:    discoverProfilesForBrowser,
+		// The browser opens under the same hide rules the non-interactive
+		// commands use, and starts showing everything when the user asked
+		// for it either on this command line or in the config file - the
+		// browse.show_archived preference, and --all here, are the same
+		// "show me everything" choice.
+		ShowAll:  *allFlag || cfg.Browse.ShowArchived,
+		Hide:     cfg.Hide,
+		Resolve:  resolveProfile,
+		Profiles: discoverProfilesForBrowser,
 	})
 	if err != nil {
 		return err

@@ -35,6 +35,7 @@ import (
 	"github.com/lithammer/fuzzysearch/fuzzy"
 
 	"lazyrecall/internal/annotate"
+	"lazyrecall/internal/config"
 	"lazyrecall/internal/profile"
 	"lazyrecall/internal/refresh"
 	"lazyrecall/internal/search"
@@ -50,6 +51,16 @@ type BrowserOptions struct {
 	Tag         string
 	Query       string
 	Style       bool // NO_COLOR-aware: suppress all styling when the environment asks
+
+	// ShowAll opens the browser with the hide rules and the archive flag
+	// disabled - "show me everything". The caller seeds it from the config
+	// file's browse.show_archived, so a user who asked to keep archived
+	// sessions visible has that preference from the first frame.
+	ShowAll bool
+	// Hide carries the standing hide rules so the browser suppresses the
+	// same sessions the non-interactive commands do, rather than keeping
+	// two notions of "noise".
+	Hide config.Hide
 
 	// Resolve resolves a profile name for the browser's in-process refresh
 	// and profile-switch actions. Defaults to the same resolution the
@@ -260,6 +271,17 @@ type browseModel struct {
 
 	focus panelID
 
+	// showAll disables the hide rules and the archive flag together, because
+	// they are one question to the user: "show me everything". hide is the
+	// standing config rules, passed through to the same search.Filter the
+	// non-interactive commands build.
+	showAll bool
+	hide    config.Hide
+	// hidden is how many sessions the rules suppressed in the current
+	// result set - the `N hidden` the border reports so hiding is never
+	// silent, the same contract the command-line header keeps.
+	hidden int
+
 	// all is the profile's whole result set for the current search phrase,
 	// queried once and sliced in process (see facet.go for why). It is
 	// re-queried only when the corpus itself can have changed: a profile
@@ -314,6 +336,8 @@ func newBrowseModel(opts BrowserOptions) browseModel {
 		db:          opts.DB,
 		profileName: opts.ProfileName,
 		style:       opts.Style,
+		showAll:     opts.ShowAll,
+		hide:        opts.Hide,
 		resolve:     opts.resolve,
 		profiles:    opts.discoverProfiles,
 		width:       DefaultWidth,
@@ -352,22 +376,28 @@ type dbSwitchedMsg struct {
 
 // loadAll re-queries the profile's whole result set and rebuilds everything
 // derived from it. This is the only function that touches the session
-// tables; every filter change below is a walk over what it loaded.
+// tables; every filter change below is a walk over what it loaded. The hide
+// rules and the archive flag ride on the same search.Filter the
+// non-interactive commands build, and the WithHidden variant reports how
+// many sessions they suppressed, which the Sessions border then shows.
 func (m *browseModel) loadAll() {
+	f := search.Filter{Hide: m.hide, ShowAll: m.showAll}
 	var (
-		rows []search.Item
-		err  error
+		rows   []search.Item
+		hidden int
+		err    error
 	)
 	if m.query != "" {
-		rows, err = search.Search(m.db, m.query, search.Filter{})
+		rows, hidden, err = search.SearchWithHidden(m.db, m.query, f)
 	} else {
-		rows, err = search.List(m.db, search.Filter{})
+		rows, hidden, err = search.ListWithHidden(m.db, f)
 	}
 	if err != nil {
 		m.notice = "browse: " + err.Error()
 		return
 	}
 	m.all = rows
+	m.hidden = hidden
 	m.rebuild()
 }
 
@@ -642,6 +672,10 @@ func (m *browseModel) handleBrowseKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.startInput(modeAddComment)
 	case "C":
 		return m.startInput(modeRemoveComment)
+	case "a":
+		m.toggleArchive()
+	case ".":
+		m.toggleShowAll()
 	}
 	return m, nil
 }
@@ -791,6 +825,65 @@ func (m *browseModel) clearAllFilters() {
 		return
 	}
 	m.rebuild()
+}
+
+// toggleArchive archives the selected session if it is unarchived and
+// unarchives it if it is archived, then reloads so the row leaves (or
+// rejoins) the list and its archive state is drawn correctly. The archive
+// flag is a decision the user made, stored on the durable lineage exactly
+// like the `archive` command line stores it, so a full index rebuild
+// cannot undo it. Without a session selected there is nothing to act on,
+// and the key does nothing.
+func (m *browseModel) toggleArchive() {
+	it := m.current()
+	if it == nil {
+		return
+	}
+	archived, err := annotate.IsArchived(m.db, it.LineageID)
+	if err != nil {
+		m.notice = "archive: " + err.Error()
+		return
+	}
+	verb := "archived"
+	if archived {
+		verb = "unarchived"
+		err = annotate.Unarchive(m.db, it.LineageID)
+	} else {
+		err = annotate.Archive(m.db, it.LineageID)
+	}
+	if err != nil {
+		m.notice = "archive: " + err.Error()
+		return
+	}
+	// The row's archive state changed but the corpus is otherwise intact,
+	// so the notice is what says what happened before the reload hides or
+	// marks the row.
+	m.notice = fmt.Sprintf("%s %s.", verb, it.SessionID)
+	m.detailOf = ""
+	m.loadAll()
+}
+
+// toggleShowAll flips the browser between applying and ignoring the hide
+// rules and the archive flag - the "." key. The selection follows the same
+// session across the reload when it survives it, so toggling never dumps
+// the cursor onto an unrelated row.
+func (m *browseModel) toggleShowAll() {
+	keep := ""
+	if it := m.current(); it != nil {
+		keep = it.LineageID
+	}
+	m.showAll = !m.showAll
+	m.loadAll()
+	if keep == "" {
+		return
+	}
+	for i, it := range m.visible {
+		if it.LineageID == keep {
+			m.cursor = i
+			m.keepCursorVisible()
+			return
+		}
+	}
 }
 
 func (m *browseModel) cycleTab(delta int) {
@@ -1419,6 +1512,12 @@ func (m browseModel) facetPanel(id panelID, f *facet, width, height int, sel str
 	return box
 }
 
+// archivedMarker is the literal, colour-free tag an archived session's row
+// carries when showAll is on. The archive state must not exist only as a
+// colour: a NO_COLOR user gets the same information in the text (spec
+// session-search, "Styling disabled by the environment").
+const archivedMarker = "[archived]"
+
 // sessionsPanel draws the session list.
 func (m browseModel) sessionsPanel(g geometry) panelBox {
 	box := panelBox{
@@ -1429,14 +1528,6 @@ func (m browseModel) sessionsPanel(g geometry) panelBox {
 		Height:  g.sessionsH,
 		Focused: m.focus == panelSessions,
 		Style:   m.style,
-	}
-
-	rowOpts := RenderOptions{Width: box.innerWidth() - rowDecorationWidth, Style: m.style}
-	if rowOpts.Width < 1 {
-		// Never pass <= 0 through to RenderRow: 0/negative is that
-		// function's "width wasn't set at all, use the default" sentinel,
-		// which is the opposite of what a too-narrow terminal means here.
-		rowOpts.Width = 1
 	}
 
 	if len(m.visible) == 0 {
@@ -1450,7 +1541,25 @@ func (m browseModel) sessionsPanel(g geometry) panelBox {
 	}
 	end := minInt(top+h, len(m.visible))
 	for i := top; i < end; i++ {
-		line := RenderRow(m.visible[i], rowOpts)
+		it := m.visible[i]
+		// The archive marker is budgeted *before* the row is shortened,
+		// never appended after truncation - trimming a styled row after the
+		// fact risks cutting inside an ANSI escape sequence, and a marker
+		// bolted on past the budget would push the line past the panel edge
+		// (change fix-row-width-budget).
+		marker := ""
+		if m.showAll && it.Archived {
+			marker = " " + style(archivedMarker, ansiDim, m.style)
+		}
+		rowOpts := RenderOptions{Width: box.innerWidth() - rowDecorationWidth - visibleWidth(marker), Style: m.style}
+		if rowOpts.Width < 1 {
+			// Never pass <= 0 through to RenderRow: 0/negative is that
+			// function's "width wasn't set at all, use the default" sentinel,
+			// which is the opposite of what a too-narrow terminal means here.
+			rowOpts.Width = 1
+		}
+
+		line := RenderRow(it, rowOpts) + marker
 		if i == m.cursor {
 			if m.style {
 				line = highlightLine(line)
@@ -1467,12 +1576,20 @@ func (m browseModel) sessionsPanel(g geometry) panelBox {
 // sessionsCount is the top-border annotation: how many sessions are listed,
 // and out of how many the profile holds when that is a smaller number than
 // the whole - so "am I looking at everything?" is answered without reading
-// four panels.
+// four panels. When the hide rules suppressed some of that whole, the count
+// says so in the border too, so hiding is never silent in the browser any
+// more than it is in the command-line header. The panel's own renderer
+// drops the annotation when the border is too narrow for it, so the hidden
+// count never widens the frame.
 func (m browseModel) sessionsCount() string {
-	if len(m.visible) == len(m.all) {
-		return strconv.Itoa(len(m.all))
+	count := strconv.Itoa(len(m.all))
+	if len(m.visible) != len(m.all) {
+		count = fmt.Sprintf("%d/%d", len(m.visible), len(m.all))
 	}
-	return fmt.Sprintf("%d/%d", len(m.visible), len(m.all))
+	if m.hidden > 0 && !m.showAll {
+		count += fmt.Sprintf(" · %d hidden", m.hidden)
+	}
+	return count
 }
 
 // detailPanel draws the right-hand pane: a tab strip in the top border and
@@ -1646,6 +1763,8 @@ var browseActions = []browseAction{
 	{key: "R", label: "refresh the index"},
 	{key: "m/M", label: "add/remove a tag", help: "add/remove a tag on the selected session"},
 	{key: "c/C", label: "add/remove a comment", help: "add/remove a comment on the selected session"},
+	{key: "a", label: "archive", help: "archive/unarchive the selected session", footer: true},
+	{key: ".", label: "show all", help: "toggle showing sessions the hide rules and the archive flag suppress", footer: true},
 	{key: "?", label: "keys", help: "this list", footer: true},
 	{key: "q, Ctrl-C", label: "quit", footer: true},
 }
