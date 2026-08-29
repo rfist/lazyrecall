@@ -500,8 +500,10 @@ func (m browseModel) profileRows() []facetRow {
 }
 
 // matchText is the per-row haystack the text filter matches against: the
-// row's own slots, joined - which is to say exactly what the row puts on
-// screen, and nothing else (change literal-substring-filter).
+// row's own slots, shortened to width by fitRowToWidth exactly as the
+// session list shortens them before drawing, then joined - which is to say
+// exactly what the row puts on screen, and nothing else (change
+// literal-substring-filter, corrected by fit-filter-to-drawn-width).
 //
 // It is built from rowSlots rather than from the Item's fields directly so
 // that the two cannot drift apart. The rule a user can hold in their head
@@ -513,11 +515,78 @@ func (m browseModel) profileRows() []facetRow {
 // on text that was not on them and could not be, which is most of what
 // made the filter feel arbitrary.
 //
-// One deliberate exception: this is the row before fitRowToWidth shortens
-// it, so a topic the terminal truncates is still matchable in full. Being
-// able to find a session by a word the width cut off is help, not surprise.
-func matchText(it search.Item) string {
-	return strings.Join(rowSlots(it), " ")
+// literal-substring-filter left one gap in that same rule: it matched
+// rowSlots *before* fitRowToWidth shortens them, on the theory that being
+// able to find a session by a word the width cut off was help, not
+// surprise. It is not help when the row is a 5,203-character last prompt
+// and the panel draws roughly the first 130 columns of it - "adv" matched
+// "advertises" at character 553, nowhere near the screen, which is exactly
+// the "why is this row here?" complaint the whole change existed to fix.
+// width must be the number the row is actually rendered at (sessionRowWidth
+// - not a guessed constant, not DefaultWidth for its own sake), or this
+// goes back to matching a different string than the one on screen.
+//
+// A direct, and intended, consequence: filter results now depend on the
+// terminal's width. A word visible in a wide terminal can straddle or fall
+// past the truncation point in a narrower one and stop matching there.
+// That is the honest meaning of "match what is displayed" - the row really
+// is narrower at 80 columns than at 200 - not an oversight to be smoothed
+// over by matching some width-independent superset of it.
+func matchText(it search.Item, width int) string {
+	slots := rowSlots(it)
+	fitRowToWidth(slots, width)
+	return strings.Join(slots, " ")
+}
+
+// sessionRowWidth is the content width a session row is rendered at: the
+// same arithmetic sessionsPanel performs - box.innerWidth() less
+// rowDecorationWidth - before handing a width to RenderRow, computed once
+// here so the text filter and the row actually drawn on screen use the
+// identical number by construction. Two independent copies of this
+// arithmetic is exactly how the original defect stayed hidden: matchText
+// never called fitRowToWidth at all, so there was nothing to keep in sync
+// with sessionsPanel's number in the first place.
+//
+// The archived-row marker (" [archived]", drawn only when showAll is on)
+// is deliberately left out of this arithmetic, even though sessionsPanel
+// subtracts its width per row before calling RenderRow. The marker is
+// appended *after* RenderRow returns; it is never part of rowSlots or
+// matchText's domain, so it has no bearing on what a row's own fields can
+// be filtered by. The cost is that an archived row's matchable text can
+// run a few columns further right than that one row's line literally
+// does - accepted because the defect this fixes concerned thousands of
+// characters, not single digits, and computing a per-item width here
+// would mean applyTextFilter re-deriving "is this row archived, is showAll
+// on" for every row, the kind of duplicated logic that let the original
+// bug in.
+func (m browseModel) sessionRowWidth() int {
+	if m.width <= 0 {
+		// No terminal size is known yet - every applyTextFilter test in
+		// this file builds a browseModel by hand and never sends a
+		// tea.WindowSizeMsg, so m.width is Go's int zero value, not a real
+		// geometry. RenderRow itself treats Width<=0 as "unset, use
+		// DefaultWidth" (style.go) for exactly this reason: geometry()'s
+		// own arithmetic has no such fallback, and driven by a zero width
+		// it clamps down to the narrowest legal panel (1 column, from
+		// panelBox.innerWidth's own floor) rather than reporting "unknown"
+		// - which would make matching against an unsized model filter on
+		// almost nothing, not on what a real terminal would show. Falling
+		// back to the same sentinel RenderRow uses keeps the two
+		// consistent about what "no width" means.
+		return DefaultWidth
+	}
+	g := m.geometry()
+	width := panelBox{Width: g.rightWidth}.innerWidth() - rowDecorationWidth
+	if width < 1 {
+		// Mirrors the clamp sessionsPanel itself applies to rowOpts.Width
+		// before calling RenderRow (see the comment there): 0 or negative
+		// would fall through to RenderRow's "unset" sentinel above and
+		// match against DefaultWidth's worth of text in a terminal with
+		// far less room than that to show it - the opposite of what a
+		// too-narrow terminal should mean here.
+		width = 1
+	}
+	return width
 }
 
 // applyTextFilter keeps the rows whose text contains m.textFilter, matched
@@ -537,14 +606,21 @@ func matchText(it search.Item) string {
 // - and recency is the order the whole browser is built around. (The old
 // code did ask its matcher for a rank and then never sorted by it, so the
 // listing was in recency order anyway, minus the ranking work.)
+//
+// The match width is computed once, outside the loop, rather than once per
+// row: sessionRowWidth does not vary row to row (see its comment for the
+// one deliberate exception, the archived marker), and this is called for
+// every panel's corpus on every rebuild, so recomputing geometry() len(rows)
+// times over would be pure waste.
 func (m browseModel) applyTextFilter(rows []search.Item) []search.Item {
 	if m.textFilter == "" {
 		return rows
 	}
+	width := m.sessionRowWidth()
 	needle := strings.ToLower(m.textFilter)
 	out := make([]search.Item, 0, len(rows))
 	for _, it := range rows {
-		if strings.Contains(strings.ToLower(matchText(it)), needle) {
+		if strings.Contains(strings.ToLower(matchText(it, width)), needle) {
 			out = append(out, it)
 		}
 	}
@@ -603,7 +679,32 @@ func (m *browseModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		g := m.geometry()
 		m.detail.Width = g.rightWidth - 2
 		m.detail.Height = g.detailInner
+
+		// sessionRowWidth (and so matchText) is derived from m.width, so a
+		// resize can change which rows a text filter in effect keeps, not
+		// only how much of them is drawn - the whole point of matching
+		// against the fitted row (defect 1 of the terminal-width audit).
+		// Rebuilding here, rather than waiting for the next keystroke in
+		// the filter prompt, is what keeps m.visible answering "what
+		// matches at the width now on screen" rather than "what matched at
+		// whatever width was current when the filter was last typed."
+		m.rebuild()
 		m.keepCursorVisible()
+
+		// A resize can also drop the panel that currently has focus: the
+		// whole left column collapses below minSidebarWidth, or Tags alone
+		// drops out when the body is too short for it (geometry's
+		// "rest < 8" branch). setFocus and moveFocusSpatial already refuse
+		// to land focus on a panel panelDrawn reports as not on screen;
+		// this is that same check on the one path that changes what is
+		// drawn without the user pressing a focus key at all - so j/k, /,
+		// Enter and the action menu can never keep acting on something
+		// invisible until the user happens to press Tab or a digit next.
+		// Sessions is always panelDrawn (defect 2 of the same audit), so
+		// this reassignment can never itself need a further fallback.
+		if !m.panelDrawn(m.focus) {
+			m.focus = panelSessions
+		}
 		return m, nil
 
 	case refreshDoneMsg:
@@ -798,11 +899,21 @@ func (m *browseModel) setFocus(p panelID) {
 }
 
 // moveFocus cycles focus by delta over the panels currently drawn.
+//
+// panelDrawn, not the sidebar bool alone, decides "drawn": sidebar being
+// true only means the left column exists, not that every panel inside it
+// does. Tags alone can drop out of a sidebar that is otherwise present
+// (geometry's "rest < 8" branch, tagsH == 0) - the old condition here,
+// `sidebar || m.focus == panelSessions || m.focus == panelDetail`, treated
+// the whole column as landable the moment it existed, so Tab could stop the
+// cycle on a zero-height Tags panel on a short terminal with a sidebar.
+// panelDrawn is the same predicate setFocus and moveFocusSpatial already
+// defer to, so all three ways of moving focus agree about what is on
+// screen by construction rather than by three call sites agreeing to.
 func (m *browseModel) moveFocus(delta int) {
-	sidebar := m.geometry().sidebar
 	for i := 0; i < int(numPanels); i++ {
 		m.focus = panelID((int(m.focus) + delta + int(numPanels)) % int(numPanels))
-		if sidebar || m.focus == panelSessions || m.focus == panelDetail {
+		if m.panelDrawn(m.focus) {
 			break
 		}
 	}
@@ -1726,7 +1837,12 @@ func (m browseModel) sessionsPanel(g geometry) panelBox {
 		if m.showAll && it.Archived {
 			marker = " " + style(archivedMarker, ansiDim, m.style)
 		}
-		rowOpts := RenderOptions{Width: box.innerWidth() - rowDecorationWidth - visibleWidth(marker), Style: m.style}
+		// The base width (before the marker) comes from sessionRowWidth
+		// rather than being computed again here, so this row and
+		// matchText's haystack for it are the same width by construction -
+		// the property defect 1 of the terminal-width audit was missing
+		// (change fit-filter-to-drawn-width).
+		rowOpts := RenderOptions{Width: m.sessionRowWidth() - visibleWidth(marker), Style: m.style}
 		if rowOpts.Width < 1 {
 			// Never pass <= 0 through to RenderRow: 0/negative is that
 			// function's "width wasn't set at all, use the default" sentinel,
