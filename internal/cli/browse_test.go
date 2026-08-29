@@ -389,6 +389,61 @@ func TestSpatialMoveSkipsDroppedTagsPanel(t *testing.T) {
 	}
 }
 
+// TestResizeMovesFocusOffAPanelThatDisappears is defect 2 of the
+// terminal-width audit: panelDrawn already governs setFocus (the digit
+// keys) and moveFocusSpatial (H/J/K/L), but the tea.WindowSizeMsg handler
+// updated m.width/m.height and the detail viewport without ever asking
+// whether the panel currently focused was still one of them. Focus Tags,
+// then shrink below minSidebarWidth: the whole sidebar - Tags included -
+// stops being drawn, and without this fix j/k/'/'/Enter would keep acting
+// on a panel nothing on screen represents until the user happened to press
+// Tab or a digit.
+func TestResizeMovesFocusOffAPanelThatDisappears(t *testing.T) {
+	m := fixtureBrowser(t)
+	m = update(t, m, tea.WindowSizeMsg{Width: 100, Height: 26})
+	m.focus = panelTags
+	if !m.panelDrawn(panelTags) {
+		t.Fatal("fixture at 100x26 does not draw Tags to begin with; pick a size where it does for this test to mean anything")
+	}
+
+	m = update(t, m, tea.WindowSizeMsg{Width: 60, Height: 20})
+	if m.geometry().sidebar {
+		t.Fatal("fixture at 60x20 still draws the sidebar; pick a narrower width for this test to mean anything")
+	}
+	if m.focus == panelTags {
+		t.Error("focus stayed on Tags after a resize dropped the whole sidebar it lives in")
+	}
+	if !m.panelDrawn(m.focus) {
+		t.Errorf("resize left focus on %v, which is not currently drawn", m.focus)
+	}
+	if m.focus != panelSessions {
+		t.Errorf("resize moved focus to %v, want it to fall back to Sessions (always drawn)", m.focus)
+	}
+}
+
+// TestTabDoesNotLandOnZeroHeightTagsPanel is the other half of defect 2:
+// moveFocus (Tab) only checked geometry().sidebar, not panelDrawn, so on a
+// short terminal where the sidebar exists but geometry sets tagsH to 0
+// (the "rest < 8" branch - see TestSpatialMoveSkipsDroppedTagsPanel, which
+// establishes this same 100x18 fixture drops Tags on its own), Tab from
+// Repos would stop cycling the instant it reached Tags, landing on a panel
+// with no lines to draw.
+func TestTabDoesNotLandOnZeroHeightTagsPanel(t *testing.T) {
+	m := fixtureBrowser(t)
+	m = update(t, m, tea.WindowSizeMsg{Width: 100, Height: 18})
+	if g := m.geometry(); !g.sidebar || g.tagsH != 0 {
+		t.Fatalf("fixture at 100x18 has sidebar=%v tagsH=%d, want sidebar and tagsH=0 for this test to mean anything", g.sidebar, g.tagsH)
+	}
+	m.focus = panelRepos
+	m = update(t, m, tea.KeyMsg{Type: tea.KeyTab})
+	if m.focus == panelTags {
+		t.Error("Tab from Repos landed on Tags, which this terminal size draws at zero height")
+	}
+	if !m.panelDrawn(m.focus) {
+		t.Errorf("Tab left focus on %v, which is not currently drawn", m.focus)
+	}
+}
+
 // ---------------------------------------------------------------------
 // Facets
 // ---------------------------------------------------------------------
@@ -1806,6 +1861,87 @@ func TestTextFilterMatchesOnlyWhatTheRowShows(t *testing.T) {
 	// The name it does show still filters normally.
 	if got := (&browseModel{textFilter: "retry"}).applyTextFilter([]search.Item{named}); len(got) != 1 {
 		t.Errorf("filtering on the text the row shows kept %d rows, want 1", len(got))
+	}
+}
+
+// TestTextFilterDoesNotMatchTextPastTheTerminalTruncation is the concrete
+// regression a terminal-width audit found in change literal-substring-filter
+// itself: matchText was built from rowSlots *before* fitRowToWidth ran, so a
+// word deep inside a long prompt kept a row the terminal never drew any part
+// of - the exact "why is this row here?" complaint that change existed to
+// fix, reintroduced by leaving one field unfitted. The audit's real example
+// was a 5,203-character last prompt where the panel draws roughly the first
+// 130 columns and "adv" matched "advertises" at character 553, five hundred
+// columns past anything on screen.
+func TestTextFilterDoesNotMatchTextPastTheTerminalTruncation(t *testing.T) {
+	db := browseTestDB(t)
+	// 600 filler characters, then the target word, then more filler - long
+	// enough that no realistic row width reaches it.
+	prompt := strings.Repeat("x", 600) + "advertises" + strings.Repeat("x", 4000)
+	seedBrowseSession(t, db, "l1", "claude:p:1", "p", 1, map[string]any{
+		"last_prompt": prompt, "last_activity_at": 1700000000,
+	})
+	m := newTestBrowser(db, "p", BrowserOptions{}) // sends a 100x40 WindowSizeMsg
+
+	// Guard the premise: at the width the session row is actually rendered
+	// at, the topic slot does not reach character 600 - this fixture only
+	// tests what it claims to if the row genuinely cannot show the word.
+	width := m.sessionRowWidth()
+	slots := rowSlots(m.visible[0])
+	fitRowToWidth(slots, width)
+	if strings.Contains(strings.Join(slots, " "), "advertises") {
+		t.Fatalf("fixture's target word survives fitRowToWidth at width %d; the fixture no longer isolates truncation", width)
+	}
+
+	m = update(t, m, keyRunes("0"))
+	m = update(t, m, keyRunes("/"))
+	for _, r := range "advertises" {
+		m = update(t, m, keyRunes(string(r)))
+	}
+	m = update(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+
+	if len(m.visible) != 0 {
+		t.Errorf("filter kept a row on the strength of text past where its %d-wide row is truncated - matching invisible text again", width)
+	}
+}
+
+// TestTextFilterMatchesTextWithinTheTruncationWidth is
+// TestTextFilterDoesNotMatchTextPastTheTerminalTruncation's counterpart: a
+// word that IS still inside the row once it is fitted to width must keep
+// matching. Without this, a fix to the defect above could overcorrect into
+// never matching a long prompt's topic slot at all.
+func TestTextFilterMatchesTextWithinTheTruncationWidth(t *testing.T) {
+	db := browseTestDB(t)
+	// A short word right at the front of the topic slot: at the width the
+	// fixture browser actually renders at (100 columns, three side panels
+	// wide), the age and other fixed slots already consume most of the
+	// row's budget, leaving only a handful of columns for the topic - so
+	// the target word here is deliberately short, not long like the
+	// filler behind it.
+	prompt := "bug " + strings.Repeat("x", 4000)
+	seedBrowseSession(t, db, "l1", "claude:p:1", "p", 1, map[string]any{
+		"last_prompt": prompt,
+	})
+	m := newTestBrowser(db, "p", BrowserOptions{})
+
+	// Guard the premise the other direction: the word is still there once
+	// the row is fitted to the width it is actually drawn at.
+	width := m.sessionRowWidth()
+	slots := rowSlots(m.visible[0])
+	fitRowToWidth(slots, width)
+	if !strings.Contains(strings.Join(slots, " "), "bug") {
+		t.Fatalf("fixture's target word does not survive fitRowToWidth at width %d; pick shorter filler", width)
+	}
+
+	m = update(t, m, keyRunes("0"))
+	m = update(t, m, keyRunes("/"))
+	for _, r := range "bug" {
+		m = update(t, m, keyRunes(string(r)))
+	}
+	m = update(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+
+	if len(m.visible) != 1 {
+		t.Errorf("filter dropped a row whose matching text is still within the drawn row's width, got %d rows", len(m.visible))
 	}
 }
 
