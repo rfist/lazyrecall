@@ -11,8 +11,7 @@ package cli
 
 import (
 	"sort"
-
-	"github.com/lithammer/fuzzysearch/fuzzy"
+	"strings"
 
 	"lazyrecall/internal/search"
 )
@@ -59,14 +58,19 @@ func (f *facet) index() *facetRow {
 // cursor onto an unrelated row.
 func (f *facet) setRows(rows []facetRow) {
 	if f.filter != "" {
-		labels := make([]string, len(rows))
-		for i, r := range rows {
-			labels[i] = r.Label
-		}
-		ranks := fuzzy.RankFindFold(f.filter, labels)
-		narrowed := make([]facetRow, 0, len(ranks))
-		for _, r := range ranks {
-			narrowed = append(narrowed, rows[r.OriginalIndex])
+		// Literal substring, case-insensitive, in the order the rows
+		// already had - the same rule the session list narrows by (change
+		// literal-substring-filter). A repository list is the one place a
+		// subsequence match could be defended, since these rows are paths
+		// and paths are what fuzzy finders are for; it is not defended
+		// here, because "/" is one gesture and it should not mean two
+		// different things depending on which panel has focus.
+		needle := strings.ToLower(f.filter)
+		narrowed := make([]facetRow, 0, len(rows))
+		for _, r := range rows {
+			if strings.Contains(strings.ToLower(r.Label), needle) {
+				narrowed = append(narrowed, r)
+			}
 		}
 		rows = narrowed
 	}

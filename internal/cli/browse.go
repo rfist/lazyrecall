@@ -32,7 +32,6 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/lithammer/fuzzysearch/fuzzy"
 
 	"lazyrecall/internal/annotate"
 	"lazyrecall/internal/config"
@@ -251,7 +250,7 @@ func (t detailTab) title() string {
 //
 // The three prompts that used to ask for a profile, an agent, or a tag are
 // gone: those values are panels now, chosen by moving to them. What is
-// left is the input that genuinely is free text - a search phrase, a fuzzy
+// left is the input that genuinely is free text - a search phrase, a text
 // narrowing, a new tag, a comment - plus the action menu.
 type inputMode int
 
@@ -327,11 +326,11 @@ type browseModel struct {
 	repos     facet
 	tags      facet
 
-	// fuzzyQuery narrows the loaded session rows in process as the user
-	// types (spec session-search, "Fuzzy filtering of the loaded rows").
-	fuzzyQuery string
+	// textFilter narrows the loaded session rows in process as the user
+	// types (spec session-search, "Narrowing the loaded rows by typing").
+	textFilter string
 
-	visible []search.Item // sessions after every facet and the fuzzy query
+	visible []search.Item // sessions after every facet and the text filter
 	cursor  int
 	listTop int
 
@@ -440,13 +439,33 @@ func (m *browseModel) loadAll() {
 // facets, so a panel always answers "what would selecting this row give
 // me, on top of what is already selected" - a row showing 0 would be a row
 // that leads nowhere, and none is ever shown.
+//
+// The text filter is part of "what is already selected" for that purpose,
+// which it was not until change literal-substring-filter. It used to be
+// applied only to m.visible, on the last line here, after the three panels
+// had been counted - so with "postman" typed, Repos could still offer a
+// repository with three sessions behind it and selecting that row produced
+// an empty list. The count was not stale, it was wrong about the single
+// thing a facet count promises. That the search phrase ("s") never had the
+// same defect is an accident of where the two filters act: a phrase is a
+// database query and changes m.all itself, while the text filter is a walk
+// over what m.all already holds, and so was invisible to everything
+// upstream of it.
+//
+// corpus is what keeps that from happening again: every panel and the
+// session list ask the same function for their rows, so a filter added to
+// it applies to all four by construction rather than by four call sites
+// remembering to.
 func (m *browseModel) rebuild() {
-	m.agents.setRows(countBy(narrow(m.all, "", m.repos.Sel, m.tags.Sel), "all agents", agentKey, nil))
-	m.repos.setRows(countBy(narrow(m.all, m.agents.Sel, "", m.tags.Sel), "all repos", repoKey, abbreviateHome))
-	m.tags.setRows(countBy(narrow(m.all, m.agents.Sel, m.repos.Sel, ""), "all tags", tagKeys, func(s string) string { return "#" + s }))
+	corpus := func(agent, repo, tag string) []search.Item {
+		return m.applyTextFilter(narrow(m.all, agent, repo, tag))
+	}
+	m.agents.setRows(countBy(corpus("", m.repos.Sel, m.tags.Sel), "all agents", agentKey, nil))
+	m.repos.setRows(countBy(corpus(m.agents.Sel, "", m.tags.Sel), "all repos", repoKey, abbreviateHome))
+	m.tags.setRows(countBy(corpus(m.agents.Sel, m.repos.Sel, ""), "all tags", tagKeys, func(s string) string { return "#" + s }))
 	m.profiles_.setRows(m.profileRows())
 
-	m.visible = m.applyFuzzy(narrow(m.all, m.agents.Sel, m.repos.Sel, m.tags.Sel))
+	m.visible = corpus(m.agents.Sel, m.repos.Sel, m.tags.Sel)
 	if m.cursor >= len(m.visible) {
 		m.cursor = len(m.visible) - 1
 	}
@@ -480,46 +499,54 @@ func (m browseModel) profileRows() []facetRow {
 	return out
 }
 
-// matchText is the per-row haystack fuzzy filtering matches against:
-// everything the user can see on the row plus the handle.
+// matchText is the per-row haystack the text filter matches against: the
+// row's own slots, joined - which is to say exactly what the row puts on
+// screen, and nothing else (change literal-substring-filter).
+//
+// It is built from rowSlots rather than from the Item's fields directly so
+// that the two cannot drift apart. The rule a user can hold in their head
+// is "if I can read it on the line, I can filter on it; if I can't, I
+// can't" - and that rule is only true if display and matching are the same
+// text by construction. The predecessor built its own list and quietly
+// included the git branch, the topic AND the last prompt, while the row
+// shows only the first non-empty of name/topic/last-prompt: rows matched
+// on text that was not on them and could not be, which is most of what
+// made the filter feel arbitrary.
+//
+// One deliberate exception: this is the row before fitRowToWidth shortens
+// it, so a topic the terminal truncates is still matchable in full. Being
+// able to find a session by a word the width cut off is help, not surprise.
 func matchText(it search.Item) string {
-	parts := []string{it.Source}
-	if it.Handle > 0 {
-		parts = append(parts, fmt.Sprintf("#%d", it.Handle))
-	}
-	if it.CWD != nil {
-		parts = append(parts, *it.CWD)
-	}
-	if it.GitBranch != nil && *it.GitBranch != "" {
-		parts = append(parts, *it.GitBranch)
-	}
-	if it.Name != nil {
-		parts = append(parts, *it.Name)
-	}
-	if it.Topic != nil {
-		parts = append(parts, *it.Topic)
-	}
-	if it.LastPrompt != nil {
-		parts = append(parts, *it.LastPrompt)
-	}
-	parts = append(parts, it.Tags...)
-	return strings.Join(parts, " ")
+	return strings.Join(rowSlots(it), " ")
 }
 
-// applyFuzzy narrows rows to the fuzzy matches of m.fuzzyQuery, best
-// matches first. An empty query keeps the rows as loaded.
-func (m browseModel) applyFuzzy(rows []search.Item) []search.Item {
-	if m.fuzzyQuery == "" {
+// applyTextFilter keeps the rows whose text contains m.textFilter, matched
+// literally and without regard to case, in the order they were already in
+// (most recently active first).
+//
+// Literal, not fuzzy: the filter used to be a subsequence match, which is
+// the right algorithm for a fuzzy finder hunting a path and the wrong one
+// here. "postman" would match p...o...s...t...m...a...n scattered across
+// three hundred characters of a row, so a seven-letter query kept half the
+// listing and no row explained why it was there. A session list is read,
+// not hunted through: the query is a word the user saw, or expects to see,
+// on the line.
+//
+// Order is left alone rather than ranked. There is no match quality to rank
+// by once matching is literal - a row either contains the word or does not
+// - and recency is the order the whole browser is built around. (The old
+// code did ask its matcher for a rank and then never sorted by it, so the
+// listing was in recency order anyway, minus the ranking work.)
+func (m browseModel) applyTextFilter(rows []search.Item) []search.Item {
+	if m.textFilter == "" {
 		return rows
 	}
-	targets := make([]string, len(rows))
-	for i := range rows {
-		targets[i] = matchText(rows[i])
-	}
-	ranks := fuzzy.RankFindFold(m.fuzzyQuery, targets)
-	out := make([]search.Item, 0, len(ranks))
-	for _, r := range ranks {
-		out = append(out, rows[r.OriginalIndex])
+	needle := strings.ToLower(m.textFilter)
+	out := make([]search.Item, 0, len(rows))
+	for _, it := range rows {
+		if strings.Contains(strings.ToLower(matchText(it)), needle) {
+			out = append(out, it)
+		}
 	}
 	return out
 }
@@ -599,7 +626,7 @@ func (m *browseModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// old one carries over: its agents, repos, and tags are not this
 		// profile's, and keeping them would silently show an empty list.
 		m.agents.Sel, m.repos.Sel, m.tags.Sel = "", "", ""
-		m.fuzzyQuery = ""
+		m.textFilter = ""
 		m.cursor, m.listTop = 0, 0
 		m.notice = "profile: " + msg.name
 		m.loadAll()
@@ -944,11 +971,11 @@ func (m *browseModel) activate() (tea.Model, tea.Cmd) {
 
 // clearFocused is Esc outside of a prompt: it undoes whatever the focused
 // panel contributes to the current view, and nothing else. Esc on Sessions
-// clears the fuzzy narrowing, which is the thing typed into that panel.
+// clears the text filter, which is the thing typed into that panel.
 func (m *browseModel) clearFocused() {
 	switch m.focus {
 	case panelSessions:
-		m.fuzzyQuery = ""
+		m.textFilter = ""
 		m.rebuild()
 	case panelAgents, panelRepos, panelTags:
 		f := m.facetFor(m.focus)
@@ -963,7 +990,7 @@ func (m *browseModel) clearFocused() {
 
 func (m *browseModel) clearAllFilters() {
 	m.agents.Sel, m.repos.Sel, m.tags.Sel = "", "", ""
-	m.fuzzyQuery = ""
+	m.textFilter = ""
 	m.cursor, m.listTop = 0, 0
 	if m.query != "" {
 		m.query = ""
@@ -1124,14 +1151,14 @@ func (m *browseModel) updateInputMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // applyFilterText routes / to whatever the focused panel narrows by: the
-// session list's fuzzy query, or a facet panel's own row filter.
+// session list's text filter, or a facet panel's own row filter.
 func (m *browseModel) applyFilterText(v string) {
 	if f := m.facetFor(m.focus); f != nil {
 		f.filter = v
 		m.rebuild()
 		return
 	}
-	m.fuzzyQuery = v
+	m.textFilter = v
 	m.cursor, m.listTop = 0, 0
 	m.rebuild()
 }
@@ -1268,14 +1295,16 @@ func (m *browseModel) refilterMenu() {
 		m.menuCursor = clampIndex(m.menuCursor, len(m.menuFiltered))
 		return
 	}
-	labels := make([]string, len(m.menuAll))
-	for i, a := range m.menuAll {
-		labels[i] = a.label
-	}
-	ranks := fuzzy.RankFindFold(q, labels)
-	out := make([]menuAction, 0, len(ranks))
-	for _, r := range ranks {
-		out = append(out, m.menuAll[r.OriginalIndex])
+	// Literal and case-insensitive, the same rule the session list and the
+	// facet panels narrow by (change literal-substring-filter): one
+	// "type to narrow" gesture that means one thing everywhere, rather than
+	// a menu that answers to different matching than the list behind it.
+	needle := strings.ToLower(q)
+	out := make([]menuAction, 0, len(m.menuAll))
+	for _, a := range m.menuAll {
+		if strings.Contains(strings.ToLower(a.label), needle) {
+			out = append(out, a)
+		}
 	}
 	m.menuFiltered = out
 	m.menuCursor = 0
@@ -1903,7 +1932,7 @@ var browseActions = []browseAction{
 	{key: "enter", label: "switch", help: "switch to the selected profile", panels: []panelID{panelProfiles}, footer: true},
 	{key: "esc", label: "clear filter", help: "clear what this panel is filtering by", panels: []panelID{panelSessions, panelAgents, panelRepos, panelTags}, footer: true},
 	{key: "[/]", label: "tab", help: "previous/next tab in the detail pane", panels: []panelID{panelSessions, panelDetail}, footer: true},
-	{key: "/", label: "narrow", help: "narrow the focused panel's rows as you type", footer: true},
+	{key: "/", label: "narrow", help: "keep only the focused panel's rows containing what you type", footer: true},
 	{key: "s", label: "search phrase", help: "full-text search over your own prompts"},
 	{key: "x", label: "menu", help: "action menu for the focused panel", footer: true},
 	{key: "X", label: "clear all filters"},
