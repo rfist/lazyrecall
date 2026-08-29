@@ -51,6 +51,54 @@ func (s EndState) NeedsAttention() bool {
 	return false
 }
 
+// clientLabels maps a source's raw client value to the short name a
+// listing shows for it. It is an inference, and deliberately a small and
+// separate one: the transcript states an *entrypoint*, and what that
+// implies about the program on the other end can be corrected here - in
+// one table, in a build, with no reindex - if it ever stops holding.
+//
+//   - "cli" has no label at all: the source's own terminal is the
+//     unremarkable case, and a row that says so for most sessions teaches
+//     the reader nothing.
+//   - "sdk-ts" is a program embedding Claude Code's TypeScript SDK. In
+//     practice that is an editor speaking ACP - Neovim's CodeCompanion
+//     here, Zed elsewhere - so it reads as "acp": what the session came
+//     through, without claiming which editor it was.
+//   - "sdk-cli" is a script driving the CLI.
+//
+// A value not listed is its own label, so a client this build has never
+// heard of is still shown and still filterable rather than silently
+// blanked.
+var clientLabels = map[string]string{
+	"cli":            "",
+	"sdk-ts":         "acp",
+	"sdk-cli":        "sdk",
+	"claude-desktop": "desktop",
+}
+
+// ClientLabel is the short name a listing shows for a raw client value,
+// and "" for a client not worth showing (the source's own terminal).
+func ClientLabel(raw string) string {
+	if l, ok := clientLabels[raw]; ok {
+		return l
+	}
+	return raw
+}
+
+// ClientRaw is ClientLabel's inverse: the raw client value a label stands
+// for, or the argument itself when it is already a raw value (or a name
+// this build does not know). Filtering compares both spellings rather than
+// rewriting one into the other, so an ambiguous name narrows to more
+// sessions, never to none.
+func ClientRaw(label string) string {
+	for raw, l := range clientLabels {
+		if l != "" && l == label {
+			return raw
+		}
+	}
+	return label
+}
+
 // Origin is who drove a session: a person at a terminal, or a script.
 type Origin string
 
@@ -176,6 +224,16 @@ type Session struct {
 	// Origin is who drove the session - a person at a terminal or a script
 	// - when the source records enough to tell.
 	Origin Origin
+
+	// Client is the program the session was driven through, as the source
+	// named it, when the source names it at all: Claude Code's own terminal
+	// ("cli") or something embedding it, such as an editor's ACP client
+	// ("sdk-ts" - Neovim's CodeCompanion, for one). It answers "where was I
+	// when I had this conversation", which Source cannot: an editor chat and
+	// a terminal chat are both claude sessions, resumed the same way, and so
+	// this is a property of the session rather than a source of its own
+	// (change show-editor-clients). ClientLabel below names it for display.
+	Client *string
 
 	// Compaction is nil when the source has no concept of compaction at
 	// all; otherwise it reports how many times (possibly zero) this session

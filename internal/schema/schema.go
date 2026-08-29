@@ -38,7 +38,11 @@ import (
 // back out of the transcripts (the claude entrypoint field), so it needs
 // no annotation migration - the version bump alone discards and rebuilds
 // the index, and the next refresh repopulates it.
-var CurrentVersion = 5
+//
+// v6 adds sessions.client, the program a session was driven through
+// (change show-editor-clients) - read out of the same transcript field as
+// origin, and disposable for the same reason.
+var CurrentVersion = 6
 
 // indexDDL creates the tables that are pure cache over the sources: safe to
 // drop and rebuild whenever CurrentVersion changes.
@@ -60,6 +64,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 	last_activity_at  INTEGER,
 	end_state         TEXT NOT NULL,
 	origin            TEXT,
+	client            TEXT,
 	compaction_count  INTEGER,
 	compaction_json   TEXT,
 	transcript_path   TEXT,

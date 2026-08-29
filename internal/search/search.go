@@ -22,10 +22,15 @@ import (
 // sees everything.
 type Filter struct {
 	Agent string // "claude" | "pi" | "omp" | "hermes"
-	Since *time.Time
-	Until *time.Time
-	Repo  string // a git_common_root or a bare cwd, per GroupKey
-	Tag   string
+	// Client narrows to sessions driven through one program: the source's
+	// own raw value ("sdk-ts") or the short label a listing shows for it
+	// ("acp"), which are matched interchangeably so a user can filter by
+	// what they read on screen (change show-editor-clients).
+	Client string
+	Since  *time.Time
+	Until  *time.Time
+	Repo   string // a git_common_root or a bare cwd, per GroupKey
+	Tag    string
 
 	Hide    config.Hide // the standing rules; zero value applies nothing
 	ShowAll bool        // true = apply no hide rule and show archived sessions
@@ -59,7 +64,12 @@ type Item struct {
 	// Origin is who drove the session, always a member of the closed set
 	// session.Origin - a stored value outside the set (older build, or a
 	// hand-edited row) reads back as OriginUnknown, never as-is.
-	Origin       session.Origin
+	Origin session.Origin
+	// Client is the program the session was driven through, verbatim as
+	// the source recorded it, or nil when the source records no such
+	// thing. See session.ClientLabel for the short name shown in a row.
+	Client *string
+
 	DirExists    *bool // nil = never checked (no cwd known); false = missing
 	MessageCount *int64
 	Resumable    bool
@@ -97,7 +107,7 @@ func (it Item) GroupKey() (key string, isRepo bool) {
 const itemFrom = `sessions s LEFT JOIN lineages l ON l.id = s.lineage_id`
 
 var itemColumns = `s.id, s.source, s.lineage_id, l.handle, s.cwd, s.git_branch, s.git_repo_root, s.git_common_root,
-	s.started_at, s.last_activity_at, s.topic, s.name, s.last_prompt, s.end_state, s.origin, s.dir_exists, s.message_count, s.resumable,
+	s.started_at, s.last_activity_at, s.topic, s.name, s.last_prompt, s.end_state, s.origin, s.client, s.dir_exists, s.message_count, s.resumable,
 	l.archived_at IS NOT NULL AS archived`
 
 type itemRow struct {
@@ -116,6 +126,7 @@ type itemRow struct {
 	LastPrompt     *string `json:"last_prompt"`
 	EndState       string  `json:"end_state"`
 	Origin         string  `json:"origin"`
+	Client         *string `json:"client"`
 	DirExists      *int64  `json:"dir_exists"`
 	MessageCount   *int64  `json:"message_count"`
 	Resumable      int64   `json:"resumable"`
@@ -144,6 +155,7 @@ func (row itemRow) toItem() Item {
 		LastPrompt:    row.LastPrompt,
 		EndState:      session.EndState(row.EndState),
 		Origin:        origin,
+		Client:        row.Client,
 		MessageCount:  row.MessageCount,
 		Resumable:     row.Resumable != 0,
 		Archived:      row.Archived != 0,
@@ -188,6 +200,11 @@ func baseClausesFromFilter(f Filter, params map[string]any) []string {
 	if f.Agent != "" {
 		params["agent"] = f.Agent
 		clauses = append(clauses, "agent")
+	}
+	if f.Client != "" {
+		params["client"] = f.Client
+		params["client_raw"] = session.ClientRaw(f.Client)
+		clauses = append(clauses, "client")
 	}
 	if f.Since != nil {
 		params["since"] = f.Since.Unix()
@@ -239,6 +256,13 @@ func buildPredicate(pf *sqlitex.ParamFile, clauses []string) string {
 		switch c {
 		case "agent":
 			parts = append(parts, "s.source = "+pf.Ref("agent"))
+		case "client":
+			// Either spelling matches: what the source recorded, or the
+			// label a row shows for it. The two are compared, never
+			// rewritten - a value with no known label resolves to itself,
+			// so an unrecognised client is still filterable by its raw
+			// name.
+			parts = append(parts, "(s.client = "+pf.Ref("client")+" OR s.client = "+pf.Ref("client_raw")+")")
 		case "since":
 			parts = append(parts, "s.last_activity_at >= "+pf.Ref("since"))
 		case "until":
@@ -411,6 +435,9 @@ func EmptyMessage(profileName string, f Filter, query string) string {
 	var extra []string
 	if f.Agent != "" {
 		extra = append(extra, "agent="+f.Agent)
+	}
+	if f.Client != "" {
+		extra = append(extra, "client="+f.Client)
 	}
 	if f.Repo != "" {
 		extra = append(extra, "repo="+f.Repo)

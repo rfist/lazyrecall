@@ -38,8 +38,8 @@ listing when stdout is not a terminal.
 
 ```
 lazyrecall                  open the interactive browser
-lazyrecall list      [--agent=NAME] [--repo=PATH] [--tag=NAME] [--since=DAYS] [--json] [--profile=NAME]
-lazyrecall search    QUERY [--agent=NAME] [--repo=PATH] [--tag=NAME] [--json] [--profile=NAME]
+lazyrecall list      [--agent=NAME] [--client=NAME] [--repo=PATH] [--tag=NAME] [--since=DAYS] [--json] [--profile=NAME]
+lazyrecall search    QUERY [--agent=NAME] [--client=NAME] [--repo=PATH] [--tag=NAME] [--json] [--profile=NAME]
 lazyrecall review    [--json] [--profile=NAME]
 lazyrecall resume    [SESSION_ID] [--profile=NAME]
 lazyrecall comment   add SESSION_ID TEXT... | list SESSION_ID | rm COMMENT_ID
@@ -47,11 +47,15 @@ lazyrecall tag       add SESSION_ID TAG | rm SESSION_ID TAG | list
 lazyrecall archive   SESSION_ID | list
 lazyrecall unarchive SESSION_ID
 lazyrecall refresh   [--full] [--profile=NAME]
-lazyrecall browse    [QUERY] [--agent=NAME] [--repo=PATH] [--tag=NAME] [--profile=NAME]
+lazyrecall browse    [QUERY] [--agent=NAME] [--client=NAME] [--repo=PATH] [--tag=NAME] [--profile=NAME]
 lazyrecall profiles  [--json]
 lazyrecall config    path|init|show
 lazyrecall version, --version, -v
 ```
+
+A session held somewhere other than the agent's own terminal - a Neovim
+CodeCompanion chat, say, which reaches Claude Code over ACP - is listed as
+`[claude·acp]` and selected by `--client=acp`.
 
 ## Key bindings
 

@@ -85,6 +85,24 @@ func rowText(it search.Item) string {
 	return ""
 }
 
+// sourceSlotText names the agent, and - when the session was not driven
+// through the agent's own terminal - the client it came through, as
+// "claude·acp". The two share one slot rather than claiming a column of
+// their own: the client is a qualifier on the agent (an editor chat is
+// still a claude session, resumed exactly the same way), it is absent for
+// most rows, and a column that is empty most of the time costs every row
+// width it cannot pay back (change show-editor-clients).
+func sourceSlotText(it search.Item) string {
+	if it.Client == nil {
+		return it.Source
+	}
+	label := session.ClientLabel(*it.Client)
+	if label == "" {
+		return it.Source
+	}
+	return it.Source + "·" + label
+}
+
 func rowSlots(it search.Item) []string {
 	slots := make([]string, numSlots)
 
@@ -93,7 +111,7 @@ func rowSlots(it search.Item) []string {
 	} else {
 		slots[slotHandle] = "#?"
 	}
-	slots[slotSource] = "[" + it.Source + "]"
+	slots[slotSource] = "[" + sourceSlotText(it) + "]"
 
 	location := "(no working directory)"
 	if it.CWD != nil {
