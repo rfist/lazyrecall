@@ -497,12 +497,12 @@ func TestSelectingAllClearsTheFacet(t *testing.T) {
 
 func TestClearAllFiltersResetsEveryFacet(t *testing.T) {
 	m := fixtureBrowser(t)
-	m.agents.Sel, m.repos.Sel, m.tags.Sel, m.fuzzyQuery = "claude", "/Users/x/work/api", "wip", "zzz"
+	m.agents.Sel, m.repos.Sel, m.tags.Sel, m.textFilter = "claude", "/Users/x/work/api", "wip", "zzz"
 	m.rebuild()
 	m = update(t, m, keyRunes("X"))
-	if m.agents.Sel != "" || m.repos.Sel != "" || m.tags.Sel != "" || m.fuzzyQuery != "" {
-		t.Errorf("X left filters applied: agent=%q repo=%q tag=%q fuzzy=%q",
-			m.agents.Sel, m.repos.Sel, m.tags.Sel, m.fuzzyQuery)
+	if m.agents.Sel != "" || m.repos.Sel != "" || m.tags.Sel != "" || m.textFilter != "" {
+		t.Errorf("X left filters applied: agent=%q repo=%q tag=%q filter=%q",
+			m.agents.Sel, m.repos.Sel, m.tags.Sel, m.textFilter)
 	}
 	if len(m.visible) != 7 {
 		t.Errorf("%d sessions listed after clearing everything, want 7", len(m.visible))
@@ -564,7 +564,7 @@ func TestSlashOnSessionsNarrowsTheList(t *testing.T) {
 	}
 	m = update(t, m, tea.KeyMsg{Type: tea.KeyEnter})
 	if len(m.visible) == 0 || len(m.visible) == 7 {
-		t.Fatalf("fuzzy narrowing left %d of 7 sessions", len(m.visible))
+		t.Fatalf("narrowing left %d of 7 sessions", len(m.visible))
 	}
 	for _, it := range m.visible {
 		if it.CWD == nil || !strings.Contains(*it.CWD, "dotfiles") {
@@ -780,16 +780,16 @@ func TestQuitDoesNotSelect(t *testing.T) {
 
 func TestSwitchingProfileResetsTheView(t *testing.T) {
 	m := fixtureBrowser(t)
-	m.agents.Sel, m.tags.Sel, m.fuzzyQuery = "claude", "wip", "topic"
+	m.agents.Sel, m.tags.Sel, m.textFilter = "claude", "wip", "topic"
 	m.rebuild()
 	other := browseTestDB(t)
 	m = update(t, m, dbSwitchedMsg{name: "claude-work", db: other})
 	if m.profileName != "claude-work" {
 		t.Errorf("active profile is %q, want claude-work", m.profileName)
 	}
-	if m.agents.Sel != "" || m.tags.Sel != "" || m.fuzzyQuery != "" {
-		t.Errorf("filters survived the profile switch: agent=%q tag=%q fuzzy=%q",
-			m.agents.Sel, m.tags.Sel, m.fuzzyQuery)
+	if m.agents.Sel != "" || m.tags.Sel != "" || m.textFilter != "" {
+		t.Errorf("filters survived the profile switch: agent=%q tag=%q filter=%q",
+			m.agents.Sel, m.tags.Sel, m.textFilter)
 	}
 	if len(m.visible) != 0 {
 		t.Errorf("%d sessions listed from the other (empty) profile", len(m.visible))
@@ -1729,5 +1729,175 @@ func TestStyledTitleDoesNotShortenTheBorder(t *testing.T) {
 	}
 	if !strings.HasSuffix(first, "╮") {
 		t.Errorf("the top border does not close: %q", first)
+	}
+}
+
+// ---------------------------------------------------------------------
+// The text filter is literal (change literal-substring-filter)
+// ---------------------------------------------------------------------
+
+// TestTextFilterIsLiteralNotSubsequence is the regression this change
+// exists for. The filter was a fuzzy subsequence match, so "postman" kept
+// every row whose text happened to contain p...o...s...t...m...a...n in
+// order - which, over a few hundred characters, is most of them. A row now
+// survives only if it actually contains the word.
+func TestTextFilterIsLiteralNotSubsequence(t *testing.T) {
+	// Guard the premise: the row's text does not contain the word, but it
+	// does contain the letters in order - so the old matcher really would
+	// have kept it, and this test really is about the difference.
+	scattered := "code/ryd-portal support-missing-street gitlab backend"
+	if strings.Contains(scattered, "postman") {
+		t.Fatal("fixture contains the word literally; it no longer isolates subsequence matching")
+	}
+	j := 0
+	for _, c := range scattered {
+		if j < len("postman") && byte(c) == "postman"[j] {
+			j++
+		}
+	}
+	if j != len("postman") {
+		t.Fatal("fixture no longer demonstrates a subsequence match; pick different text")
+	}
+
+	m := &browseModel{textFilter: "postman"}
+	rows := []search.Item{
+		{SessionID: "claude:p:1", Source: "claude", Handle: 1,
+			CWD: strp("/Users/example/code/ryd-portal"), Topic: strp("support-missing-street"), EndState: "completed"},
+		{SessionID: "claude:p:2", Source: "claude", Handle: 2,
+			CWD: strp("/Users/example/code/postman"), Topic: strp("Open collection in Postman"), EndState: "completed"},
+	}
+	got := m.applyTextFilter(rows)
+	if len(got) != 1 || got[0].SessionID != "claude:p:2" {
+		ids := make([]string, len(got))
+		for i, it := range got {
+			ids[i] = it.SessionID
+		}
+		t.Errorf("literal filter kept %v, want only the row containing the word", ids)
+	}
+}
+
+// TestTextFilterIgnoresCase: the user types what they read, not how it was
+// capitalised - "postman" has to find "Postman".
+func TestTextFilterIgnoresCase(t *testing.T) {
+	m := &browseModel{textFilter: "postman"}
+	rows := []search.Item{
+		{SessionID: "claude:p:1", Source: "claude", Handle: 1, Topic: strp("Open collection in Postman"), EndState: "completed"},
+	}
+	if got := m.applyTextFilter(rows); len(got) != 1 {
+		t.Errorf("case-insensitive filter kept %d rows, want 1", len(got))
+	}
+}
+
+// TestTextFilterMatchesOnlyWhatTheRowShows: the row displays the name when
+// there is one, so a word that appears only in the topic or the last prompt
+// it displaced must not keep the row. Matching invisible text is the other
+// half of what made the old filter unexplainable - a row would survive with
+// nothing on it to show why.
+func TestTextFilterMatchesOnlyWhatTheRowShows(t *testing.T) {
+	named := search.Item{
+		SessionID: "claude:p:1", Source: "claude", Handle: 1, EndState: "completed",
+		Name:       strp("retry-loop"),
+		Topic:      strp("Postman collection debugging"),
+		LastPrompt: strp("why does the postman collection 404"),
+	}
+	if got := (&browseModel{textFilter: "postman"}).applyTextFilter([]search.Item{named}); len(got) != 0 {
+		t.Errorf("a row displaying %q survived a 'postman' filter on text it does not show", *named.Name)
+	}
+	// The name it does show still filters normally.
+	if got := (&browseModel{textFilter: "retry"}).applyTextFilter([]search.Item{named}); len(got) != 1 {
+		t.Errorf("filtering on the text the row shows kept %d rows, want 1", len(got))
+	}
+}
+
+// TestTextFilterKeepsRecencyOrder: with literal matching there is no match
+// quality to sort by, and recency is the order the whole browser is built
+// around, so surviving rows keep the order they were loaded in.
+func TestTextFilterKeepsRecencyOrder(t *testing.T) {
+	rows := []search.Item{
+		{SessionID: "claude:p:1", Source: "claude", Handle: 1, Topic: strp("postman first"), EndState: "completed"},
+		{SessionID: "claude:p:2", Source: "claude", Handle: 2, Topic: strp("unrelated"), EndState: "completed"},
+		{SessionID: "claude:p:3", Source: "claude", Handle: 3, Topic: strp("postman second"), EndState: "completed"},
+	}
+	got := (&browseModel{textFilter: "postman"}).applyTextFilter(rows)
+	if len(got) != 2 || got[0].SessionID != "claude:p:1" || got[1].SessionID != "claude:p:3" {
+		t.Errorf("filter reordered the surviving rows: %+v", got)
+	}
+}
+
+// TestFacetFilterIsLiteralToo: "/" is one gesture and means one thing, so a
+// side panel narrows by the same rule the session list does.
+func TestFacetFilterIsLiteralToo(t *testing.T) {
+	f := facet{filter: "postman"}
+	f.setRows([]facetRow{
+		{Label: "~/code/ryd-portal", Value: "/Users/example/code/ryd-portal", Count: 1},
+		{Label: "~/code/postman", Value: "/Users/example/code/postman", Count: 1},
+	})
+	if len(f.rows) != 1 || f.rows[0].Value != "/Users/example/code/postman" {
+		t.Errorf("facet filter kept %v, want only the literal match", rowValues(f))
+	}
+}
+
+// TestTextFilterNarrowsTheFacetPanels: the panels count what the text
+// filter left, not what was loaded. Before change literal-substring-filter
+// the filter was applied only to the session list, so a panel could offer a
+// value with sessions behind it that selecting could not produce.
+func TestTextFilterNarrowsTheFacetPanels(t *testing.T) {
+	m := fixtureBrowser(t)
+	m = update(t, m, keyRunes("0"))
+	m = update(t, m, keyRunes("/"))
+	for _, r := range "dotfiles" {
+		m = update(t, m, keyRunes(string(r)))
+	}
+	m = update(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+
+	for _, v := range rowValues(m.repos) {
+		if v != "" && !strings.Contains(v, "dotfiles") {
+			t.Errorf("repo panel still offers %q under a 'dotfiles' text filter", v)
+		}
+	}
+	// The fixture's omp session is not in a dotfiles repository, so that
+	// agent has nothing behind it any more and must not be offered.
+	for _, v := range rowValues(m.agents) {
+		if v == "omp" {
+			t.Error("agent panel still offers omp, which no filtered session uses")
+		}
+	}
+}
+
+// TestEveryOfferedFacetRowLeadsSomewhere is the invariant the panels exist
+// to keep - "a row showing 0 would be a row that leads nowhere, and none is
+// ever shown" - checked with a text filter in effect, which is exactly the
+// case that used to break it. Selecting any row a panel offers must produce
+// the number of sessions the row claims.
+func TestEveryOfferedFacetRowLeadsSomewhere(t *testing.T) {
+	base := fixtureBrowser(t)
+	base = update(t, base, keyRunes("0"))
+	base = update(t, base, keyRunes("/"))
+	for _, r := range "dotfiles" {
+		base = update(t, base, keyRunes(string(r)))
+	}
+	base = update(t, base, tea.KeyMsg{Type: tea.KeyEnter})
+
+	for _, panel := range []struct {
+		name string
+		rows []facetRow
+		sel  func(*browseModel, string)
+	}{
+		{"agents", base.agents.rows, func(m *browseModel, v string) { m.agents.Sel = v }},
+		{"repos", base.repos.rows, func(m *browseModel, v string) { m.repos.Sel = v }},
+		{"tags", base.tags.rows, func(m *browseModel, v string) { m.tags.Sel = v }},
+	} {
+		for _, row := range panel.rows {
+			if row.Value == "" {
+				continue // the synthetic "all" row
+			}
+			probe := *base
+			panel.sel(&probe, row.Value)
+			probe.rebuild()
+			if len(probe.visible) != row.Count {
+				t.Errorf("%s panel offers %q with %d behind it, but selecting it lists %d sessions",
+					panel.name, row.Value, row.Count, len(probe.visible))
+			}
+		}
 	}
 }
