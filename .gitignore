@@ -10,3 +10,20 @@ dist/
 *.db
 .beads-credential-key
 .beads/proxieddb/
+
+# Working files: agent configuration, task tracking, specs and personal notes.
+# The published repository is the program, its readme and its installer - not
+# the workspace it happens to be developed in.
+.agents/
+.beads/
+.claude/
+.codex/
+.kilocode/
+.omp/
+.pi/
+AGENTS.md
+CLAUDE.md
+openspec/
+todo.md
+testdata/
+.DS_Store
