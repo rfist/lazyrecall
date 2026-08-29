@@ -163,14 +163,28 @@ const (
 	numPanels
 )
 
-// jumpKey is the digit that focuses a panel directly. The detail pane has
-// none: it is reached with Tab from Sessions, which is where you already
-// are when you want to read it.
-func (p panelID) jumpKey() int {
-	if p == panelDetail {
-		return 0
+// jumpKey is the digit that focuses a panel directly, and whether it has
+// one at all - the detail pane does not: it is reached with Tab from
+// Sessions, which is where you already are when you want to read it.
+//
+// Sessions was renumbered from 5 to 0 (change spatial-panel-navigation),
+// which makes 0 a real jump key. Before that, "no jump key" was signalled by
+// returning the int 0 - a value no panel actually used, so it was safe as a
+// sentinel. It no longer is: Sessions' real jump key and Detail's "none"
+// would be the same int, and panelBox.Number's own zero value already means
+// "don't draw a digit" (panel.go), which would have swallowed Sessions'
+// digit at the border too. The ok return is what keeps "none" a fact of its
+// own, distinguishable from every real digit including 0 - see facetPanel
+// and sessionsPanel below, which set panelBox.HasNumber from it rather than
+// inferring "none" from Number alone.
+func (p panelID) jumpKey() (int, bool) {
+	switch p {
+	case panelDetail:
+		return 0, false
+	case panelSessions:
+		return 0, true
 	}
-	return int(p) + 1
+	return int(p) + 1, true
 }
 
 func (p panelID) title() string {
@@ -194,6 +208,15 @@ func (p panelID) title() string {
 // it replaces the whole view - and Sessions/Detail are not filters at all.
 func (p panelID) isFacet() bool {
 	return p == panelAgents || p == panelRepos || p == panelTags
+}
+
+// isLeftColumn reports whether p is one of the four panels stacked in the
+// left column - Profiles, Agents, Repos, Tags. Unlike isFacet it includes
+// Profiles: this is a question about where a panel sits on screen, not
+// about what it does, and Profiles sits in that column even though
+// selecting a row there replaces the view rather than filtering it.
+func (p panelID) isLeftColumn() bool {
+	return p == panelProfiles || p == panelAgents || p == panelRepos || p == panelTags
 }
 
 // detailTab is which page of the right-hand pane is showing.
@@ -652,9 +675,24 @@ func (m *browseModel) handleBrowseKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.moveTo(0)
 	case "G":
 		m.moveTo(1 << 30)
-	case "1", "2", "3", "4", "5":
+	case "1", "2", "3", "4":
 		n, _ := strconv.Atoi(string(msg.Runes))
 		m.setFocus(panelID(n - 1))
+	case "0":
+		// Sessions' jump key (change spatial-panel-navigation, renumbered
+		// from 5): not panelID(n-1) like the others above, since 0 is not
+		// one more than panelSessions' position in the iota - it is a
+		// digit chosen for the panel used most, not for where it sits in
+		// the column.
+		m.setFocus(panelSessions)
+	case "H":
+		m.moveFocusSpatial(dirLeft)
+	case "J":
+		m.moveFocusSpatial(dirDown)
+	case "K":
+		m.moveFocusSpatial(dirUp)
+	case "L":
+		m.moveFocusSpatial(dirRight)
 	case "q":
 		m.selectedOK = false
 		return m, tea.Quit
@@ -691,15 +729,41 @@ func (m *browseModel) handleBrowseKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// setFocus moves focus to p, skipping panels that are not currently drawn -
-// on a narrow terminal the side panels are not rendered, and focus must
-// never land somewhere invisible.
+// panelDrawn reports whether p currently occupies space in the frame. It is
+// the one place that question is answered - setFocus (the digit keys) and
+// moveFocusSpatial (H/J/K/L) below both defer to it, so focus can never land
+// somewhere invisible from one path and be refused it from the other.
+//
+// The left column collapses as a whole below minSidebarWidth
+// (geometry().sidebar); within it, Tags can additionally drop out on its
+// own when the body is too short to give every left panel a usable window
+// (geometry's "rest < 8" case, which sets tagsH to 0 - see the comment
+// there). stackPanels (panel.go) already skips a zero-height box for the
+// same reason at draw time; this is that same fact asked before a box
+// exists, which is what focus needs it for.
+func (m *browseModel) panelDrawn(p panelID) bool {
+	if p == panelSessions || p == panelDetail {
+		return true
+	}
+	g := m.geometry()
+	if !g.sidebar {
+		return false
+	}
+	if p == panelTags {
+		return g.tagsH > 0
+	}
+	return true
+}
+
+// setFocus moves focus to p directly, refusing a panel panelDrawn reports as
+// not currently on screen - the movement keys must never point a cursor at
+// something invisible.
 func (m *browseModel) setFocus(p panelID) {
 	if p < 0 || p >= numPanels {
 		return
 	}
-	if !m.geometry().sidebar && p != panelSessions && p != panelDetail {
-		m.notice = "the side panels need a wider terminal."
+	if !m.panelDrawn(p) {
+		m.notice = "that panel isn't shown at this terminal size."
 		return
 	}
 	m.focus = p
@@ -716,6 +780,77 @@ func (m *browseModel) moveFocus(delta int) {
 		}
 	}
 	m.notice = ""
+}
+
+// direction is a screen direction for the H/J/K/L spatial moves below -
+// distinct from the plain int delta move/moveTo take, which shift a cursor
+// *within* the focused panel rather than choose which panel is focused.
+type direction int
+
+const (
+	dirLeft direction = iota
+	dirRight
+	dirUp
+	dirDown
+)
+
+// moveFocusSpatial moves focus by screen geometry rather than by cycling -
+// moveFocus (Tab) does the cyclic version. It never wraps: reaching an edge
+// is the point of the feature, so K on Profiles, J on Tags, and L on
+// Sessions or Detail simply do nothing, the same way move() does nothing
+// past the first or last row of a list.
+//
+// H always resolves to Profiles specifically, never to whichever left panel
+// last had focus or looks vertically nearest to Sessions' or Detail's
+// cursor. That "nearest panel" rule would be one small variety of clever
+// per keypress; one fixed destination is what a user can predict from
+// muscle memory without checking the screen first, and the user who asked
+// for this said as much directly.
+//
+// Each branch below is an ordered chain of candidates - normally one panel,
+// but J/K's chains run all the way to the far end of the left column - and
+// focus goes to the first candidate panelDrawn still finds on screen. That
+// is what lets a move continue past a panel the frame has dropped (Tags, in
+// a short terminal) to the next one still drawn, rather than landing on it
+// or refusing to move at all; an empty or exhausted chain is exactly the
+// no-op an edge is supposed to be.
+func (m *browseModel) moveFocusSpatial(dir direction) {
+	var candidates []panelID
+	switch {
+	case dir == dirLeft && (m.focus == panelSessions || m.focus == panelDetail):
+		candidates = []panelID{panelProfiles}
+	case dir == dirRight && m.focus.isLeftColumn():
+		candidates = []panelID{panelSessions}
+	case dir == dirDown:
+		switch m.focus {
+		case panelProfiles:
+			candidates = []panelID{panelAgents, panelRepos, panelTags}
+		case panelAgents:
+			candidates = []panelID{panelRepos, panelTags}
+		case panelRepos:
+			candidates = []panelID{panelTags}
+		case panelSessions:
+			candidates = []panelID{panelDetail}
+		}
+	case dir == dirUp:
+		switch m.focus {
+		case panelAgents:
+			candidates = []panelID{panelProfiles}
+		case panelRepos:
+			candidates = []panelID{panelAgents, panelProfiles}
+		case panelTags:
+			candidates = []panelID{panelRepos, panelAgents, panelProfiles}
+		case panelDetail:
+			candidates = []panelID{panelSessions}
+		}
+	}
+	for _, p := range candidates {
+		if m.panelDrawn(p) {
+			m.focus = p
+			m.notice = ""
+			return
+		}
+	}
 }
 
 // move shifts the focused panel's cursor by delta.
@@ -1436,13 +1571,13 @@ func (m browseModel) menuPopup() string {
 // them is what makes a panel feel like it filters on hover.
 func (m browseModel) facetPanel(id panelID, f *facet, width, height int, sel string) panelBox {
 	box := panelBox{
-		Number:  id.jumpKey(),
 		Title:   id.title(),
 		Width:   width,
 		Height:  height,
 		Focused: m.focus == id,
 		Style:   m.style,
 	}
+	box.Number, box.HasNumber = id.jumpKey()
 	if height <= 0 {
 		return box
 	}
@@ -1532,7 +1667,6 @@ const archivedMarker = "[archived]"
 // sessionsPanel draws the session list.
 func (m browseModel) sessionsPanel(g geometry) panelBox {
 	box := panelBox{
-		Number:  panelSessions.jumpKey(),
 		Title:   panelSessions.title(),
 		Count:   m.sessionsCount(),
 		Width:   g.rightWidth,
@@ -1540,6 +1674,7 @@ func (m browseModel) sessionsPanel(g geometry) panelBox {
 		Focused: m.focus == panelSessions,
 		Style:   m.style,
 	}
+	box.Number, box.HasNumber = panelSessions.jumpKey()
 
 	if len(m.visible) == 0 {
 		box.Lines = append(box.Lines, style("  no session matches the filters in use.", ansiDim, m.style))
@@ -1757,8 +1892,9 @@ func (a browseAction) showsFor(p panelID) bool {
 // from the keys actually bound. Do not add, remove, or substitute a key
 // here without also changing handleBrowseKey to match, and vice versa.
 var browseActions = []browseAction{
-	{key: "1-5", label: "jump to panel", help: "focus the panel with that number"},
+	{key: "0-4", label: "jump to panel", help: "focus the panel with that number"},
 	{key: "tab", label: "panel", help: "focus the next panel (shift-tab: previous)", footer: true},
+	{key: "H/J/K/L", label: "move focus", help: "move focus to the panel in that screen direction; does nothing at an edge"},
 	{key: "j/k, ↑/↓", label: "move in panel"},
 	{key: "Ctrl-D/U", label: "move by half a panel"},
 	{key: "g/G", label: "first/last row"},
@@ -1786,7 +1922,7 @@ func (m browseModel) helpView() string {
 	for _, a := range browseActions {
 		fmt.Fprintf(&b, "  %-14s %s%s\n", a.key, a.helpText(), a.scope())
 	}
-	b.WriteString("\nPanels: 1 Profiles  2 Agents  3 Repos  4 Tags  5 Sessions  (tab reaches the detail pane)\n")
+	b.WriteString("\nPanels: 1 Profiles  2 Agents  3 Repos  4 Tags  0 Sessions  (tab reaches the detail pane)\n")
 	b.WriteString("\n")
 	b.WriteString(style("any key: close this help", ansiDim, m.style))
 	return b.String()

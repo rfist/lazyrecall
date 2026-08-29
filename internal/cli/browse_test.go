@@ -217,7 +217,7 @@ func TestViewFitsWithPromptOpen(t *testing.T) {
 func TestDigitsJumpToPanels(t *testing.T) {
 	m := fixtureBrowser(t)
 	for key, want := range map[string]panelID{
-		"1": panelProfiles, "2": panelAgents, "3": panelRepos, "4": panelTags, "5": panelSessions,
+		"1": panelProfiles, "2": panelAgents, "3": panelRepos, "4": panelTags, "0": panelSessions,
 	} {
 		m = update(t, m, keyRunes(key))
 		if m.focus != want {
@@ -263,6 +263,129 @@ func TestNarrowTerminalKeepsFocusOnVisiblePanels(t *testing.T) {
 		if m.focus != panelSessions && m.focus != panelDetail {
 			t.Fatalf("tab reached %v, which is not drawn at this width", m.focus)
 		}
+	}
+}
+
+// "5" is unbound now that Sessions is reachable through 0 (change
+// spatial-panel-navigation) - pressing it must leave focus exactly where it
+// was rather than doing something by accident.
+func TestFiveNoLongerFocusesAnything(t *testing.T) {
+	m := fixtureBrowser(t)
+	m.focus = panelAgents
+	m = update(t, m, keyRunes("5"))
+	if m.focus != panelAgents {
+		t.Errorf("%q moved focus to %v; 5 should be unbound", "5", m.focus)
+	}
+}
+
+// ---------------------------------------------------------------------
+// Spatial panel navigation (H/J/K/L)
+// ---------------------------------------------------------------------
+
+// TestSpatialMovesFollowGeometry covers one representative move in each
+// direction the feature defines, from a panel where that direction has
+// somewhere to go.
+func TestSpatialMovesFollowGeometry(t *testing.T) {
+	cases := []struct {
+		name string
+		from panelID
+		key  string
+		want panelID
+	}{
+		{"L from a left panel goes to Sessions", panelRepos, "L", panelSessions},
+		{"H from Sessions goes to Profiles", panelSessions, "H", panelProfiles},
+		{"H from Detail goes to Profiles", panelDetail, "H", panelProfiles},
+		{"J walks down the left column", panelAgents, "J", panelRepos},
+		{"K walks up the left column", panelRepos, "K", panelAgents},
+		{"J from Sessions goes to Detail", panelSessions, "J", panelDetail},
+		{"K from Detail goes to Sessions", panelDetail, "K", panelSessions},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m := fixtureBrowser(t)
+			m.focus = c.from
+			m = update(t, m, keyRunes(c.key))
+			if m.focus != c.want {
+				t.Errorf("%s from %v landed on %v, want %v", c.key, c.from, m.focus, c.want)
+			}
+		})
+	}
+}
+
+// H always resolves to Profiles specifically, never to whichever left panel
+// most recently had focus - the user asked for exactly that, rejecting the
+// cleverer "nearest panel" rule. This is the case that would tell the two
+// apart: Agents was the last left panel visited, so a "nearest" rule would
+// send H there instead of to Profiles.
+func TestHAlwaysReturnsToProfilesNotTheLastLeftPanel(t *testing.T) {
+	m := fixtureBrowser(t)
+	m.focus = panelAgents
+	m = update(t, m, keyRunes("L")) // Agents -> Sessions
+	if m.focus != panelSessions {
+		t.Fatalf("L from Agents landed on %v, want Sessions", m.focus)
+	}
+	m = update(t, m, keyRunes("H"))
+	if m.focus != panelProfiles {
+		t.Errorf("H from Sessions landed on %v, want Profiles, not the last left panel visited", m.focus)
+	}
+}
+
+// The feature is spatial, not cyclic: reaching an edge leaves focus exactly
+// where it was, rather than wrapping to the far side the way Tab does.
+func TestSpatialMovesDoNotWrapAtEdges(t *testing.T) {
+	cases := []struct {
+		name string
+		at   panelID
+		key  string
+	}{
+		{"K on Profiles", panelProfiles, "K"},
+		{"J on Tags", panelTags, "J"},
+		{"L on Sessions", panelSessions, "L"},
+		{"L on Detail", panelDetail, "L"},
+		{"H on Profiles", panelProfiles, "H"},
+		{"H on Agents", panelAgents, "H"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m := fixtureBrowser(t)
+			m.focus = c.at
+			m = update(t, m, keyRunes(c.key))
+			if m.focus != c.at {
+				t.Errorf("%s moved focus from %v to %v, want it to stay put at the edge", c.key, c.at, m.focus)
+			}
+		})
+	}
+}
+
+// A terminal too narrow for the side panels drops the whole left column, so
+// H from Sessions - which would otherwise land on Profiles - must find
+// nothing drawn to land on and leave focus untouched, the same rule the
+// digit jump keys already follow (TestNarrowTerminalKeepsFocusOnVisiblePanels).
+func TestSpatialMoveSkipsUndrawnLeftColumn(t *testing.T) {
+	m := fixtureBrowser(t)
+	m = update(t, m, tea.WindowSizeMsg{Width: 60, Height: 20})
+	m.focus = panelSessions
+	m = update(t, m, keyRunes("H"))
+	if m.focus != panelSessions {
+		t.Errorf("H at 60 columns landed on %v, want it to stay on Sessions: no side panel is drawn to receive it", m.focus)
+	}
+}
+
+// When the body is too short to give every left panel a usable window,
+// geometry drops Tags on its own (tagsH == 0) even though the rest of the
+// left column is still drawn. J from Repos must not land on the panel that
+// is not being drawn - and since Tags is the last panel in the column,
+// there is nothing further to continue to, so the move does nothing.
+func TestSpatialMoveSkipsDroppedTagsPanel(t *testing.T) {
+	m := fixtureBrowser(t)
+	m = update(t, m, tea.WindowSizeMsg{Width: 100, Height: 18})
+	if g := m.geometry(); !g.sidebar || g.tagsH != 0 {
+		t.Fatalf("fixture at 100x18 has sidebar=%v tagsH=%d, want sidebar and tagsH=0 for this test to mean anything", g.sidebar, g.tagsH)
+	}
+	m.focus = panelRepos
+	m = update(t, m, keyRunes("J"))
+	if m.focus != panelRepos {
+		t.Errorf("J from Repos with Tags dropped landed on %v, want it to stay on Repos", m.focus)
 	}
 }
 
@@ -434,7 +557,7 @@ func TestSlashNarrowsTheFocusedPanel(t *testing.T) {
 
 func TestSlashOnSessionsNarrowsTheList(t *testing.T) {
 	m := fixtureBrowser(t)
-	m = update(t, m, keyRunes("5"))
+	m = update(t, m, keyRunes("0"))
 	m = update(t, m, keyRunes("/"))
 	for _, r := range "dotfiles" {
 		m = update(t, m, keyRunes(string(r)))
@@ -458,7 +581,7 @@ func TestSlashOnSessionsNarrowsTheList(t *testing.T) {
 // browser has always had.
 func TestEscapingAPromptAppliesNothing(t *testing.T) {
 	m := fixtureBrowser(t)
-	m = update(t, m, keyRunes("5"))
+	m = update(t, m, keyRunes("0"))
 	m = update(t, m, keyRunes("s"))
 	for _, r := range "topic" {
 		m = update(t, m, keyRunes(string(r)))
@@ -535,7 +658,7 @@ func TestCommentsTabShowsCommentsWithTheirIDs(t *testing.T) {
 
 func TestActionMenuOffersThePanelsActions(t *testing.T) {
 	m := fixtureBrowser(t)
-	m = update(t, m, keyRunes("5"))
+	m = update(t, m, keyRunes("0"))
 	m = update(t, m, keyRunes("x"))
 	if m.mode != modeMenu {
 		t.Fatalf("x left the browser in mode %v, want the action menu", m.mode)
@@ -557,7 +680,7 @@ func TestActionMenuOffersThePanelsActions(t *testing.T) {
 
 func TestActionMenuNarrowsByTyping(t *testing.T) {
 	m := fixtureBrowser(t)
-	m = update(t, m, keyRunes("5"))
+	m = update(t, m, keyRunes("0"))
 	m = update(t, m, keyRunes("x"))
 	before := len(m.menuFiltered)
 	for _, r := range "comment" {
@@ -577,7 +700,7 @@ func TestActionMenuRunsTheHighlightedAction(t *testing.T) {
 	m := fixtureBrowser(t)
 	m.agents.Sel = "pi"
 	m.rebuild()
-	m = update(t, m, keyRunes("5"))
+	m = update(t, m, keyRunes("0"))
 	m = update(t, m, keyRunes("x"))
 	for _, r := range "clear all" {
 		m = update(t, m, keyRunes(string(r)))
@@ -611,7 +734,7 @@ func TestEscapingTheActionMenuRunsNothing(t *testing.T) {
 
 func TestEnterOnASessionSelectsItAndQuits(t *testing.T) {
 	m := fixtureBrowser(t)
-	m = update(t, m, keyRunes("5"))
+	m = update(t, m, keyRunes("0"))
 	m = update(t, m, keyRunes("j"))
 	want := m.visible[1].SessionID
 	nm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -712,7 +835,7 @@ func TestEveryAdvertisedKeyIsBound(t *testing.T) {
 
 func TestFooterShowsTheFocusedPanelsActions(t *testing.T) {
 	m := fixtureBrowser(t)
-	m = update(t, m, keyRunes("5"))
+	m = update(t, m, keyRunes("0"))
 	if got := m.footer(); !strings.Contains(got, "resume") {
 		t.Errorf("Sessions footer %q does not mention resuming", got)
 	}
@@ -739,7 +862,7 @@ func TestArchiveKeyToggles(t *testing.T) {
 	m := newTestBrowser(db, "claude-personal", BrowserOptions{
 		ShowAll: true, Resolve: testResolve("claude-personal"), Profiles: testProfiles("claude-personal"),
 	})
-	m = update(t, m, keyRunes("5"))
+	m = update(t, m, keyRunes("0"))
 	target := m.visible[0].LineageID
 
 	m = update(t, m, keyRunes("a"))
@@ -770,7 +893,7 @@ func TestArchiveKeyToggles(t *testing.T) {
 // session reloads the list and the row leaves it.
 func TestArchiveKeyRemovesTheRow(t *testing.T) {
 	m := fixtureBrowser(t)
-	m = update(t, m, keyRunes("5"))
+	m = update(t, m, keyRunes("0"))
 	target := m.visible[0].LineageID
 	m = update(t, m, keyRunes("a"))
 	for _, it := range m.visible {
@@ -860,7 +983,7 @@ func TestArchivedMarkerWithoutStyling(t *testing.T) {
 // profile is a real, reachable state, not a test-only corner.
 func TestArchiveWithNoSelectionDoesNothing(t *testing.T) {
 	m := newTestBrowser(browseTestDB(t), "p", BrowserOptions{})
-	m = update(t, m, keyRunes("5"))
+	m = update(t, m, keyRunes("0"))
 	if m.current() != nil {
 		t.Fatal("expected no session to be selected in an empty profile")
 	}
@@ -1226,7 +1349,7 @@ func TestPromptsTabShowsIndexedPrompts(t *testing.T) {
 // of annotating from inside the browser is not having to leave it.
 func TestTagAndCommentEditingUpdateImmediately(t *testing.T) {
 	m := fixtureBrowser(t)
-	m = update(t, m, keyRunes("5"))
+	m = update(t, m, keyRunes("0"))
 	target := m.visible[0].LineageID
 
 	m = update(t, m, keyRunes("m"))
@@ -1355,7 +1478,7 @@ func TestSessionListScrollsToKeepSelectionVisible(t *testing.T) {
 	if len(box.Lines) != g.sessionsInner {
 		t.Errorf("the list drew %d rows for a %d-row panel", len(box.Lines), g.sessionsInner)
 	}
-	m = update(t, m, keyRunes("5"))
+	m = update(t, m, keyRunes("0"))
 	for i := 0; i < 40; i++ {
 		m = update(t, m, keyRunes("j"))
 	}
@@ -1438,7 +1561,7 @@ func TestTwoBrowsersDoNotDisturbEachOther(t *testing.T) {
 
 	a := newTestBrowser(dbA, "a", BrowserOptions{})
 	b := newTestBrowser(dbB, "b", BrowserOptions{})
-	a = update(t, a, keyRunes("5"))
+	a = update(t, a, keyRunes("0"))
 	a = update(t, a, keyRunes("/"))
 	a = update(t, a, keyRunes("alpha"))
 	a = update(t, a, tea.KeyMsg{Type: tea.KeyEnter})
@@ -1504,7 +1627,7 @@ func TestActionMenuDrawsOverTheFrame(t *testing.T) {
 	m := fixtureBrowser(t)
 	m = update(t, m, tea.WindowSizeMsg{Width: 100, Height: 26})
 	before := strings.Split(m.View(), "\n")
-	m = update(t, m, keyRunes("5"))
+	m = update(t, m, keyRunes("0"))
 	m = update(t, m, keyRunes("x"))
 	after := strings.Split(m.View(), "\n")
 
@@ -1542,7 +1665,7 @@ func TestActionMenuPopupOverStyledFrameStaysInBounds(t *testing.T) {
 		Style: true, Resolve: testResolve("claude-personal"), Profiles: testProfiles("claude-personal"),
 	})
 	m = update(t, m, tea.WindowSizeMsg{Width: 100, Height: 26})
-	m = update(t, m, keyRunes("5"))
+	m = update(t, m, keyRunes("0"))
 	m = update(t, m, keyRunes("x"))
 	lines := strings.Split(m.View(), "\n")
 	if len(lines) > 26 {
