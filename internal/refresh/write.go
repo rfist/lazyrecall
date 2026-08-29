@@ -10,7 +10,7 @@ import (
 var sessionColumns = []string{
 	"id", "source", "source_session_id", "lineage_id", "continues_from",
 	"topic", "name", "last_prompt", "cwd", "git_branch", "git_repo_root", "git_common_root",
-	"started_at", "last_activity_at", "end_state", "origin", "compaction_count",
+	"started_at", "last_activity_at", "end_state", "origin", "client", "compaction_count",
 	"compaction_json", "transcript_path", "message_count", "resumable", "dir_exists",
 }
 

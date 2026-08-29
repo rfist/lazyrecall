@@ -73,6 +73,7 @@ type existingSessionRow struct {
 	GitCommonRoot   *string `json:"git_common_root"`
 	EndState        string  `json:"end_state"`
 	Origin          string  `json:"origin"`
+	Client          *string `json:"client"`
 	CompactionCount *int64  `json:"compaction_count"`
 	CompactionJSON  *string `json:"compaction_json"`
 	MessageCount    *int64  `json:"message_count"`
@@ -98,7 +99,7 @@ type existingSessions struct {
 
 func (r *Refresher) loadExistingSessions() (existingSessions, error) {
 	var rows []existingSessionRow
-	if err := r.DB.Query(`SELECT id, source_session_id, transcript_path, topic, name, last_prompt, cwd, git_branch, git_repo_root, git_common_root, end_state, origin, compaction_count, compaction_json, message_count, last_activity_at FROM sessions;`, &rows); err != nil {
+	if err := r.DB.Query(`SELECT id, source_session_id, transcript_path, topic, name, last_prompt, cwd, git_branch, git_repo_root, git_common_root, end_state, origin, client, compaction_count, compaction_json, message_count, last_activity_at FROM sessions;`, &rows); err != nil {
 		return existingSessions{}, err
 	}
 	out := existingSessions{
@@ -126,6 +127,7 @@ func (r *Refresher) loadExistingSessions() (existingSessions, error) {
 			GitCommonRoot:   row.GitCommonRoot,
 			EndState:        session.EndState(row.EndState),
 			Origin:          origin,
+			Client:          row.Client,
 		}
 		if row.MessageCount != nil {
 			mc := *row.MessageCount
@@ -244,6 +246,25 @@ func (r *Refresher) applyTranscript(s session.Session, d adapter.Discovered, pri
 	} else if prior != nil {
 		s.Origin = prior.Origin
 	}
+	// Interactive, once established, is permanent. The evidence for it is
+	// the human-typed prompts themselves, and those sit behind the cursor
+	// after the pass that read them: a later delta of an editor-client
+	// chat carries only the agent's own records, all stamped with the SDK
+	// entrypoint, and would otherwise re-hide a conversation the user is
+	// still having (change show-editor-clients). Nothing legitimately
+	// turns from a person typing into a script.
+	if prior != nil && prior.Origin == session.OriginInteractive {
+		s.Origin = session.OriginInteractive
+	}
+
+	// Client rides every record of the sources that report it at all, so a
+	// delta either sees it throughout or not at all; prior covers the "not
+	// at all" case (an incremental pass that read no new records).
+	if res.Client != nil {
+		s.Client = res.Client
+	} else if prior != nil {
+		s.Client = prior.Client
+	}
 
 	// The source's own recorded identifier, when this pass's delta included
 	// it (only ever the transcript's first line, so only a from-scratch or
@@ -315,6 +336,9 @@ func mergePrior(s *session.Session, prior *session.Session) {
 	}
 	if prior.SourceSessionID != "" {
 		s.SourceSessionID = prior.SourceSessionID
+	}
+	if s.Client == nil {
+		s.Client = prior.Client
 	}
 	s.EndState = prior.EndState
 	s.Origin = prior.Origin

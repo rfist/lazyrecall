@@ -480,3 +480,45 @@ func TestRenderRowNameStyledDistinctlyFromTopic(t *testing.T) {
 		t.Errorf("a topic should stay italic: %q", topicLine)
 	}
 }
+
+// TestRenderRowShowsClientBesideAgent: a session driven through something
+// other than the agent's own terminal says so in the agent slot, so an
+// editor chat is distinguishable from a terminal one at a glance (change
+// show-editor-clients).
+func TestRenderRowShowsClientBesideAgent(t *testing.T) {
+	base := search.Item{SessionID: "claude:p:1", Source: "claude", Handle: 7,
+		CWD: strp("/Users/example/project"), EndState: "completed"}
+
+	editor := base
+	editor.Client = strp("sdk-ts")
+	line := RenderRow(editor, RenderOptions{Width: 200, Style: false})
+	if !strings.Contains(line, "[claude·acp]") {
+		t.Errorf("row should name the client the session came through: %q", line)
+	}
+
+	// The agent's own terminal is the unremarkable case and stays unadorned:
+	// a qualifier on nearly every row would say nothing.
+	terminal := base
+	terminal.Client = strp("cli")
+	line = RenderRow(terminal, RenderOptions{Width: 200, Style: false})
+	if !strings.Contains(line, "[claude]") {
+		t.Errorf("a terminal session should show the bare agent: %q", line)
+	}
+
+	// A source that records no client at all (pi, omp, hermes) is unaffected.
+	none := base
+	none.Source = "pi"
+	line = RenderRow(none, RenderOptions{Width: 200, Style: false})
+	if !strings.Contains(line, "[pi]") {
+		t.Errorf("a source with no client should show the bare agent: %q", line)
+	}
+
+	// A client this build has never heard of is shown as itself rather than
+	// silently dropped.
+	unknown := base
+	unknown.Client = strp("vscode")
+	line = RenderRow(unknown, RenderOptions{Width: 200, Style: false})
+	if !strings.Contains(line, "[claude·vscode]") {
+		t.Errorf("an unrecognised client should still be shown: %q", line)
+	}
+}

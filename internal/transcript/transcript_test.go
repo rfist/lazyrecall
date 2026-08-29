@@ -837,3 +837,109 @@ func TestClaudeVocabOriginMixedRecordsTakeStrongestSignal(t *testing.T) {
 		t.Errorf("origin = %v, want automated: one automated record decides the session", res.Origin)
 	}
 }
+
+// The following cover the client - the program a session was driven
+// through - and the one signal that outranks it: a prompt the source
+// itself attributes to a person. An editor chat reaches Claude Code
+// through its SDK, so the entrypoint alone reads as automation and would
+// hide a real conversation (change show-editor-clients).
+
+func TestClaudeVocabClientRecordedVerbatim(t *testing.T) {
+	dir := t.TempDir()
+	content := `{"type":"user","message":{"role":"user","content":"hello"},"entrypoint":"sdk-ts","timestamp":"2026-01-01T00:00:00Z"}
+`
+	p := writeFile(t, dir, "s.jsonl", content)
+	vocab, _ := VocabFor("claude")
+	res, err := Scan(p, 0, vocab)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Client == nil {
+		t.Fatal("Client = nil, want the entrypoint value")
+	}
+	if *res.Client != "sdk-ts" {
+		t.Errorf("Client = %q, want %q: the source's own value is stored, never a label derived from it", *res.Client, "sdk-ts")
+	}
+}
+
+func TestClaudeVocabNoClientWithoutEntrypoint(t *testing.T) {
+	dir := t.TempDir()
+	content := `{"type":"user","message":{"role":"user","content":"hello"},"timestamp":"2026-01-01T00:00:00Z"}
+`
+	p := writeFile(t, dir, "s.jsonl", content)
+	vocab, _ := VocabFor("claude")
+	res, err := Scan(p, 0, vocab)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Client != nil {
+		t.Errorf("Client = %q, want nil when the source recorded no entrypoint", *res.Client)
+	}
+}
+
+// TestClaudeVocabHumanPromptOutranksSDKEntrypoint: an editor client (ACP,
+// hence the SDK entrypoint) carrying prompts the source marked as human is
+// a conversation, not automation - otherwise the non-interactive hide rule
+// would swallow every Neovim/CodeCompanion chat.
+func TestClaudeVocabHumanPromptOutranksSDKEntrypoint(t *testing.T) {
+	dir := t.TempDir()
+	content := `{"type":"user","message":{"role":"user","content":"plan the next step"},"entrypoint":"sdk-ts","origin":{"kind":"human"},"timestamp":"2026-01-01T00:00:00Z"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"here it is"}]},"entrypoint":"sdk-ts","timestamp":"2026-01-01T00:00:01Z"}
+`
+	p := writeFile(t, dir, "s.jsonl", content)
+	vocab, _ := VocabFor("claude")
+	res, err := Scan(p, 0, vocab)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.HumanPrompt {
+		t.Error("HumanPrompt = false, want true: the scan saw a prompt marked human")
+	}
+	if res.Origin != session.OriginInteractive {
+		t.Errorf("origin = %v, want interactive: a person typing outranks the SDK entrypoint", res.Origin)
+	}
+}
+
+// TestClaudeVocabSDKWithoutHumanPromptStaysAutomated: the override is
+// narrow. A script's prompts carry no human marker, so nothing that really
+// is automation is unhidden by the rule above.
+func TestClaudeVocabSDKWithoutHumanPromptStaysAutomated(t *testing.T) {
+	dir := t.TempDir()
+	content := `{"type":"user","message":{"role":"user","content":"run the nightly check"},"entrypoint":"sdk-cli","timestamp":"2026-01-01T00:00:00Z"}
+`
+	p := writeFile(t, dir, "s.jsonl", content)
+	vocab, _ := VocabFor("claude")
+	res, err := Scan(p, 0, vocab)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.HumanPrompt {
+		t.Error("HumanPrompt = true, want false: no record claimed a person typed")
+	}
+	if res.Origin != session.OriginAutomated {
+		t.Errorf("origin = %v, want automated", res.Origin)
+	}
+}
+
+// TestClaudeVocabHumanMarkerOnInjectedTextIsNotAPrompt: the human marker
+// only speaks for who was driving when it rides text the user actually
+// typed. Claude Code's own injected blocks are not prompts, so a marker on
+// one must not unhide a script's session.
+func TestClaudeVocabHumanMarkerOnInjectedTextIsNotAPrompt(t *testing.T) {
+	dir := t.TempDir()
+	content := `{"type":"user","message":{"role":"user","content":"<system-reminder>be careful</system-reminder>"},"entrypoint":"sdk-cli","origin":{"kind":"human"},"timestamp":"2026-01-01T00:00:00Z"}
+{"type":"user","message":{"role":"user","content":"run the nightly check"},"entrypoint":"sdk-cli","timestamp":"2026-01-01T00:00:01Z"}
+`
+	p := writeFile(t, dir, "s.jsonl", content)
+	vocab, _ := VocabFor("claude")
+	res, err := Scan(p, 0, vocab)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.HumanPrompt {
+		t.Error("HumanPrompt = true, want false: the marker rode an injected block, not a prompt")
+	}
+	if res.Origin != session.OriginAutomated {
+		t.Errorf("origin = %v, want automated", res.Origin)
+	}
+}

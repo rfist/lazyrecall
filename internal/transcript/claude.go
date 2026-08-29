@@ -94,7 +94,10 @@ func (claudeVocab) Classify(raw map[string]any) (Record, bool) {
 	typ, _ := raw["type"].(string)
 
 	ts := parseTime(asString(raw["timestamp"]))
-	origin := claudeOrigin(asString(raw["entrypoint"]))
+	entrypoint := asString(raw["entrypoint"])
+	origin := claudeOrigin(entrypoint)
+	client := claudeClient(entrypoint)
+	human := claudeHumanTyped(raw)
 
 	switch typ {
 	case "ai-title":
@@ -102,7 +105,7 @@ func (claudeVocab) Classify(raw map[string]any) (Record, bool) {
 		if title == "" {
 			return Record{}, false
 		}
-		return Record{Kind: KindTopic, Timestamp: ts, Text: strPtr(title), Origin: origin}, true
+		return Record{Kind: KindTopic, Timestamp: ts, Text: strPtr(title), Origin: origin, Client: client, HumanTyped: human}, true
 
 	case "custom-title":
 		// The user renamed the session inside Claude Code. The record
@@ -113,14 +116,14 @@ func (claudeVocab) Classify(raw map[string]any) (Record, bool) {
 		if title == "" {
 			return Record{}, false
 		}
-		return Record{Kind: KindCustomTitle, Timestamp: ts, Text: strPtr(title), Origin: origin}, true
+		return Record{Kind: KindCustomTitle, Timestamp: ts, Text: strPtr(title), Origin: origin, Client: client, HumanTyped: human}, true
 
 	case "last-prompt":
 		p, _ := raw["lastPrompt"].(string)
 		if p == "" || isInjectedBlock(p) {
 			return Record{}, false
 		}
-		return Record{Kind: KindLastPrompt, Timestamp: ts, Text: strPtr(p), Origin: origin}, true
+		return Record{Kind: KindLastPrompt, Timestamp: ts, Text: strPtr(p), Origin: origin, Client: client, HumanTyped: human}, true
 
 	case "system":
 		if sub, _ := raw["subtype"].(string); sub == "compact_boundary" {
@@ -137,7 +140,7 @@ func (claudeVocab) Classify(raw map[string]any) (Record, bool) {
 					ci.PreTokens = &v
 				}
 			}
-			rec := Record{Kind: KindCompactionBoundary, Timestamp: ts, Compaction: ci, Origin: origin}
+			rec := Record{Kind: KindCompactionBoundary, Timestamp: ts, Compaction: ci, Origin: origin, Client: client, HumanTyped: human}
 			// compact_boundary records also carry cwd/gitBranch like any
 			// other record in the file - capture opportunistically.
 			rec.CWD, rec.GitBranch = claudeCWDBranch(raw)
@@ -158,31 +161,31 @@ func (claudeVocab) Classify(raw map[string]any) (Record, bool) {
 				// something the user typed - still worth reporting session
 				// meta, never worth indexing as a prompt.
 				if cwd != nil || branch != nil {
-					return Record{Kind: KindSessionMeta, Timestamp: ts, CWD: cwd, GitBranch: branch, Origin: origin}, true
+					return Record{Kind: KindSessionMeta, Timestamp: ts, CWD: cwd, GitBranch: branch, Origin: origin, Client: client, HumanTyped: human}, true
 				}
 				return Record{}, false
 			}
-			return Record{Kind: KindUserPrompt, Timestamp: ts, CWD: cwd, GitBranch: branch, Text: strPtr(c), Origin: origin}, true
+			return Record{Kind: KindUserPrompt, Timestamp: ts, CWD: cwd, GitBranch: branch, Text: strPtr(c), Origin: origin, Client: client, HumanTyped: human}, true
 		case []any:
 			if hasBlockType(c, "tool_result") {
-				return Record{Kind: KindToolResult, Timestamp: ts, CWD: cwd, GitBranch: branch, Origin: origin}, true
+				return Record{Kind: KindToolResult, Timestamp: ts, CWD: cwd, GitBranch: branch, Origin: origin, Client: client, HumanTyped: human}, true
 			}
 			if text, ok := textFromBlocks(c, "text", "text"); ok && text != "" {
 				if isInjectedBlock(text) {
 					if cwd != nil || branch != nil {
-						return Record{Kind: KindSessionMeta, Timestamp: ts, CWD: cwd, GitBranch: branch, Origin: origin}, true
+						return Record{Kind: KindSessionMeta, Timestamp: ts, CWD: cwd, GitBranch: branch, Origin: origin, Client: client, HumanTyped: human}, true
 					}
 					return Record{}, false
 				}
-				return Record{Kind: KindUserPrompt, Timestamp: ts, CWD: cwd, GitBranch: branch, Text: strPtr(text), Origin: origin}, true
+				return Record{Kind: KindUserPrompt, Timestamp: ts, CWD: cwd, GitBranch: branch, Text: strPtr(text), Origin: origin, Client: client, HumanTyped: human}, true
 			}
 			if cwd != nil || branch != nil {
-				return Record{Kind: KindSessionMeta, Timestamp: ts, CWD: cwd, GitBranch: branch, Origin: origin}, true
+				return Record{Kind: KindSessionMeta, Timestamp: ts, CWD: cwd, GitBranch: branch, Origin: origin, Client: client, HumanTyped: human}, true
 			}
 			return Record{}, false
 		default:
 			if cwd != nil || branch != nil {
-				return Record{Kind: KindSessionMeta, Timestamp: ts, CWD: cwd, GitBranch: branch, Origin: origin}, true
+				return Record{Kind: KindSessionMeta, Timestamp: ts, CWD: cwd, GitBranch: branch, Origin: origin, Client: client, HumanTyped: human}, true
 			}
 			return Record{}, false
 		}
@@ -196,14 +199,14 @@ func (claudeVocab) Classify(raw map[string]any) (Record, bool) {
 			stopPtr = &stopReason
 		}
 		if hasBlockType(content, "tool_use") {
-			return Record{Kind: KindToolUse, Timestamp: ts, StopReason: stopPtr, Origin: origin}, true
+			return Record{Kind: KindToolUse, Timestamp: ts, StopReason: stopPtr, Origin: origin, Client: client, HumanTyped: human}, true
 		}
 		if text, ok := textFromBlocks(content, "text", "text"); ok {
-			return Record{Kind: KindAssistantText, Timestamp: ts, StopReason: stopPtr, Text: strPtr(text), Origin: origin}, true
+			return Record{Kind: KindAssistantText, Timestamp: ts, StopReason: stopPtr, Text: strPtr(text), Origin: origin, Client: client, HumanTyped: human}, true
 		}
 		// thinking-only records etc: recognized, but carry nothing tier 1
 		// needs beyond marking that the assistant turn is in progress.
-		return Record{Kind: KindAssistantText, Timestamp: ts, StopReason: stopPtr, Origin: origin}, true
+		return Record{Kind: KindAssistantText, Timestamp: ts, StopReason: stopPtr, Origin: origin, Client: client, HumanTyped: human}, true
 
 	default:
 		return Record{}, false
@@ -225,6 +228,31 @@ func claudeOrigin(entrypoint string) session.Origin {
 		return session.OriginAutomated
 	}
 	return session.OriginInteractive
+}
+
+// claudeClient reports which program drove the session, verbatim from
+// Claude Code's "entrypoint" field. No mapping happens here: "sdk-ts" is
+// recorded as "sdk-ts", not as the ACP editor client it almost always is
+// on this machine, because the transcript states the entrypoint and only
+// implies the client. Naming the implication is display's job
+// (session.ClientLabel), where it can be read alongside the raw value and
+// corrected without a reindex.
+func claudeClient(entrypoint string) *string {
+	if entrypoint == "" {
+		return nil
+	}
+	return strPtr(entrypoint)
+}
+
+// claudeHumanTyped reports whether Claude Code attributed this record to a
+// person: origin.kind "human", as opposed to "task-notification" and the
+// other kinds it uses for text its own machinery injected.
+func claudeHumanTyped(raw map[string]any) bool {
+	o, ok := raw["origin"].(map[string]any)
+	if !ok {
+		return false
+	}
+	return asString(o["kind"]) == "human"
 }
 
 func claudeCWDBranch(raw map[string]any) (*string, *string) {

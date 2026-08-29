@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"lazyrecall/internal/config"
 	"lazyrecall/internal/profile"
 	"lazyrecall/internal/search"
 	"lazyrecall/internal/session"
@@ -981,5 +982,137 @@ func TestOriginPersistedFromTranscript(t *testing.T) {
 	}
 	if itemByID["claude:claude-personal:c2"] != session.OriginUnknown {
 		t.Errorf("Item.Origin for the no-entrypoint session = %q, want %q", itemByID["claude:claude-personal:c2"], session.OriginUnknown)
+	}
+}
+
+// TestEditorClientSessionIsVisibleAndStaysVisible covers the whole path
+// for a session driven from an editor (change show-editor-clients): the
+// client reaches the sessions row, the session counts as interactive
+// despite its SDK entrypoint because its prompts are marked human, and -
+// the part an incremental refresh can get wrong - it is still interactive
+// after a delta made only of the agent's own records, which carry the SDK
+// entrypoint and nothing to say a person is there.
+func TestEditorClientSessionIsVisibleAndStaysVisible(t *testing.T) {
+	home := t.TempDir()
+	dataDir := t.TempDir()
+	os.Setenv("LAZYRECALL_HOME", dataDir)
+	t.Cleanup(func() { os.Unsetenv("LAZYRECALL_HOME") })
+
+	claudeRoot := filepath.Join(home, ".claude-personal")
+	writeFile(t, filepath.Join(claudeRoot, "history.jsonl"),
+		`{"display":"plan the next step","timestamp":1700000000000,"project":"/work/repo","sessionId":"c1"}`+"\n")
+	transcript := filepath.Join(claudeRoot, "projects", "-work-repo", "c1.jsonl")
+	writeFile(t, transcript,
+		`{"type":"user","message":{"role":"user","content":"plan the next step"},"cwd":"/work/repo","gitBranch":"main","entrypoint":"sdk-ts","origin":{"kind":"human"},"timestamp":"2026-01-01T00:00:00Z"}`+"\n"+
+			`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Here it is."}],"stop_reason":"end_turn"},"entrypoint":"sdk-ts","timestamp":"2026-01-01T00:00:05Z"}`+"\n")
+
+	p := profile.Profile{Name: "claude-personal", Roots: map[string]string{"claude": claudeRoot}}
+	r, err := New(p, sqlite3Path(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Refresh(Options{}); err != nil {
+		t.Fatal(err)
+	}
+
+	state := func(when string) (client *string, origin string) {
+		t.Helper()
+		var rows []struct {
+			Client *string `json:"client"`
+			Origin string  `json:"origin"`
+		}
+		if err := r.DB.Query(`SELECT client, origin FROM sessions WHERE source = 'claude';`, &rows); err != nil {
+			t.Fatal(err)
+		}
+		if len(rows) != 1 {
+			t.Fatalf("%s: got %d claude session rows, want 1", when, len(rows))
+		}
+		return rows[0].Client, rows[0].Origin
+	}
+
+	client, origin := state("first pass")
+	if client == nil || *client != "sdk-ts" {
+		t.Errorf("client = %v, want the entrypoint the source recorded", client)
+	}
+	if origin != string(session.OriginInteractive) {
+		t.Errorf("origin = %q, want %q: a person was typing, whatever the entrypoint says", origin, session.OriginInteractive)
+	}
+
+	// The default hide rules must not swallow it: this is the whole point.
+	items, err := search.List(r.DB, search.Filter{Hide: config.Hide{NonInteractive: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("an editor chat is listed under the standing hide rules: got %d items, want 1", len(items))
+	}
+	if items[0].Client == nil || *items[0].Client != "sdk-ts" {
+		t.Errorf("Item.Client = %v, want the stored client", items[0].Client)
+	}
+
+	// A delta of the agent's own records only - no human prompt in range.
+	f, err := os.OpenFile(transcript, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"And a follow-up."}],"stop_reason":"end_turn"},"entrypoint":"sdk-ts","timestamp":"2026-01-01T00:00:09Z"}` + "\n"); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	if _, err := r.Refresh(Options{}); err != nil {
+		t.Fatal(err)
+	}
+	client, origin = state("after an incremental delta")
+	if client == nil || *client != "sdk-ts" {
+		t.Errorf("client = %v after a delta, want the client already known", client)
+	}
+	if origin != string(session.OriginInteractive) {
+		t.Errorf("origin = %q after a delta of agent records, want %q: the chat did not become automation", origin, session.OriginInteractive)
+	}
+}
+
+// TestClientFilterMatchesLabelAndRawValue: --client accepts what the row
+// shows ("acp") and what the source recorded ("sdk-ts") alike, so a user
+// can filter by the name they just read on screen.
+func TestClientFilterMatchesLabelAndRawValue(t *testing.T) {
+	home := t.TempDir()
+	dataDir := t.TempDir()
+	os.Setenv("LAZYRECALL_HOME", dataDir)
+	t.Cleanup(func() { os.Unsetenv("LAZYRECALL_HOME") })
+
+	claudeRoot := filepath.Join(home, ".claude-personal")
+	writeFile(t, filepath.Join(claudeRoot, "history.jsonl"),
+		`{"display":"from the editor","timestamp":1700000000000,"project":"/work/repo","sessionId":"c1"}`+"\n"+
+			`{"display":"from the terminal","timestamp":1700000000001,"project":"/work/repo","sessionId":"c2"}`+"\n")
+	writeFile(t, filepath.Join(claudeRoot, "projects", "-work-repo", "c1.jsonl"),
+		`{"type":"user","message":{"role":"user","content":"from the editor"},"cwd":"/work/repo","entrypoint":"sdk-ts","origin":{"kind":"human"},"timestamp":"2026-01-01T00:00:00Z"}`+"\n")
+	writeFile(t, filepath.Join(claudeRoot, "projects", "-work-repo", "c2.jsonl"),
+		`{"type":"user","message":{"role":"user","content":"from the terminal"},"cwd":"/work/repo","entrypoint":"cli","timestamp":"2026-01-01T00:00:00Z"}`+"\n")
+
+	p := profile.Profile{Name: "claude-personal", Roots: map[string]string{"claude": claudeRoot}}
+	r, err := New(p, sqlite3Path(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Refresh(Options{}); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range []string{"acp", "sdk-ts"} {
+		items, err := search.List(r.DB, search.Filter{Client: name})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(items) != 1 || items[0].SessionID != "claude:claude-personal:c1" {
+			t.Errorf("--client=%s matched %d items, want only the editor session", name, len(items))
+		}
+	}
+
+	items, err := search.List(r.DB, search.Filter{Client: "cli"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].SessionID != "claude:claude-personal:c2" {
+		t.Errorf("--client=cli matched %d items, want only the terminal session", len(items))
 	}
 }

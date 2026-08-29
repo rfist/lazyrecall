@@ -31,6 +31,7 @@ type jsonItem struct {
 	LastPrompt     *string  `json:"last_prompt,omitempty"`
 	EndState       string   `json:"end_state"`
 	Origin         string   `json:"origin,omitempty"`
+	Client         *string  `json:"client,omitempty"`
 	DirExists      *bool    `json:"dir_exists,omitempty"`
 	MessageCount   *int64   `json:"message_count,omitempty"`
 	Resumable      bool     `json:"resumable"`
@@ -45,6 +46,7 @@ func toJSONItem(it search.Item) jsonItem {
 		CWD: it.CWD, GitBranch: it.GitBranch, GitRepoRoot: it.GitRepoRoot,
 		Topic: it.Topic, Name: it.Name, LastPrompt: it.LastPrompt, EndState: string(it.EndState),
 		Origin:    string(it.Origin),
+		Client:    it.Client,
 		DirExists: it.DirExists, MessageCount: it.MessageCount, Resumable: it.Resumable,
 		Archived: it.Archived, Tags: it.Tags, MatchSnippet: it.MatchSnippet,
 	}

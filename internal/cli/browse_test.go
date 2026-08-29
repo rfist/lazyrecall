@@ -1464,6 +1464,35 @@ func TestRenderItemDetailShowsNameAndTopicSeparately(t *testing.T) {
 	}
 }
 
+// TestRenderItemDetailShowsClientWithItsRawValue: the row has room only
+// for the short label, so the detail pane is where the reader can see what
+// that label was inferred from (change show-editor-clients).
+func TestRenderItemDetailShowsClientWithItsRawValue(t *testing.T) {
+	db := browseTestDB(t)
+	client := "sdk-ts"
+	it := search.Item{SessionID: "claude:p:1", Source: "claude", Client: &client}
+	got := renderItemDetail(db, it, RenderOptions{Width: 80})
+	if !strings.Contains(got, "client: acp (sdk-ts)") {
+		t.Errorf("the detail pane does not show the client and what it was read from:\n%s", got)
+	}
+
+	// The terminal has no label - the row leaves it out - but the detail
+	// pane still states it, because "driven from the terminal" and "the
+	// source never said" are different facts and this is the one place
+	// with room to tell them apart.
+	terminal := "cli"
+	got = renderItemDetail(db, search.Item{SessionID: "claude:p:2", Source: "claude", Client: &terminal}, RenderOptions{Width: 80})
+	if !strings.Contains(got, "client: cli") {
+		t.Errorf("the detail pane should still state a terminal session's client:\n%s", got)
+	}
+
+	// A source that records no client at all carries no line.
+	got = renderItemDetail(db, search.Item{SessionID: "pi:p:3", Source: "pi"}, RenderOptions{Width: 80})
+	if strings.Contains(got, "client:") {
+		t.Errorf("a source that records no client should carry no client line:\n%s", got)
+	}
+}
+
 // ---------------------------------------------------------------------
 // The action-menu popup
 // ---------------------------------------------------------------------

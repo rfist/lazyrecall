@@ -117,8 +117,8 @@ func printUsage() {
 
 Usage:
   lazyrecall                  open the interactive browser
-  lazyrecall list      [--agent=NAME] [--repo=PATH] [--tag=NAME] [--since=DAYS] [--all] [--json] [--profile=NAME]
-  lazyrecall search    QUERY [--agent=NAME] [--repo=PATH] [--tag=NAME] [--all] [--json] [--profile=NAME]
+  lazyrecall list      [--agent=NAME] [--client=NAME] [--repo=PATH] [--tag=NAME] [--since=DAYS] [--all] [--json] [--profile=NAME]
+  lazyrecall search    QUERY [--agent=NAME] [--client=NAME] [--repo=PATH] [--tag=NAME] [--all] [--json] [--profile=NAME]
   lazyrecall review    [--all] [--json] [--profile=NAME]
   lazyrecall resume    [SESSION_ID] [--profile=NAME]
   lazyrecall comment   add SESSION_ID TEXT... | list SESSION_ID | rm COMMENT_ID
@@ -126,7 +126,7 @@ Usage:
   lazyrecall archive   SESSION_ID | list
   lazyrecall unarchive SESSION_ID
   lazyrecall refresh   [--full] [--profile=NAME]
-  lazyrecall browse    [QUERY] [--agent=NAME] [--repo=PATH] [--tag=NAME] [--all] [--profile=NAME]
+  lazyrecall browse    [QUERY] [--agent=NAME] [--client=NAME] [--repo=PATH] [--tag=NAME] [--all] [--profile=NAME]
   lazyrecall profiles  [--json]
   lazyrecall config    path|init|show
   lazyrecall version, --version, -v
@@ -227,16 +227,27 @@ func splitDoubleDash(args []string) (before, after []string, found bool) {
 	return args, nil, false
 }
 
-func parseFilterFlags(fs *flag.FlagSet) (*string, *string, *string, *int) {
-	agent := fs.String("agent", "", "filter by agent (claude, pi, omp, hermes)")
-	repo := fs.String("repo", "", "filter by repository root or working directory")
-	tag := fs.String("tag", "", "filter by tag")
-	since := fs.Int("since", 0, "only sessions active in the last N days")
-	return agent, repo, tag, since
+type filterFlags struct {
+	agent  *string
+	client *string
+	repo   *string
+	tag    *string
+	since  *int
 }
 
-func buildFilter(agent, repo, tag *string, sinceDays *int) search.Filter {
-	f := search.Filter{Agent: *agent, Repo: *repo, Tag: *tag}
+func parseFilterFlags(fs *flag.FlagSet) filterFlags {
+	return filterFlags{
+		agent:  fs.String("agent", "", "filter by agent (claude, pi, omp, hermes)"),
+		client: fs.String("client", "", "filter by the program the session was driven through (acp, sdk, cli)"),
+		repo:   fs.String("repo", "", "filter by repository root or working directory"),
+		tag:    fs.String("tag", "", "filter by tag"),
+		since:  fs.Int("since", 0, "only sessions active in the last N days"),
+	}
+}
+
+func buildFilter(ff filterFlags) search.Filter {
+	agent, repo, tag, sinceDays := ff.agent, ff.repo, ff.tag, ff.since
+	f := search.Filter{Agent: *agent, Client: *ff.client, Repo: *repo, Tag: *tag}
 	if *sinceDays > 0 {
 		t := time.Now().Add(-time.Duration(*sinceDays) * 24 * time.Hour)
 		f.Since = &t
@@ -245,7 +256,7 @@ func buildFilter(agent, repo, tag *string, sinceDays *int) search.Filter {
 }
 
 func cmdList(global *flag.FlagSet, profileFlag *string, jsonFlag, allFlag, noRefresh *bool, args []string) error {
-	agent, repoF, tag, since := parseFilterFlags(global)
+	ff := parseFilterFlags(global)
 	if _, err := parseInterleaved(global, args); err != nil {
 		return err
 	}
@@ -261,7 +272,7 @@ func cmdList(global *flag.FlagSet, profileFlag *string, jsonFlag, allFlag, noRef
 	if err != nil {
 		return err
 	}
-	f := buildFilter(agent, repoF, tag, since)
+	f := buildFilter(ff)
 	f.Hide = cfg.Hide
 	f.ShowAll = *allFlag
 	items, hidden, err := search.ListWithHidden(db, f)
@@ -272,7 +283,7 @@ func cmdList(global *flag.FlagSet, profileFlag *string, jsonFlag, allFlag, noRef
 }
 
 func cmdSearch(global *flag.FlagSet, profileFlag *string, jsonFlag, allFlag, noRefresh *bool, args []string) error {
-	agent, repoF, tag, since := parseFilterFlags(global)
+	ff := parseFilterFlags(global)
 	rest, err := parseInterleaved(global, args)
 	if err != nil {
 		return err
@@ -294,7 +305,7 @@ func cmdSearch(global *flag.FlagSet, profileFlag *string, jsonFlag, allFlag, noR
 	if err != nil {
 		return err
 	}
-	f := buildFilter(agent, repoF, tag, since)
+	f := buildFilter(ff)
 	f.Hide = cfg.Hide
 	f.ShowAll = *allFlag
 	items, hidden, err := search.SearchWithHidden(db, query, f)
@@ -944,7 +955,8 @@ func jsonEnvelope(profileName string, writeArray func() error) error {
 // reports that browsing requires a terminal and prints the equivalent
 // non-interactive listing.
 func cmdBrowse(global *flag.FlagSet, profileFlag *string, allFlag, noRefresh *bool, args []string) error {
-	agent, repoF, tag, _ := parseFilterFlags(global)
+	ff := parseFilterFlags(global)
+	agent, repoF, tag := ff.agent, ff.repo, ff.tag
 	positionals, err := parseInterleaved(global, args)
 	if err != nil {
 		return err
@@ -966,7 +978,7 @@ func cmdBrowse(global *flag.FlagSet, profileFlag *string, allFlag, noRefresh *bo
 		if err != nil {
 			return err
 		}
-		f := search.Filter{Agent: *agent, Repo: *repoF, Tag: *tag, Hide: cfg.Hide, ShowAll: *allFlag}
+		f := search.Filter{Agent: *agent, Client: *ff.client, Repo: *repoF, Tag: *tag, Hide: cfg.Hide, ShowAll: *allFlag}
 		var items []search.Item
 		var hidden int
 		if query != "" {
@@ -991,6 +1003,7 @@ func cmdBrowse(global *flag.FlagSet, profileFlag *string, allFlag, noRefresh *bo
 		Repo:        *repoF,
 		Agent:       *agent,
 		Tag:         *tag,
+		Client:      *ff.client,
 		Query:       query,
 		Style:       os.Getenv("NO_COLOR") == "",
 		// The browser opens under the same hide rules the non-interactive

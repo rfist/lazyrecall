@@ -65,6 +65,22 @@ type Record struct {
 	// field produce.
 	Origin session.Origin
 
+	// Client is the program that drove the session, verbatim as the source
+	// named it (Claude Code's "entrypoint": "cli" for its own terminal,
+	// "sdk-ts" for a program embedding the TypeScript SDK - an editor
+	// client such as CodeCompanion's ACP adapter - "sdk-cli" for a script
+	// driving the CLI). Stored raw rather than as a friendly label so the
+	// index never records an inference: the short name a listing shows is
+	// derived at display time (change show-editor-clients).
+	Client *string
+
+	// HumanTyped marks a record the source itself attributes to a person
+	// rather than to its own machinery (Claude Code's origin.kind "human").
+	// It is the one signal that outranks Client/Origin: a session reached
+	// through an SDK entrypoint is still a conversation when a person is
+	// the one typing into it.
+	HumanTyped bool
+
 	// SourceID is the session's own identifier, as the source itself
 	// recorded it inside the transcript - never derived from the
 	// transcript's file name (change fix-resume-session-identity, design.md
@@ -149,6 +165,18 @@ type Result struct {
 	// an origin (the zero value of session.Origin is an empty string, not
 	// OriginUnknown, so Scan never reports that).
 	Origin session.Origin
+
+	// Client is the first client any record in this scan named, kept
+	// verbatim (see Record.Client). Callers merge it across scans like
+	// CWD/GitBranch: it rides every record for the sources that carry it
+	// at all, so a delta either sees it on every record or on none.
+	Client *string
+
+	// HumanPrompt reports that at least one prompt in this scan was one
+	// the source attributed to a person. It is reported separately from
+	// Origin because callers merging scans need to know that the evidence
+	// was in *this* delta, not just what the evidence concluded.
+	HumanPrompt bool
 
 	// Prompts collects every KindUserPrompt's text seen in this scan, in
 	// order. This is the tier-2 search-index source for sources with no
@@ -252,6 +280,16 @@ func Scan(path string, fromOffset int64, vocab Vocab) (Result, error) {
 		} else if rec.Origin == session.OriginInteractive && res.Origin != session.OriginAutomated {
 			res.Origin = session.OriginInteractive
 		}
+		if res.Client == nil && rec.Client != nil {
+			res.Client = rec.Client
+		}
+		// A prompt the source attributes to a person is only counted when
+		// it is a prompt: the human marker also rides records that carry
+		// injected text rather than anything typed, and those must not
+		// speak for who was driving.
+		if rec.Kind == KindUserPrompt && rec.HumanTyped {
+			res.HumanPrompt = true
+		}
 
 		switch rec.Kind {
 		case KindTopic:
@@ -290,6 +328,16 @@ func Scan(path string, fromOffset int64, vocab Vocab) (Result, error) {
 	}
 	if err := sc.Err(); err != nil {
 		return res, err
+	}
+	// A person typing outranks the entrypoint. Claude Code stamps its SDK
+	// entrypoint on every record of a session an editor client drove, which
+	// by itself reads as automation - and would hide a Neovim/CodeCompanion
+	// chat, a real conversation, behind the non-interactive hide rule. Where
+	// the two disagree, the prompts win: a script's prompts are not marked
+	// human, so nothing that is actually automation is unhidden by this
+	// (change show-editor-clients).
+	if res.HumanPrompt {
+		res.Origin = session.OriginInteractive
 	}
 	res.EndOffset = offset
 	return res, nil

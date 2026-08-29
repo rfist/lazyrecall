@@ -39,6 +39,7 @@ import (
 	"lazyrecall/internal/profile"
 	"lazyrecall/internal/refresh"
 	"lazyrecall/internal/search"
+	"lazyrecall/internal/session"
 	"lazyrecall/internal/sqlitex"
 )
 
@@ -49,8 +50,14 @@ type BrowserOptions struct {
 	Repo        string // initial filter values (from command-line flags)
 	Agent       string
 	Tag         string
-	Query       string
-	Style       bool // NO_COLOR-aware: suppress all styling when the environment asks
+	// Client narrows every listing to one client for the whole session
+	// (change show-editor-clients). Unlike agent/repo/tag it has no panel
+	// of its own - it is a qualifier on the agent, not a dimension worth a
+	// quarter of the side column - so it stays as it was passed in and is
+	// cleared by restarting the browser, not from inside it.
+	Client string
+	Query  string
+	Style  bool // NO_COLOR-aware: suppress all styling when the environment asks
 
 	// ShowAll opens the browser with the hide rules and the archive flag
 	// disabled - "show me everything". The caller seeds it from the config
@@ -277,6 +284,9 @@ type browseModel struct {
 	// non-interactive commands build.
 	showAll bool
 	hide    config.Hide
+	// client is the standing --client narrowing, applied to every query
+	// this browser runs (see BrowserOptions.Client).
+	client string
 	// hidden is how many sessions the rules suppressed in the current
 	// result set - the `N hidden` the border reports so hiding is never
 	// silent, the same contract the command-line header keeps.
@@ -344,6 +354,7 @@ func newBrowseModel(opts BrowserOptions) browseModel {
 		height:      24,
 		focus:       panelSessions,
 		query:       opts.Query,
+		client:      opts.Client,
 		input:       textinput.New(),
 	}
 	// Command-line filters open as the corresponding panels' selections, so
@@ -381,7 +392,7 @@ type dbSwitchedMsg struct {
 // non-interactive commands build, and the WithHidden variant reports how
 // many sessions they suppressed, which the Sessions border then shows.
 func (m *browseModel) loadAll() {
-	f := search.Filter{Hide: m.hide, ShowAll: m.showAll}
+	f := search.Filter{Client: m.client, Hide: m.hide, ShowAll: m.showAll}
 	var (
 		rows   []search.Item
 		hidden int
@@ -1804,6 +1815,19 @@ func renderItemDetail(db *sqlitex.Runner, it search.Item, opts RenderOptions) st
 		fmt.Fprintf(&b, "handle: #%d\n", it.Handle)
 	}
 	fmt.Fprintf(&b, "agent:  %s\n", style(it.Source, ansiDim, opts.Style))
+	// The row folds the client into the agent slot to save width, and
+	// leaves out the unremarkable terminal case entirely; here it gets its
+	// own line either way, showing the source's raw value alongside the
+	// short label so the reader can see what the label was inferred from -
+	// and so that "driven from the terminal" is distinguishable from "the
+	// source never recorded one" (change show-editor-clients).
+	if it.Client != nil && *it.Client != "" {
+		client := *it.Client
+		if label := session.ClientLabel(client); label != "" && label != client {
+			client = fmt.Sprintf("%s (%s)", label, *it.Client)
+		}
+		fmt.Fprintf(&b, "client: %s\n", style(client, ansiDim, opts.Style))
+	}
 	cwd := "(unknown)"
 	cwdColor := ""
 	if it.CWD != nil {

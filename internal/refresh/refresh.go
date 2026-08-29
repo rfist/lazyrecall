@@ -331,6 +331,9 @@ func sessionToRecord(s session.Session) map[string]any {
 	if s.ContinuesFrom != nil {
 		rec["continues_from"] = *s.ContinuesFrom
 	}
+	if s.Client != nil {
+		rec["client"] = *s.Client
+	}
 	if s.Topic != nil {
 		rec["topic"] = *s.Topic
 	}
