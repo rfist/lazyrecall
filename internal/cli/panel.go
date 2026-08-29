@@ -33,14 +33,20 @@ var (
 // outer dimensions, borders included, so a caller that has budgeted screen
 // space does not have to remember to subtract two from each.
 type panelBox struct {
-	Number  int // the digit that jumps to this panel; 0 for none
-	Title   string
-	Count   string   // right-hand annotation in the top border; "" for none
-	Lines   []string // already-rendered, already-shortened content lines
-	Width   int
-	Height  int
-	Focused bool
-	Style   bool // false = NO_COLOR / not a terminal: emit no escapes at all
+	// Number is the digit that jumps to this panel, drawn only when
+	// HasNumber is set. A separate bool, rather than Number's own zero
+	// value, is what lets Sessions' jump key be 0 without that reading as
+	// "no number" - the same ambiguity panelID.jumpKey() (browse.go) exists
+	// to avoid, carried through to where the digit is actually drawn.
+	Number    int
+	HasNumber bool
+	Title     string
+	Count     string   // right-hand annotation in the top border; "" for none
+	Lines     []string // already-rendered, already-shortened content lines
+	Width     int
+	Height    int
+	Focused   bool
+	Style     bool // false = NO_COLOR / not a terminal: emit no escapes at all
 }
 
 // innerWidth is the space a panel's content actually gets: its outer width
@@ -88,7 +94,7 @@ func (p panelBox) render() string {
 
 	// Top border: ╭─1 Title ────────── 290 ─╮
 	title := p.Title
-	if p.Number > 0 {
+	if p.HasNumber {
 		title = itoa(p.Number) + " " + title
 	}
 	// The title can carry styling of its own - the detail pane's tab strip
