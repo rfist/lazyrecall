@@ -42,7 +42,27 @@ import (
 // v6 adds sessions.client, the program a session was driven through
 // (change show-editor-clients) - read out of the same transcript field as
 // origin, and disposable for the same reason.
-var CurrentVersion = 6
+//
+// v7 adds sessions.human_prompt, whether any prompt ever recorded for the
+// session was one the source attributed to a person. It replaces a rule
+// that kept a session's origin "interactive" by checking whether the
+// *previous pass's already-stored Origin* was interactive, rather than
+// storing the actual evidence Origin gets computed from. That rule
+// conflated two different things that both read as OriginInteractive - "a
+// human typed here" and "this entrypoint isn't on the known-automated
+// allowlist" (claudeOrigin's default) - so a session that started at a
+// plain terminal (entrypoint "cli", no human marker needed because "cli"
+// isn't "sdk"-anything) and was later driven by automation would have its
+// classification depend on whether the next refresh was incremental
+// (stickiness restored "interactive") or --full (a full fold saw no human
+// marker anywhere and correctly said "automated") - an audit finding on
+// commit 9feca0a. human_prompt is index data read back out of the
+// transcripts (transcript.Result.HumanPrompt), so like origin and client
+// it needs no annotation migration - the version bump discards and
+// rebuilds the index, and the next refresh repopulates it, this time by
+// folding the flag forward across passes instead of re-deriving
+// interactivity from a stale conclusion.
+var CurrentVersion = 7
 
 // indexDDL creates the tables that are pure cache over the sources: safe to
 // drop and rebuild whenever CurrentVersion changes.
@@ -64,6 +84,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 	last_activity_at  INTEGER,
 	end_state         TEXT NOT NULL,
 	origin            TEXT,
+	human_prompt      INTEGER NOT NULL DEFAULT 0,
 	client            TEXT,
 	compaction_count  INTEGER,
 	compaction_json   TEXT,

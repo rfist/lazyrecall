@@ -167,9 +167,18 @@ type Result struct {
 	Origin session.Origin
 
 	// Client is the first client any record in this scan named, kept
-	// verbatim (see Record.Client). Callers merge it across scans like
-	// CWD/GitBranch: it rides every record for the sources that carry it
-	// at all, so a delta either sees it on every record or on none.
+	// verbatim (see Record.Client). It rides every record for the sources
+	// that carry it at all, so one scan sees it on every record or on
+	// none - but callers must NOT merge it across scans the way they do
+	// CWD/GitBranch (latest-scan-wins): a session's client can
+	// legitimately differ between an early delta and a later one when the
+	// session is resumed from a different frontend, and letting the later
+	// value win would make the stored client (and --client filtering)
+	// swing with refresh history alone (audit fix, change
+	// show-editor-clients: first client seen anywhere in the transcript
+	// wins, on every refresh path, so an incremental pass and a --full
+	// rebuild - whose one scan always starts at byte 0 and so always sees
+	// the true first client - agree).
 	Client *string
 
 	// HumanPrompt reports that at least one prompt in this scan was one

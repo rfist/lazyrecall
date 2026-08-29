@@ -1116,3 +1116,175 @@ func TestClientFilterMatchesLabelAndRawValue(t *testing.T) {
 		t.Errorf("--client=cli matched %d items, want only the terminal session", len(items))
 	}
 }
+
+// TestOriginAgreesAcrossIncrementalAndFullRebuild reproduces the audit
+// finding on commit 9feca0a (defect 1): a session that starts at a plain
+// terminal (entrypoint "cli", no origin.kind "human" anywhere - a script
+// never sends one) and is later driven by automation (entrypoint
+// "sdk-cli") must classify as automated on BOTH an incremental refresh of
+// just the new records and a --full rebuild that rescans everything, not
+// one or the other depending on which was run. Before the fix, the
+// incremental path's "stay interactive if the prior row already was"
+// stickiness rule kept this session interactive forever once claudeOrigin's
+// entrypoint-"cli" default had set it once, while --full (which folds
+// every record fresh and finds no human marker) correctly called it
+// automated - the exact disagreement-by-refresh-path the audit flagged.
+func TestOriginAgreesAcrossIncrementalAndFullRebuild(t *testing.T) {
+	home := t.TempDir()
+	dataDir := t.TempDir()
+	os.Setenv("LAZYRECALL_HOME", dataDir)
+	t.Cleanup(func() { os.Unsetenv("LAZYRECALL_HOME") })
+
+	claudeRoot := filepath.Join(home, ".claude-personal")
+	writeFile(t, filepath.Join(claudeRoot, "history.jsonl"),
+		`{"display":"start it from the terminal","timestamp":1700000000000,"project":"/work/repo","sessionId":"c1"}`+"\n")
+	transcript := filepath.Join(claudeRoot, "projects", "-work-repo", "c1.jsonl")
+	// Neither record here carries origin.kind "human" - "cli" alone is
+	// enough for claudeOrigin's allowlist-of-automated fallback to call
+	// this interactive, same as any transcript this build has never seen
+	// a reason to distrust.
+	writeFile(t, transcript,
+		`{"type":"user","message":{"role":"user","content":"start it from the terminal"},"cwd":"/work/repo","gitBranch":"main","entrypoint":"cli","timestamp":"2026-01-01T00:00:00Z"}`+"\n"+
+			`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"On it."}],"stop_reason":"end_turn"},"entrypoint":"cli","timestamp":"2026-01-01T00:00:05Z"}`+"\n")
+
+	p := profile.Profile{Name: "claude-personal", Roots: map[string]string{"claude": claudeRoot}}
+	r, err := New(p, sqlite3Path(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	origin := func(when string) string {
+		t.Helper()
+		var rows []struct {
+			Origin string `json:"origin"`
+		}
+		if err := r.DB.Query(`SELECT origin FROM sessions WHERE source = 'claude';`, &rows); err != nil {
+			t.Fatal(err)
+		}
+		if len(rows) != 1 {
+			t.Fatalf("%s: got %d claude session rows, want 1", when, len(rows))
+		}
+		return rows[0].Origin
+	}
+
+	if _, err := r.Refresh(Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := origin("cli-only pass"); got != string(session.OriginInteractive) {
+		t.Fatalf("origin after the cli-only pass = %q, want %q", got, session.OriginInteractive)
+	}
+
+	// Automation appends to the same transcript. No record anywhere in it,
+	// before or after, ever carries origin.kind "human".
+	f, err := os.OpenFile(transcript, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Automated follow-up."}],"stop_reason":"end_turn"},"entrypoint":"sdk-cli","timestamp":"2026-01-01T00:01:00Z"}` + "\n"); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	if _, err := r.Refresh(Options{}); err != nil {
+		t.Fatal(err)
+	}
+	incrementalOrigin := origin("after the incremental delta")
+	if incrementalOrigin != string(session.OriginAutomated) {
+		t.Errorf("origin after an incremental refresh of the automated delta = %q, want %q: no record in this transcript ever marks a human prompt", incrementalOrigin, session.OriginAutomated)
+	}
+
+	if _, err := r.Refresh(Options{FullRebuild: true}); err != nil {
+		t.Fatal(err)
+	}
+	fullOrigin := origin("after refresh --full")
+
+	if incrementalOrigin != fullOrigin {
+		t.Fatalf("origin diverges by refresh path: incremental = %q, refresh --full = %q - the same session must classify the same way regardless of how it was refreshed", incrementalOrigin, fullOrigin)
+	}
+}
+
+// TestClientAgreesAcrossIncrementalAndFullRebuild reproduces the audit
+// finding on commit 9feca0a (defect 2): a chat created in an editor
+// (entrypoint "sdk-ts") and later resumed in the source's own terminal
+// (entrypoint "cli") must keep showing the client it started with - on
+// both an incremental refresh of just the later delta and a --full
+// rebuild - never the client of whichever records the most recent refresh
+// happened to read. Before the fix, an incremental pass let the latest
+// delta's first client overwrite the one already stored, while --full (one
+// scan, always from byte 0) kept the true first client - so the stored
+// client, and --client filtering, oscillated with refresh history alone.
+func TestClientAgreesAcrossIncrementalAndFullRebuild(t *testing.T) {
+	home := t.TempDir()
+	dataDir := t.TempDir()
+	os.Setenv("LAZYRECALL_HOME", dataDir)
+	t.Cleanup(func() { os.Unsetenv("LAZYRECALL_HOME") })
+
+	claudeRoot := filepath.Join(home, ".claude-personal")
+	writeFile(t, filepath.Join(claudeRoot, "history.jsonl"),
+		`{"display":"started in the editor","timestamp":1700000000000,"project":"/work/repo","sessionId":"c1"}`+"\n")
+	transcript := filepath.Join(claudeRoot, "projects", "-work-repo", "c1.jsonl")
+	writeFile(t, transcript,
+		`{"type":"user","message":{"role":"user","content":"started in the editor"},"cwd":"/work/repo","gitBranch":"main","entrypoint":"sdk-ts","origin":{"kind":"human"},"timestamp":"2026-01-01T00:00:00Z"}`+"\n"+
+			`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Here you go."}],"stop_reason":"end_turn"},"entrypoint":"sdk-ts","timestamp":"2026-01-01T00:00:05Z"}`+"\n")
+
+	p := profile.Profile{Name: "claude-personal", Roots: map[string]string{"claude": claudeRoot}}
+	r, err := New(p, sqlite3Path(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	client := func(when string) *string {
+		t.Helper()
+		var rows []struct {
+			Client *string `json:"client"`
+		}
+		if err := r.DB.Query(`SELECT client FROM sessions WHERE source = 'claude';`, &rows); err != nil {
+			t.Fatal(err)
+		}
+		if len(rows) != 1 {
+			t.Fatalf("%s: got %d claude session rows, want 1", when, len(rows))
+		}
+		return rows[0].Client
+	}
+
+	if _, err := r.Refresh(Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := client("editor-only pass"); got == nil || *got != "sdk-ts" {
+		t.Fatalf("client after the editor-only pass = %v, want sdk-ts", got)
+	}
+
+	// The same conversation resumes in the source's own terminal - a
+	// different frontend, appending records with a different entrypoint.
+	f, err := os.OpenFile(transcript, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(`{"type":"user","message":{"role":"user","content":"resuming from the terminal now"},"cwd":"/work/repo","entrypoint":"cli","timestamp":"2026-01-01T00:01:00Z"}` + "\n"); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	if _, err := r.Refresh(Options{}); err != nil {
+		t.Fatal(err)
+	}
+	deref := func(p *string) string {
+		if p == nil {
+			return "<nil>"
+		}
+		return *p
+	}
+
+	incrementalClient := client("after the incremental delta")
+	if incrementalClient == nil || *incrementalClient != "sdk-ts" {
+		t.Errorf("client after an incremental refresh of the resumed-in-terminal delta = %s, want sdk-ts (the client the session started with)", deref(incrementalClient))
+	}
+
+	if _, err := r.Refresh(Options{FullRebuild: true}); err != nil {
+		t.Fatal(err)
+	}
+	fullClient := client("after refresh --full")
+	if fullClient == nil || incrementalClient == nil || *fullClient != *incrementalClient {
+		t.Fatalf("client diverges by refresh path: incremental = %s, refresh --full = %s - the same session must show the same client regardless of how it was refreshed", deref(incrementalClient), deref(fullClient))
+	}
+}

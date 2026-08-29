@@ -326,6 +326,7 @@ func sessionToRecord(s session.Session) map[string]any {
 		"lineage_id":        s.LineageID,
 		"end_state":         string(s.EndState),
 		"origin":            string(s.Origin),
+		"human_prompt":      boolToInt(s.HumanPrompt),
 		"resumable":         boolToInt(s.Resumable),
 	}
 	if s.ContinuesFrom != nil {

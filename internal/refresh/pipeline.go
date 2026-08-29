@@ -73,6 +73,7 @@ type existingSessionRow struct {
 	GitCommonRoot   *string `json:"git_common_root"`
 	EndState        string  `json:"end_state"`
 	Origin          string  `json:"origin"`
+	HumanPrompt     int64   `json:"human_prompt"`
 	Client          *string `json:"client"`
 	CompactionCount *int64  `json:"compaction_count"`
 	CompactionJSON  *string `json:"compaction_json"`
@@ -99,7 +100,7 @@ type existingSessions struct {
 
 func (r *Refresher) loadExistingSessions() (existingSessions, error) {
 	var rows []existingSessionRow
-	if err := r.DB.Query(`SELECT id, source_session_id, transcript_path, topic, name, last_prompt, cwd, git_branch, git_repo_root, git_common_root, end_state, origin, client, compaction_count, compaction_json, message_count, last_activity_at FROM sessions;`, &rows); err != nil {
+	if err := r.DB.Query(`SELECT id, source_session_id, transcript_path, topic, name, last_prompt, cwd, git_branch, git_repo_root, git_common_root, end_state, origin, human_prompt, client, compaction_count, compaction_json, message_count, last_activity_at FROM sessions;`, &rows); err != nil {
 		return existingSessions{}, err
 	}
 	out := existingSessions{
@@ -127,6 +128,7 @@ func (r *Refresher) loadExistingSessions() (existingSessions, error) {
 			GitCommonRoot:   row.GitCommonRoot,
 			EndState:        session.EndState(row.EndState),
 			Origin:          origin,
+			HumanPrompt:     row.HumanPrompt != 0,
 			Client:          row.Client,
 		}
 		if row.MessageCount != nil {
@@ -235,6 +237,29 @@ func (r *Refresher) applyTranscript(s session.Session, d adapter.Discovered, pri
 		s.LastPrompt = prior.LastPrompt
 	}
 
+	// HumanPrompt is sticky: true the moment any scan - this one or an
+	// earlier one, via prior - ever saw a prompt the source attributed to
+	// a person, and never cleared once set. It is stored and folded
+	// forward rather than recomputed from a *previously stored Origin*
+	// (the pre-fix rule this replaces): Origin also defaults to
+	// interactive for entrypoints this build has never classified as
+	// automated (claudeOrigin's allowlist-of-automated fallback, e.g.
+	// plain "cli"), so a rule keyed on "was the prior row already
+	// Interactive" could not distinguish a person's transcript from a
+	// terminal session that simply hadn't been touched by automation yet
+	// - and so kept the terminal session "interactive" forever after
+	// automation started appending to it, while a --full rebuild, folding
+	// every record fresh with no human marker anywhere, correctly called
+	// it automated (audit finding on 9feca0a: incremental and full
+	// rebuild disagreed about the same session). Persisting the actual
+	// evidence - a human-marked prompt - instead of a derived conclusion
+	// makes the two paths agree by construction: a full rebuild sees
+	// every record in one pass, so HumanPrompt comes out true whenever any
+	// prompt anywhere in the transcript was human, exactly what folding
+	// this stored flag forward across incremental passes also converges
+	// to.
+	s.HumanPrompt = res.HumanPrompt || (prior != nil && prior.HumanPrompt)
+
 	// Origin: this pass's scan either named one (the strongest signal any
 	// of its records carried - transcript.Scan already folded them, so one
 	// automated record decides), or a prior pass did, or the session stays
@@ -246,24 +271,42 @@ func (r *Refresher) applyTranscript(s session.Session, d adapter.Discovered, pri
 	} else if prior != nil {
 		s.Origin = prior.Origin
 	}
-	// Interactive, once established, is permanent. The evidence for it is
-	// the human-typed prompts themselves, and those sit behind the cursor
-	// after the pass that read them: a later delta of an editor-client
-	// chat carries only the agent's own records, all stamped with the SDK
-	// entrypoint, and would otherwise re-hide a conversation the user is
-	// still having (change show-editor-clients). Nothing legitimately
-	// turns from a person typing into a script.
-	if prior != nil && prior.Origin == session.OriginInteractive {
+	// A stored human prompt outranks whatever the entrypoint says, full
+	// stop. This is deliberately keyed on HumanPrompt above, not on
+	// whatever Origin was just derived to two paragraphs up - see
+	// HumanPrompt's own comment for why that distinction is the entire
+	// fix: a later delta of an editor-client chat carries only the
+	// agent's own records, all stamped with the SDK entrypoint, and would
+	// otherwise re-hide a conversation the user is still having (change
+	// show-editor-clients). Nothing legitimately turns from a person
+	// typing into a script, so once true this can only ever push Origin
+	// toward Interactive, never away from it.
+	if s.HumanPrompt {
 		s.Origin = session.OriginInteractive
 	}
 
-	// Client rides every record of the sources that report it at all, so a
-	// delta either sees it throughout or not at all; prior covers the "not
-	// at all" case (an incremental pass that read no new records).
-	if res.Client != nil {
-		s.Client = res.Client
-	} else if prior != nil {
+	// Client: first-known wins, never the latest. The client answers
+	// "where was this conversation held", and a conversation that
+	// migrates between frontends - an editor chat later resumed in the
+	// source's own terminal, say - is best identified by where it
+	// started, not by wherever the most recent incremental delta happens
+	// to have been driven through. The rule this replaces ("res.Client
+	// when this pass has one, else prior") claimed a delta "either sees
+	// [the client] throughout or not at all" - true of any *one* pass in
+	// isolation, but false of the session across passes whenever it
+	// resumes from a different frontend, and it let a later delta's
+	// client silently overwrite an earlier, already-known one: an
+	// incremental refresh would show wherever the session was most
+	// recently touched, while a --full rebuild - which always starts its
+	// single scan at the transcript's first byte - would show wherever it
+	// started, the same disagreement-by-refresh-path as the origin bug
+	// above (audit finding on 9feca0a). A client already known, from
+	// prior, is therefore never replaced; only a session with no client
+	// yet takes the one this pass found.
+	if prior != nil && prior.Client != nil {
 		s.Client = prior.Client
+	} else if res.Client != nil {
+		s.Client = res.Client
 	}
 
 	// The source's own recorded identifier, when this pass's delta included
@@ -342,6 +385,7 @@ func mergePrior(s *session.Session, prior *session.Session) {
 	}
 	s.EndState = prior.EndState
 	s.Origin = prior.Origin
+	s.HumanPrompt = prior.HumanPrompt
 	s.Compaction = prior.Compaction
 	s.MessageCount = prior.MessageCount
 	s.LastActivityAt = prior.LastActivityAt
