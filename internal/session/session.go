@@ -225,6 +225,26 @@ type Session struct {
 	// - when the source records enough to tell.
 	Origin Origin
 
+	// HumanPrompt reports whether any prompt ever recorded for this session
+	// was one the source attributed to a person (Claude Code's origin.kind
+	// "human" - transcript.Result.HumanPrompt, folded across every pass
+	// that has ever scanned this session). It is stored - not derived from
+	// a previously *computed* Origin - because Origin also comes out
+	// interactive by default for entrypoints this build has never
+	// classified as automated (claudeOrigin's allowlist-of-automated
+	// fallback, e.g. entrypoint "cli"), and a rule of "stay interactive if
+	// the prior row was" would then keep a plain terminal session
+	// interactive forever after automation starts appending to it, purely
+	// because of what an earlier, unrelated pass's default happened to
+	// conclude. HumanPrompt records the one fact that actually matters -
+	// a person typed here - so an incremental refresh (reading the
+	// persisted flag) and a full rebuild (which sees every record and
+	// recomputes it fresh) always agree (audit fix for the 9feca0a defect
+	// where they didn't). Sticky once true: a human-marked prompt earlier
+	// in the transcript does not stop being evidence just because it falls
+	// behind an incremental pass's cursor.
+	HumanPrompt bool
+
 	// Client is the program the session was driven through, as the source
 	// named it, when the source names it at all: Claude Code's own terminal
 	// ("cli") or something embedding it, such as an editor's ACP client
