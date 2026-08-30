@@ -248,19 +248,25 @@ func TestTabCyclesFocusAndWraps(t *testing.T) {
 	}
 }
 
-// A terminal too narrow for the side panels does not draw them, so focus
-// must never land on one - the movement keys would then be moving a cursor
-// nobody can see.
-func TestNarrowTerminalKeepsFocusOnVisiblePanels(t *testing.T) {
+// A terminal too narrow for two columns stacks every panel into one column
+// rather than dropping four of them (change stack-panels-when-narrow), so
+// every panel stays reachable by its digit and by Tab. The rule this test
+// guards is unchanged and is the one that matters - focus never lands on
+// something not drawn - but at this width that is now satisfied by drawing
+// everything instead of by refusing to move.
+func TestNarrowTerminalStacksPanelsAndKeepsThemReachable(t *testing.T) {
 	m := fixtureBrowser(t)
 	m = update(t, m, tea.WindowSizeMsg{Width: 60, Height: 20})
-	m = update(t, m, keyRunes("3"))
-	if m.focus == panelRepos {
-		t.Error("focus moved to a side panel that is not drawn at this width")
+	if m.geometry().sidebar {
+		t.Fatal("fixture at 60x20 still draws two columns; pick a narrower width for this test to mean anything")
 	}
-	for i := 0; i < 6; i++ {
+	m = update(t, m, keyRunes("3"))
+	if m.focus != panelRepos {
+		t.Errorf("3 at 60 columns focused %v, want Repos: the panel is stacked, not dropped", m.focus)
+	}
+	for i := 0; i < 8; i++ {
 		m = update(t, m, tea.KeyMsg{Type: tea.KeyTab})
-		if m.focus != panelSessions && m.focus != panelDetail {
+		if !m.panelDrawn(m.focus) {
 			t.Fatalf("tab reached %v, which is not drawn at this width", m.focus)
 		}
 	}
@@ -357,17 +363,27 @@ func TestSpatialMovesDoNotWrapAtEdges(t *testing.T) {
 	}
 }
 
-// A terminal too narrow for the side panels drops the whole left column, so
-// H from Sessions - which would otherwise land on Profiles - must find
-// nothing drawn to land on and leave focus untouched, the same rule the
-// digit jump keys already follow (TestNarrowTerminalKeepsFocusOnVisiblePanels).
-func TestSpatialMoveSkipsUndrawnLeftColumn(t *testing.T) {
+// A terminal too narrow for two columns stacks the panels into one instead
+// of dropping the side panels (change stack-panels-when-narrow), so H from
+// Sessions reaches Profiles at 60 columns exactly as it does at 100. This
+// test used to assert the opposite - that H found nothing drawn and left
+// focus alone - which was true only while a narrow terminal amputated four
+// of the six panels.
+func TestSpatialMoveReachesTheStackedPanelsWhenNarrow(t *testing.T) {
 	m := fixtureBrowser(t)
 	m = update(t, m, tea.WindowSizeMsg{Width: 60, Height: 20})
+	if m.geometry().sidebar {
+		t.Fatal("fixture at 60x20 still draws two columns; pick a narrower width for this test to mean anything")
+	}
+	for _, p := range []panelID{panelProfiles, panelAgents, panelRepos, panelTags} {
+		if !m.panelDrawn(p) {
+			t.Fatalf("%v is not drawn at 60x20; the stacked layout must keep every panel on screen", p)
+		}
+	}
 	m.focus = panelSessions
 	m = update(t, m, keyRunes("H"))
-	if m.focus != panelSessions {
-		t.Errorf("H at 60 columns landed on %v, want it to stay on Sessions: no side panel is drawn to receive it", m.focus)
+	if m.focus != panelProfiles {
+		t.Errorf("H at 60 columns landed on %v, want Profiles: the panels are stacked, not dropped", m.focus)
 	}
 }
 
@@ -411,12 +427,26 @@ func TestResizeMovesFocusOffAPanelThatDisappears(t *testing.T) {
 		t.Fatal("fixture at 100x26 does not draw Tags to begin with; pick a size where it does for this test to mean anything")
 	}
 
+	// Narrowing no longer removes Tags - it stacks the panels into one
+	// column - so focus legitimately stays put. What must still hold is the
+	// invariant the resize handler exists for: focus is never left on
+	// something that is not on screen.
 	m = update(t, m, tea.WindowSizeMsg{Width: 60, Height: 20})
 	if m.geometry().sidebar {
-		t.Fatal("fixture at 60x20 still draws the sidebar; pick a narrower width for this test to mean anything")
+		t.Fatal("fixture at 60x20 still draws two columns; pick a narrower width for this test to mean anything")
 	}
-	if m.focus == panelTags {
-		t.Error("focus stayed on Tags after a resize dropped the whole sidebar it lives in")
+	if !m.panelDrawn(m.focus) {
+		t.Errorf("resize left focus on %v, which is not currently drawn", m.focus)
+	}
+	if m.focus != panelTags {
+		t.Errorf("resize moved focus to %v; Tags is still drawn when narrow, so focus had no reason to move", m.focus)
+	}
+
+	// The invariant still has teeth at a size that genuinely cannot afford
+	// every panel a line: there focus must leave and land on Sessions.
+	m = update(t, m, tea.WindowSizeMsg{Width: 40, Height: 9})
+	if m.panelDrawn(panelTags) {
+		t.Skip("40x9 still affords Tags a line; no size in this build exercises the fallback")
 	}
 	if !m.panelDrawn(m.focus) {
 		t.Errorf("resize left focus on %v, which is not currently drawn", m.focus)
