@@ -1,11 +1,6 @@
 # lazyrecall
 
-lazyrecall is a retrospective index over the sessions coding agents already
-wrote to disk. It reads the transcripts and history files that are already
-there, makes them searchable, lets you annotate them with tags and comments,
-and can drop you back into any of them with the original agent. It is not a
-live monitor and does not run agents on its own; resuming a session is the one
-deliberate, user-initiated exception, and it happens in your terminal.
+lazyrecall is a retrospective index over the sessions coding agents already wrote to disk. It reads the transcripts and history files that are already there, makes them searchable, lets you annotate them with tags and comments, and can drop you back into any of them with the original agent. It is not a live monitor and does not run agents on its own; resuming a session is the one deliberate, user-initiated exception, and it happens in your terminal.
 
 ## Screenshot
 
@@ -13,8 +8,7 @@ deliberate, user-initiated exception, and it happens in your terminal.
 
 ## Install
 
-lazyrecall needs no runtime dependencies: it is a single statically linked
-binary (`CGO_ENABLED=0`, pure-Go SQLite).
+lazyrecall needs no runtime dependencies: it is a single statically linked binary (`CGO_ENABLED=0`, pure-Go SQLite).
 
 Via the install script (macOS and Linux):
 
@@ -32,9 +26,7 @@ CGO_ENABLED=0 go build -o lazyrecall ./cmd/lazyrecall
 
 ## Usage
 
-`lazyrecall` with no arguments opens the interactive browser; the same
-interface is available as `lazyrecall browse`, which falls back to a plain
-listing when stdout is not a terminal.
+`lazyrecall` with no arguments opens the interactive browser; the same interface is available as `lazyrecall browse`, which falls back to a plain listing when stdout is not a terminal.
 
 ```
 lazyrecall                  open the interactive browser
@@ -53,15 +45,14 @@ lazyrecall config    path|init|show
 lazyrecall version, --version, -v
 ```
 
-A session held somewhere other than the agent's own terminal - a Neovim
-CodeCompanion chat, say, which reaches Claude Code over ACP - is listed as
-`[claude·acp]` and selected by `--client=acp`.
+A session held somewhere other than the agent's own terminal - a Neovim CodeCompanion chat, say, which reaches Claude Code over ACP - is listed as `[claude·acp]` and selected by `--client=acp`.
 
 ## Key bindings
 
 | Key | Action |
 | --- | --- |
-| `1`-`5` | Jump to panel |
+| `1`-`4`, `0` | Jump to panel (`0` is Sessions) |
+| `H` / `J` / `K` / `L` | Move focus to the panel in that screen direction |
 | `tab` / `shift-tab` | Focus the next / previous panel |
 | `j`/`k`, `↑`/`↓` | Move within the focused panel |
 | `Ctrl-D` / `Ctrl-U` | Move by half a panel |
@@ -69,7 +60,7 @@ CodeCompanion chat, say, which reaches Claude Code over ACP - is listed as
 | `enter` | Resume the selected session (Sessions); filter by the selected value (Agents, Repos, Tags); switch to the selected profile (Profiles) |
 | `esc` | Clear what this panel is filtering by |
 | `[` / `]` | Previous / next tab in the detail pane |
-| `/` | Narrow the focused panel's rows as you type |
+| `/` | Keep only the focused panel's rows containing what you type |
 | `s` | Full-text search over your own prompts |
 | `x` | Action menu for the focused panel |
 | `X` | Clear all filters |
@@ -88,18 +79,11 @@ CodeCompanion chat, say, which reaches Claude Code over ACP - is listed as
 | `omp` | SQLite index at `~/.omp/agent/history.db`, transcripts under `~/.omp/agent/sessions/` | niche |
 | `hermes` | SQLite at `~/.hermes/state.db` | niche |
 
-Plainly: if you use Claude Code, `claude` is the one you will actually have;
-`pi`, `omp`, and `hermes` are niche tools most people will not have installed
-at all. Each source is a set of roots to scan plus an adapter; new sources are
-added via the `[sources]` config table (see [Configuration](#configuration))
-and an adapter in the code.
+Plainly: if you use Claude Code, `claude` is the one you will actually have; `pi`, `omp`, and `hermes` are niche tools most people will not have installed at all. Each source is a set of roots to scan plus an adapter; new sources are added via the `[sources]` config table (see [Configuration](#configuration)) and an adapter in the code.
 
 ## Configuration
 
-Configuration is optional and lives at `~/.config/lazyrecall/config.toml`
-(`$LAZYRECALL_CONFIG` overrides the location; otherwise
-`$XDG_CONFIG_HOME/lazyrecall/config.toml` is used). With no file, lazyrecall
-runs on the defaults below.
+Configuration is optional and lives at `~/.config/lazyrecall/config.toml` (`$LAZYRECALL_CONFIG` overrides the location; otherwise `$XDG_CONFIG_HOME/lazyrecall/config.toml` is used). With no file, lazyrecall runs on the defaults below.
 
 | Key | Default |
 | --- | --- |
@@ -113,24 +97,15 @@ runs on the defaults below.
 | `hide.paths` | `[]` |
 | `browse.show_archived` | `false` |
 
-`resume` is an argv template in which `{id}` is replaced with the session id;
-`env_var` names the environment variable set to the profile's root when
-resuming; `single_install` marks a source that has exactly one installation
-per machine and so cannot be split work/personal.
+`resume` is an argv template in which `{id}` is replaced with the session id; `env_var` names the environment variable set to the profile's root when resuming; `single_install` marks a source that has exactly one installation per machine and so cannot be split work/personal.
 
-`lazyrecall config init` writes a commented-out copy of these defaults, and
-`lazyrecall config show` prints the effective config with each value's
-provenance (default, file, env, or flag).
+`lazyrecall config init` writes a commented-out copy of these defaults, and `lazyrecall config show` prints the effective config with each value's provenance (default, file, env, or flag).
 
-Environment variables: `LAZYRECALL_CONFIG` (config file path),
-`LAZYRECALL_HOME` (data directory, default `~/.lazyrecall`), and
-`LAZYRECALL_PROFILE` (default profile).
+Environment variables: `LAZYRECALL_CONFIG` (config file path), `LAZYRECALL_HOME` (data directory, default `~/.lazyrecall`), and `LAZYRECALL_PROFILE` (default profile).
 
 ## Profiles
 
-Profiles isolate configuration roots from each other: each discovered root
-(for example a work and a personal Claude install) becomes its own profile
-with its own database. Work and personal data never mix in one listing.
+Profiles isolate configuration roots from each other: each discovered root (for example a work and a personal Claude install) becomes its own profile with its own database. Work and personal data never mix in one listing.
 
 ## License
 
