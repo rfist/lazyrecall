@@ -871,10 +871,28 @@ func (m *browseModel) handleBrowseKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // every left panel is at least a one-line header whenever the sidebar is
 // drawn - so "drawn" for a left panel is exactly "the sidebar is drawn".
 func (m *browseModel) panelDrawn(p panelID) bool {
-	if p == panelSessions || p == panelDetail {
+	if p == panelSessions {
 		return true
 	}
-	return m.geometry().sidebar
+	// Every panel is now laid out at every width - stacked into one column
+	// when there is no room for two (change stack-panels-when-narrow) - so
+	// "is it drawn" is no longer a question about the sidebar but simply
+	// about whether this frame could afford it a line. Only a frame under
+	// about ten rows ever cannot.
+	g := m.geometry()
+	switch p {
+	case panelProfiles:
+		return g.profilesH > 0
+	case panelAgents:
+		return g.agentsH > 0
+	case panelRepos:
+		return g.reposH > 0
+	case panelTags:
+		return g.tagsH > 0
+	case panelDetail:
+		return g.detailH > 0
+	}
+	return false
 }
 
 // setFocus moves focus to p directly, refusing a panel panelDrawn reports as
@@ -1583,20 +1601,107 @@ func (m browseModel) geometry() geometry {
 		}
 	}
 
-	// Right column: the session list gets the larger share, the detail
-	// pane the rest - the same 3:2 split the stacked layout used.
-	g.sessionsH = g.bodyHeight * 3 / 5
-	if g.sessionsH < 4 {
-		g.sessionsH = 4
-	}
-	g.detailH = g.bodyHeight - g.sessionsH
-	if g.detailH < 4 {
-		g.detailH = 4
-		g.sessionsH = g.bodyHeight - g.detailH
+	if g.sidebar {
+		// Right column: the session list gets the larger share, the detail
+		// pane the rest - the same 3:2 split the stacked layout used.
+		g.sessionsH = g.bodyHeight * 3 / 5
+		if g.sessionsH < 4 {
+			g.sessionsH = 4
+		}
+		g.detailH = g.bodyHeight - g.sessionsH
+		if g.detailH < 4 {
+			g.detailH = 4
+			g.sessionsH = g.bodyHeight - g.detailH
+		}
+	} else {
+		g.narrowHeights(m.focus)
 	}
 	g.sessionsInner = maxInt(g.sessionsH-2, 0)
 	g.detailInner = maxInt(g.detailH-2, 0)
 	return g
+}
+
+// narrowHeights lays the whole frame out as one column, for a terminal too
+// narrow to put the side panels beside the session list (change
+// stack-panels-when-narrow).
+//
+// The alternative it replaces was to draw no side panels at all below
+// minSidebarWidth, which did not narrow the interface so much as amputate
+// it: four of the six panels were unreachable, and the only thing the
+// program would say about it was "that panel isn't shown at this terminal
+// size". Width is the scarce resource in that situation, and a stack needs
+// exactly as much width as its widest member - so stacking costs nothing
+// that was actually short, and buys back every dimension the user had lost.
+// This is what lazygit does at the same threshold, for the same reason.
+//
+// Rows are handed out in order of what the user would miss first, not in
+// draw order:
+//
+//  1. Sessions is never collapsed. It is the list the whole program exists
+//     to show, so its floor is reserved before anything else is offered a
+//     line and it collects everything left over at the end.
+//  2. The focused panel gets a window worth reading - a quarter of the
+//     frame, never smaller than a drawable box - because it is the one the
+//     user is working in.
+//  3. Everything else gets a header line: collapsed, but present, still
+//     showing what it is filtering by, and still reachable by its digit.
+//
+// A panel only reaches zero when the terminal genuinely cannot pay for one
+// more line, which needs a frame under about ten rows; panelDrawn reports
+// that honestly rather than the layout pretending otherwise.
+func (g *geometry) narrowHeights(focus panelID) {
+	const (
+		collapsedH     = 1
+		sessionsHFloor = 3
+	)
+	// Draw order is Profiles, Agents, Repos, Tags, Sessions, Detail - the
+	// digit order with Sessions' 0 last, which is also where lazygit puts
+	// its own [0] panel. Detail collapses like the rest: it is content for
+	// the selected row, so it earns its rows only when it is what the user
+	// is reading.
+	collapsibles := []panelID{panelProfiles, panelAgents, panelRepos, panelTags, panelDetail}
+
+	remaining := g.bodyHeight
+	reserved := minInt(sessionsHFloor, remaining)
+	remaining -= reserved
+
+	heights := make(map[panelID]int, len(collapsibles))
+	if focus != panelSessions {
+		for _, p := range collapsibles {
+			if p != focus {
+				continue
+			}
+			want := g.bodyHeight / 4
+			if want < 3 {
+				want = 3
+			}
+			// Every other collapsible still needs its header line; the
+			// focused panel may only take what is left after those.
+			if cap := remaining - (len(collapsibles) - 1); want > cap {
+				want = cap
+			}
+			if want < 0 {
+				want = 0
+			}
+			heights[p] = want
+			remaining -= want
+		}
+	}
+	for _, p := range collapsibles {
+		if _, done := heights[p]; done {
+			continue
+		}
+		n := minInt(collapsedH, remaining)
+		heights[p] = n
+		remaining -= n
+	}
+
+	g.profilesH = heights[panelProfiles]
+	g.agentsH = heights[panelAgents]
+	g.reposH = heights[panelRepos]
+	g.tagsH = heights[panelTags]
+	g.detailH = heights[panelDetail]
+	g.sessionsH = reserved + remaining
 }
 
 func maxInt(a, b int) int {
@@ -1646,8 +1751,7 @@ func (m browseModel) View() string {
 	}
 	g := m.geometry()
 
-	right := stackPanels(m.sessionsPanel(g), m.detailPanel(g))
-	body := right
+	var body string
 	if g.sidebar {
 		left := stackPanels(
 			m.facetPanel(panelProfiles, &m.profiles_, g.leftWidth, g.profilesH, ""),
@@ -1655,7 +1759,22 @@ func (m browseModel) View() string {
 			m.facetPanel(panelRepos, &m.repos, g.leftWidth, g.reposH, m.repos.Sel),
 			m.facetPanel(panelTags, &m.tags, g.leftWidth, g.tagsH, m.tags.Sel),
 		)
-		body = joinColumns(left, right)
+		body = joinColumns(left, stackPanels(m.sessionsPanel(g), m.detailPanel(g)))
+	} else {
+		// Too narrow for two columns: the same panels, stacked into one,
+		// at full width (change stack-panels-when-narrow). Nothing is
+		// dropped - narrowHeights collapses the ones the user is not in.
+		// Sessions sits after the facets and before Detail, which is the
+		// digit order (1 2 3 4 then 0) and puts the list next to the
+		// detail that describes its selected row.
+		body = stackPanels(
+			m.facetPanel(panelProfiles, &m.profiles_, g.rightWidth, g.profilesH, ""),
+			m.facetPanel(panelAgents, &m.agents, g.rightWidth, g.agentsH, m.agents.Sel),
+			m.facetPanel(panelRepos, &m.repos, g.rightWidth, g.reposH, m.repos.Sel),
+			m.facetPanel(panelTags, &m.tags, g.rightWidth, g.tagsH, m.tags.Sel),
+			m.sessionsPanel(g),
+			m.detailPanel(g),
+		)
 	}
 
 	// The action menu is a popup over the frame, not a pane that displaces
@@ -1922,6 +2041,17 @@ func (m browseModel) detailPanel(g geometry) panelBox {
 		Height:  g.detailH,
 		Focused: m.focus == panelDetail,
 		Style:   m.style,
+	}
+	// One row is the collapsed height the stacked narrow layout hands out
+	// (narrowHeights), and a box cannot be drawn in it: a full box is a top
+	// border plus a bottom border before any content, so rendering one in a
+	// single row silently produces two lines and the frame overflows the
+	// terminal by exactly that much. Detail collapses to the same header
+	// line the facet panels use, keeping its tab strip visible so the user
+	// can still see which tab they would land on.
+	if box.Height == 1 {
+		box.Collapsed = true
+		return box
 	}
 	opts := RenderOptions{Width: box.innerWidth(), Style: m.style}
 	content := m.detailContent(opts)
