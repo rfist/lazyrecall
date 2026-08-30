@@ -339,6 +339,13 @@ func TestBareInvocationBrowsesInsteadOfPrintingUsage(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", home)
+	// $XDG_CONFIG_HOME outranks $HOME/.config in config.Path, and CI
+	// runners set it (GitHub's ubuntu images do; its macOS images and a
+	// typical laptop do not). Redirecting HOME alone therefore isolates
+	// this test on some machines and silently reads the real user's
+	// config on others - which is how this passed locally and on macOS
+	// and failed on the first Linux CI run.
+	t.Setenv("XDG_CONFIG_HOME", "")
 	t.Setenv("LAZYRECALL_HOME", filepath.Join(home, "data"))
 	t.Setenv("LAZYRECALL_CLAUDE_CONFIG_DIRS", claudeRoot)
 	t.Setenv("LAZYRECALL_PI_HOME", filepath.Join(home, "nope-pi"))
@@ -407,6 +414,13 @@ func TestConfigShowMarksFileAndDefaultOrigins(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", home)
+	// $XDG_CONFIG_HOME outranks $HOME/.config in config.Path, and CI
+	// runners set it (GitHub's ubuntu images do; its macOS images and a
+	// typical laptop do not). Redirecting HOME alone therefore isolates
+	// this test on some machines and silently reads the real user's
+	// config on others - which is how this passed locally and on macOS
+	// and failed on the first Linux CI run.
+	t.Setenv("XDG_CONFIG_HOME", "")
 	t.Setenv("LAZYRECALL_CONFIG", "")
 	t.Setenv("LAZYRECALL_PROFILE", "")
 
@@ -446,6 +460,13 @@ func TestArchiveCommandAcceptsShortHandle(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", home)
+	// $XDG_CONFIG_HOME outranks $HOME/.config in config.Path, and CI
+	// runners set it (GitHub's ubuntu images do; its macOS images and a
+	// typical laptop do not). Redirecting HOME alone therefore isolates
+	// this test on some machines and silently reads the real user's
+	// config on others - which is how this passed locally and on macOS
+	// and failed on the first Linux CI run.
+	t.Setenv("XDG_CONFIG_HOME", "")
 	t.Setenv("LAZYRECALL_HOME", filepath.Join(home, "data"))
 	t.Setenv("LAZYRECALL_CLAUDE_CONFIG_DIRS", claudeRoot)
 	t.Setenv("LAZYRECALL_PI_HOME", filepath.Join(home, "nope-pi"))
@@ -523,6 +544,13 @@ func TestListReportsHiddenAndAllFlagShowsEverything(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", home)
+	// $XDG_CONFIG_HOME outranks $HOME/.config in config.Path, and CI
+	// runners set it (GitHub's ubuntu images do; its macOS images and a
+	// typical laptop do not). Redirecting HOME alone therefore isolates
+	// this test on some machines and silently reads the real user's
+	// config on others - which is how this passed locally and on macOS
+	// and failed on the first Linux CI run.
+	t.Setenv("XDG_CONFIG_HOME", "")
 	t.Setenv("LAZYRECALL_HOME", filepath.Join(home, "data"))
 	t.Setenv("LAZYRECALL_CLAUDE_CONFIG_DIRS", claudeRoot)
 	t.Setenv("LAZYRECALL_PI_HOME", filepath.Join(home, "nope-pi"))
