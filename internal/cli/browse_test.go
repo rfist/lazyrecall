@@ -171,7 +171,11 @@ func rowCount(t *testing.T, f facet, value string) int {
 // pushing the top of the interface off the screen. A string comparison
 // cannot see it; measuring the frame against the size it was drawn for can.
 func TestViewFitsTerminal(t *testing.T) {
-	sizes := [][2]int{{100, 40}, {100, 26}, {120, 30}, {80, 24}, {76, 20}, {70, 20}, {60, 14}, {40, 10}}
+	sizes := [][2]int{
+		{100, 40}, {100, 26}, {120, 30}, {80, 24}, {76, 20}, {70, 20}, {60, 14}, {40, 10},
+		{100, 4}, {100, 5}, {100, 6}, {100, 7}, {100, 8}, {100, 9}, {100, 10}, {100, 11}, {100, 12},
+		{60, 4}, {60, 5}, {60, 6}, {60, 7}, {60, 8}, {60, 9}, {60, 10}, {60, 11}, {60, 12},
+	}
 	for _, styled := range []bool{false, true} {
 		for _, size := range sizes {
 			w, h := size[0], size[1]
@@ -197,16 +201,21 @@ func TestViewFitsTerminal(t *testing.T) {
 // TestViewFitsWithPromptOpen covers the same invariant with a prompt line
 // on screen, which costs the body one row - the case the old layout got
 // wrong by budgeting for the prompt in one height function and not the
-// other.
+// other. The narrow and wide cases together matter: the former stacks six
+// panels while the latter joins two independently allocated columns.
 func TestViewFitsWithPromptOpen(t *testing.T) {
-	m := fixtureBrowser(t)
-	m = update(t, m, tea.WindowSizeMsg{Width: 100, Height: 26})
-	m = update(t, m, keyRunes("/"))
-	if m.mode != modeFilter {
-		t.Fatalf("expected the filter prompt to be open, got mode %v", m.mode)
-	}
-	if lines := strings.Split(m.View(), "\n"); len(lines) > 26 {
-		t.Errorf("frame with a prompt open is %d lines, taller than the terminal", len(lines))
+	for _, width := range []int{60, 100} {
+		for height := 4; height <= 12; height++ {
+			m := fixtureBrowser(t)
+			m = update(t, m, tea.WindowSizeMsg{Width: width, Height: height})
+			m = update(t, m, keyRunes("/"))
+			if m.mode != modeFilter {
+				t.Fatalf("%dx%d: expected the filter prompt to be open, got mode %v", width, height, m.mode)
+			}
+			if lines := strings.Split(m.View(), "\n"); len(lines) > height {
+				t.Errorf("%dx%d: frame with a prompt open is %d lines, taller than the terminal", width, height, len(lines))
+			}
+		}
 	}
 }
 
@@ -269,6 +278,55 @@ func TestNarrowTerminalStacksPanelsAndKeepsThemReachable(t *testing.T) {
 		if !m.panelDrawn(m.focus) {
 			t.Fatalf("tab reached %v, which is not drawn at this width", m.focus)
 		}
+	}
+}
+
+// The narrow stack pays Sessions' three-row floor before it hands out the
+// other headers, so 60x8 leaves only four rows for five collapsibles. The
+// panel receiving focus must keep its one-row minimum anyway: the missing
+// row belongs to the tail of draw order, Detail, not to the panel the user
+// just selected. Opening "/" costs another body row without changing focus,
+// so the same rule must hold while input is open as well.
+func TestFocusedNarrowPanelKeepsAHeaderAtMinimumBodyHeight(t *testing.T) {
+	for _, openPrompt := range []bool{false, true} {
+		m := fixtureBrowser(t)
+		m = update(t, m, tea.WindowSizeMsg{Width: 60, Height: 8})
+		m = update(t, m, keyRunes("1"))
+		if openPrompt {
+			m = update(t, m, keyRunes("/"))
+		}
+		if m.focus != panelProfiles {
+			t.Fatalf("prompt=%v: 1 focused %v, want Profiles", openPrompt, m.focus)
+		}
+		if h := m.geometry().profilesH; h < 1 {
+			t.Errorf("prompt=%v: focused Profiles has height %d at 60x8", openPrompt, h)
+		}
+	}
+}
+
+// When there are fewer rows than stacked panels, a candidate that is absent
+// from the current focus's layout can still receive its header after focus
+// moves to it. J from Sessions to Detail at 60x8 is that shape: Profiles'
+// focus gave Detail the tail row up, then Sessions did; Detail must be
+// judged against Detail's destination layout, not the Sessions layout that
+// is about to cease to exist.
+func TestSpatialFocusChecksTheDestinationLayout(t *testing.T) {
+	m := fixtureBrowser(t)
+	m = update(t, m, tea.WindowSizeMsg{Width: 60, Height: 8})
+	m = update(t, m, keyRunes("1"))
+	m = update(t, m, keyRunes("L"))
+	if m.focus != panelSessions {
+		t.Fatalf("L from Profiles focused %v, want Sessions", m.focus)
+	}
+	if h := m.geometry().detailH; h != 0 {
+		t.Fatalf("fixture leaves Detail at height %d before J; destination-layout check is not exercised", h)
+	}
+	m = update(t, m, keyRunes("J"))
+	if m.focus != panelDetail {
+		t.Errorf("J from Sessions focused %v, want Detail when its destination layout draws it", m.focus)
+	}
+	if h := m.geometry().detailH; h < 1 {
+		t.Errorf("focused Detail has height %d after the move", h)
 	}
 }
 
@@ -2048,6 +2106,34 @@ func TestTextFilterDoesNotMatchTextPastTheTerminalTruncation(t *testing.T) {
 
 	if len(m.visible) != 0 {
 		t.Errorf("filter kept a row on the strength of text past where its %d-wide row is truncated - matching invisible text again", width)
+	}
+}
+
+// An archived row draws its marker inside the Sessions panel's width budget,
+// leaving eleven fewer columns for row text than an ordinary row. The filter
+// must use that per-row budget too: a word fitted away to make room for the
+// marker cannot explain why the archived row survived a query.
+func TestTextFilterDoesNotMatchPastAnArchivedRowsMarkerBudget(t *testing.T) {
+	it := search.Item{
+		SessionID: "claude:p:1",
+		Source:    "claude",
+		Handle:    1,
+		CWD:       strp("/x"),
+		Topic:     strp(strings.Repeat("x", 15) + "marker-only"),
+		EndState:  "completed",
+		Archived:  true,
+	}
+	m := &browseModel{width: 60, showAll: true, textFilter: "marker-only"}
+	baseWidth := m.sessionRowWidth()
+	drawnWidth := maxInt(baseWidth-visibleWidth(" "+archivedMarker), 1)
+	if !strings.Contains(matchText(it, baseWidth), m.textFilter) {
+		t.Fatalf("fixture's target word does not fit the ordinary %d-column row", baseWidth)
+	}
+	if strings.Contains(matchText(it, drawnWidth), m.textFilter) {
+		t.Fatalf("fixture's target word still fits the archived %d-column row", drawnWidth)
+	}
+	if got := m.applyTextFilter([]search.Item{it}); len(got) != 0 {
+		t.Errorf("archived row survived on text outside its %d-column display budget", drawnWidth)
 	}
 }
 
