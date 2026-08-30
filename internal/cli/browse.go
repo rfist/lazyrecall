@@ -538,27 +538,12 @@ func matchText(it search.Item, width int) string {
 	return strings.Join(slots, " ")
 }
 
-// sessionRowWidth is the content width a session row is rendered at: the
-// same arithmetic sessionsPanel performs - box.innerWidth() less
-// rowDecorationWidth - before handing a width to RenderRow, computed once
-// here so the text filter and the row actually drawn on screen use the
-// identical number by construction. Two independent copies of this
-// arithmetic is exactly how the original defect stayed hidden: matchText
-// never called fitRowToWidth at all, so there was nothing to keep in sync
-// with sessionsPanel's number in the first place.
-//
-// The archived-row marker (" [archived]", drawn only when showAll is on)
-// is deliberately left out of this arithmetic, even though sessionsPanel
-// subtracts its width per row before calling RenderRow. The marker is
-// appended *after* RenderRow returns; it is never part of rowSlots or
-// matchText's domain, so it has no bearing on what a row's own fields can
-// be filtered by. The cost is that an archived row's matchable text can
-// run a few columns further right than that one row's line literally
-// does - accepted because the defect this fixes concerned thousands of
-// characters, not single digits, and computing a per-item width here
-// would mean applyTextFilter re-deriving "is this row archived, is showAll
-// on" for every row, the kind of duplicated logic that let the original
-// bug in.
+// sessionRowWidth is the unmarked content width a session row is rendered
+// at: box.innerWidth() less rowDecorationWidth. It is computed once per
+// caller, then sessionRowWidthFor deducts a marker only for the archived
+// rows that draw one. Keeping the shared base here avoids recomputing
+// geometry for every corpus item without pretending that every row has the
+// same last eleven columns.
 func (m browseModel) sessionRowWidth() int {
 	if m.width <= 0 {
 		// No terminal size is known yet - every applyTextFilter test in
@@ -589,6 +574,24 @@ func (m browseModel) sessionRowWidth() int {
 	return width
 }
 
+// sessionRowWidthFor returns the content width RenderRow receives for it.
+// The archive marker is appended after RenderRow, but it is still inside the
+// row budget, so an archived row has to surrender its visible width before
+// both rendering and matching. `showAll && it.Archived` is deliberately the
+// same condition sessionsPanel uses to draw the marker; separate predicates
+// would silently recreate the mismatch this helper closes.
+func (m browseModel) sessionRowWidthFor(it search.Item, width int) int {
+	if m.showAll && it.Archived {
+		width -= visibleWidth(" " + archivedMarker)
+	}
+	if width < 1 {
+		// RenderRow's non-positive width is its "not supplied" sentinel,
+		// not an instruction to make a too-narrow terminal wide again.
+		return 1
+	}
+	return width
+}
+
 // applyTextFilter keeps the rows whose text contains m.textFilter, matched
 // literally and without regard to case, in the order they were already in
 // (most recently active first).
@@ -607,20 +610,19 @@ func (m browseModel) sessionRowWidth() int {
 // code did ask its matcher for a rank and then never sorted by it, so the
 // listing was in recency order anyway, minus the ranking work.)
 //
-// The match width is computed once, outside the loop, rather than once per
-// row: sessionRowWidth does not vary row to row (see its comment for the
-// one deliberate exception, the archived marker), and this is called for
-// every panel's corpus on every rebuild, so recomputing geometry() len(rows)
-// times over would be pure waste.
+// The base match width is computed once, outside the loop. Archived rows
+// then deduct their own marker with sessionRowWidthFor, a constant-time
+// branch that preserves the renderer's per-item budget without rebuilding
+// geometry len(rows) times.
 func (m browseModel) applyTextFilter(rows []search.Item) []search.Item {
 	if m.textFilter == "" {
 		return rows
 	}
-	width := m.sessionRowWidth()
+	baseWidth := m.sessionRowWidth()
 	needle := strings.ToLower(m.textFilter)
 	out := make([]search.Item, 0, len(rows))
 	for _, it := range rows {
-		if strings.Contains(strings.ToLower(matchText(it, width)), needle) {
+		if strings.Contains(strings.ToLower(matchText(it, m.sessionRowWidthFor(it, baseWidth))), needle) {
 			out = append(out, it)
 		}
 	}
@@ -858,28 +860,36 @@ func (m *browseModel) handleBrowseKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// panelDrawn reports whether p currently occupies space in the frame. It is
-// the one place that question is answered - setFocus (the digit keys) and
-// moveFocusSpatial (H/J/K/L) below both defer to it, so focus can never land
-// somewhere invisible from one path and be refused it from the other.
-//
-// The left column collapses as a whole below minSidebarWidth
-// (geometry().sidebar); nothing inside it can disappear on its own any
-// more. That used to be false: a short terminal dropped Tags alone
-// (geometry's "rest < 8" case set tagsH to 0), which is why panelDrawn
-// once had a per-panel test here. The accordion layout abolished the case -
-// every left panel is at least a one-line header whenever the sidebar is
-// drawn - so "drawn" for a left panel is exactly "the sidebar is drawn".
+// panelDrawn reports whether p occupies space in the layout for the focus
+// that is already active. Resize recovery asks exactly that question: after
+// a new terminal size arrives, it needs to know whether the cursor it has
+// kept is still represented on screen.
 func (m *browseModel) panelDrawn(p panelID) bool {
-	if p == panelSessions {
-		return true
+	return m.panelDrawnWithFocus(p, m.focus)
+}
+
+// panelDrawnWhenFocused asks the different question focus movement needs:
+// whether p will occupy space after it becomes focused. The two layouts can
+// differ at a short stacked height, because the focused panel is the one
+// narrowHeights protects and an unfocused tail panel may yield its header to
+// it. Looking at the current geometry there would answer "is p visible
+// before this move?" and then leave focus on a panel that only became
+// invisible because the move succeeded.
+func (m *browseModel) panelDrawnWhenFocused(p panelID) bool {
+	return m.panelDrawnWithFocus(p, p)
+}
+
+func (m *browseModel) panelDrawnWithFocus(p, focus panelID) bool {
+	if p < 0 || p >= numPanels || focus < 0 || focus >= numPanels {
+		return false
 	}
-	// Every panel is now laid out at every width - stacked into one column
-	// when there is no room for two (change stack-panels-when-narrow) - so
-	// "is it drawn" is no longer a question about the sidebar but simply
-	// about whether this frame could afford it a line. Only a frame under
-	// about ten rows ever cannot.
-	g := m.geometry()
+	// geometry derives the accordion from focus. A value copy changes only
+	// that input and keeps this predicate observational: probing a candidate
+	// must not briefly mutate the cursor or any panel state on the live
+	// model, even though Bubble Tea currently serialises Update calls.
+	candidate := *m
+	candidate.focus = focus
+	g := candidate.geometry()
 	switch p {
 	case panelProfiles:
 		return g.profilesH > 0
@@ -889,20 +899,19 @@ func (m *browseModel) panelDrawn(p panelID) bool {
 		return g.reposH > 0
 	case panelTags:
 		return g.tagsH > 0
+	case panelSessions:
+		return g.sessionsH > 0
 	case panelDetail:
 		return g.detailH > 0
 	}
 	return false
 }
 
-// setFocus moves focus to p directly, refusing a panel panelDrawn reports as
-// not currently on screen - the movement keys must never point a cursor at
-// something invisible.
+// setFocus moves focus to p directly, refusing a panel absent from p's own
+// destination layout - the movement keys must never point a cursor at
+// something invisible after the move completes.
 func (m *browseModel) setFocus(p panelID) {
-	if p < 0 || p >= numPanels {
-		return
-	}
-	if !m.panelDrawn(p) {
+	if !m.panelDrawnWhenFocused(p) {
 		m.notice = "that panel isn't shown at this terminal size."
 		return
 	}
@@ -910,25 +919,15 @@ func (m *browseModel) setFocus(p panelID) {
 	m.notice = ""
 }
 
-// moveFocus cycles focus by delta over the panels currently drawn.
-//
-// panelDrawn, not the sidebar bool alone, decides "drawn": sidebar being
-// true only means the left column exists, not that every panel inside it
-// does. The distinction was made real by geometry's "rest < 8" branch,
-// which dropped Tags (tagsH == 0) from an otherwise-present sidebar on a
-// short terminal - the old condition here, `sidebar || m.focus ==
-// panelSessions || m.focus == panelDetail`, treated the whole column as
-// landable the moment it existed, so Tab could stop the cycle on a
-// zero-height Tags panel. The accordion layout draws every left panel at
-// least as a header, so only the whole-column width collapse can remove one
-// now - but the indirection stays, because panelDrawn is the same predicate
-// setFocus and moveFocusSpatial already defer to, and all three ways of
-// moving focus agree about what is on screen by construction rather than by
-// three call sites agreeing to.
+// moveFocus cycles focus by delta over panels their own destination layouts
+// draw. Tab therefore shares setFocus's rule instead of briefly selecting a
+// panel whose current geometry happens to contain a header that its focused
+// geometry cannot keep.
 func (m *browseModel) moveFocus(delta int) {
-	for i := 0; i < int(numPanels); i++ {
-		m.focus = panelID((int(m.focus) + delta + int(numPanels)) % int(numPanels))
-		if m.panelDrawn(m.focus) {
+	for range int(numPanels) {
+		next := panelID((int(m.focus) + delta + int(numPanels)) % int(numPanels))
+		if m.panelDrawnWhenFocused(next) {
+			m.focus = next
 			break
 		}
 	}
@@ -962,13 +961,10 @@ const (
 //
 // Each branch below is an ordered chain of candidates - normally one panel,
 // but J/K's chains run all the way to the far end of the left column - and
-// focus goes to the first candidate panelDrawn still finds on screen. That
-// is what lets a move continue past a panel the frame has dropped to the
-// next one still drawn, rather than landing on it or refusing to move at
-// all; an empty or exhausted chain is exactly the no-op an edge is supposed
-// to be. Dropping is now only the width collapse of the whole column, but
-// the chains were built to survive the old per-panel drops (Tags, in a
-// short terminal) and cost nothing to keep.
+// focus goes to the first candidate whose destination layout draws it. That
+// is what lets a move continue past a panel the current frame has dropped
+// when focusing it would restore its protected header, rather than deciding
+// the move against geometry that ceases to exist the moment it succeeds.
 func (m *browseModel) moveFocusSpatial(dir direction) {
 	var candidates []panelID
 	switch {
@@ -1000,7 +996,7 @@ func (m *browseModel) moveFocusSpatial(dir direction) {
 		}
 	}
 	for _, p := range candidates {
-		if m.panelDrawn(p) {
+		if m.panelDrawnWhenFocused(p) {
 			m.focus = p
 			m.notice = ""
 			return
@@ -1534,13 +1530,16 @@ func (m browseModel) geometry() geometry {
 	g := geometry{}
 
 	// One line for the footer, and one more for the prompt when a prompt
-	// is open.
+	// is open. A negative body is not a minimum layout: it is no layout at
+	// all. Raising it to the old six-row floor made the frame visibly taller
+	// than the terminal that could not pay for it, the precise scroll-off-
+	// screen failure this function exists to prevent.
 	g.bodyHeight = m.height - 1
 	if m.mode != modeNone {
 		g.bodyHeight--
 	}
-	if g.bodyHeight < 6 {
-		g.bodyHeight = 6
+	if g.bodyHeight < 0 {
+		g.bodyHeight = 0
 	}
 
 	g.sidebar = m.width >= minSidebarWidth
@@ -1555,70 +1554,92 @@ func (m browseModel) geometry() geometry {
 	}
 	g.rightWidth = m.width - g.leftWidth
 
-	// Left column, accordion: every panel collapses to a single header line
-	// except the one currently in use, which takes everything that is left -
-	// the layout lazygit's ExpandFocusedSidePanel established. The old
-	// design split the column by row count and, when the terminal was too
-	// short to give four panels a usable window, silently dropped Tags
-	// (tagsH = 0) - a panel that vanished also refused focus, so a short
-	// terminal ended up missing a whole dimension. The accordion's minimum
-	// is one line per collapsed panel, so four panels always fit; nothing is
-	// ever dropped, only collapsed.
-	//
-	// Which panel expands is not literally "the focused one": when focus is
-	// on Sessions or Detail nothing in the left column is focused, and the
-	// column still has to decide who gets the space. The panel carrying a
-	// filter expands instead - it is the one whose state the user is relying
-	// on, and the natural thing to look at - and Repos when none does,
-	// because it is the longest list on a real machine and therefore the
-	// most likely to be worth looking at (the same reason the old 3:5 split
-	// favoured it). With several filters applied the first match is
-	// arbitrary: any of them answers "what am I filtering by" just as well.
 	if g.sidebar {
-		const collapsedH = 1
-		expanded := panelRepos
-		switch {
-		case m.focus.isLeftColumn():
-			expanded = m.focus
-		case m.agents.Sel != "":
-			expanded = panelAgents
-		case m.repos.Sel != "":
-			expanded = panelRepos
-		case m.tags.Sel != "":
-			expanded = panelTags
-		}
-		g.profilesH, g.agentsH, g.reposH, g.tagsH = collapsedH, collapsedH, collapsedH, collapsedH
-		rest := g.bodyHeight - 3*collapsedH
-		switch expanded {
-		case panelProfiles:
-			g.profilesH = rest
-		case panelAgents:
-			g.agentsH = rest
-		case panelRepos:
-			g.reposH = rest
-		case panelTags:
-			g.tagsH = rest
-		}
-	}
-
-	if g.sidebar {
-		// Right column: the session list gets the larger share, the detail
-		// pane the rest - the same 3:2 split the stacked layout used.
-		g.sessionsH = g.bodyHeight * 3 / 5
-		if g.sessionsH < 4 {
-			g.sessionsH = 4
-		}
-		g.detailH = g.bodyHeight - g.sessionsH
-		if g.detailH < 4 {
-			g.detailH = 4
-			g.sessionsH = g.bodyHeight - g.detailH
-		}
+		g.wideHeights(m)
 	} else {
 		g.narrowHeights(m.focus)
 	}
 	g.sessionsInner = maxInt(g.sessionsH-2, 0)
 	g.detailInner = maxInt(g.detailH-2, 0)
 	return g
+}
+
+// wideHeights divides the two independently stacked columns without asking
+// either to honour a minimum the terminal has not supplied. At ordinary
+// heights the accordion and 3:2 split are unchanged; below their floors,
+// panels disappear from the ends of their draw orders until each column
+// totals bodyHeight exactly. A focused side panel is the exception: it keeps
+// the one line that says where the cursor is, even when an unfocused earlier
+// panel must give its line up instead.
+func (g *geometry) wideHeights(m browseModel) {
+	focus := m.focus
+	if g.bodyHeight <= 0 {
+		return
+	}
+
+	expanded := panelRepos
+	switch {
+	case focus.isLeftColumn():
+		expanded = focus
+	case m.agents.Sel != "":
+		expanded = panelAgents
+	case m.repos.Sel != "":
+		expanded = panelRepos
+	case m.tags.Sel != "":
+		expanded = panelTags
+	}
+
+	if g.bodyHeight >= 4 {
+		g.profilesH, g.agentsH, g.reposH, g.tagsH = 1, 1, 1, 1
+		switch expanded {
+		case panelProfiles:
+			g.profilesH = g.bodyHeight - 3
+		case panelAgents:
+			g.agentsH = g.bodyHeight - 3
+		case panelRepos:
+			g.reposH = g.bodyHeight - 3
+		case panelTags:
+			g.tagsH = g.bodyHeight - 3
+		}
+	} else {
+		heights := [numPanels]int{
+			panelProfiles: 1, panelAgents: 1, panelRepos: 1, panelTags: 1,
+		}
+		used := 4
+		for _, p := range [...]panelID{panelTags, panelRepos, panelAgents, panelProfiles} {
+			if used <= g.bodyHeight || (p == expanded && focus.isLeftColumn()) {
+				continue
+			}
+			heights[p]--
+			used--
+		}
+		g.profilesH = heights[panelProfiles]
+		g.agentsH = heights[panelAgents]
+		g.reposH = heights[panelRepos]
+		g.tagsH = heights[panelTags]
+	}
+
+	// Right column: there is enough room for both panels once bodyHeight
+	// reaches two. At one row the focused Detail keeps its tab header;
+	// every other focus leaves the row with Sessions, the browser's primary
+	// panel. Neither case hands a negative height to a renderer.
+	if g.bodyHeight == 1 {
+		if focus == panelDetail {
+			g.detailH = 1
+		} else {
+			g.sessionsH = 1
+		}
+		return
+	}
+	g.sessionsH = g.bodyHeight * 3 / 5
+	if g.sessionsH < 1 {
+		g.sessionsH = 1
+	}
+	g.detailH = g.bodyHeight - g.sessionsH
+	if g.detailH < 1 {
+		g.detailH = 1
+		g.sessionsH = g.bodyHeight - 1
+	}
 }
 
 // narrowHeights lays the whole frame out as one column, for a terminal too
@@ -1634,74 +1655,76 @@ func (m browseModel) geometry() geometry {
 // that was actually short, and buys back every dimension the user had lost.
 // This is what lazygit does at the same threshold, for the same reason.
 //
-// Rows are handed out in order of what the user would miss first, not in
-// draw order:
+// Rows start with Sessions' three-line floor and one header for every other
+// panel. When the frame cannot fund all eight rows, it takes them back from
+// the end of the draw order - Detail, Tags, Repos, Agents, Profiles, then
+// Sessions' surplus - while never taking the focused panel's last line.
+// That order is not cosmetic: losing the panel the user just chose while an
+// unfocused Detail header remains is worse than losing the header, and it
+// leaves movement keys operating on a cursor the frame does not show.
 //
-//  1. Sessions is never collapsed. It is the list the whole program exists
-//     to show, so its floor is reserved before anything else is offered a
-//     line and it collects everything left over at the end.
-//  2. The focused panel gets a window worth reading - a quarter of the
-//     frame, never smaller than a drawable box - because it is the one the
-//     user is working in.
-//  3. Everything else gets a header line: collapsed, but present, still
-//     showing what it is filtering by, and still reachable by its digit.
-//
-// A panel only reaches zero when the terminal genuinely cannot pay for one
-// more line, which needs a frame under about ten rows; panelDrawn reports
-// that honestly rather than the layout pretending otherwise.
+// Once those floors fit, the focused panel grows to a readable quarter of
+// the frame and Sessions receives the rest. Sessions therefore remains the
+// primary list at practical sizes without making an impossible floor spill
+// the frame past a tiny terminal.
 func (g *geometry) narrowHeights(focus panelID) {
-	const (
-		collapsedH     = 1
-		sessionsHFloor = 3
-	)
+	if g.bodyHeight <= 0 {
+		return
+	}
+
 	// Draw order is Profiles, Agents, Repos, Tags, Sessions, Detail - the
 	// digit order with Sessions' 0 last, which is also where lazygit puts
 	// its own [0] panel. Detail collapses like the rest: it is content for
 	// the selected row, so it earns its rows only when it is what the user
 	// is reading.
-	collapsibles := []panelID{panelProfiles, panelAgents, panelRepos, panelTags, panelDetail}
-
-	remaining := g.bodyHeight
-	reserved := minInt(sessionsHFloor, remaining)
-	remaining -= reserved
-
-	heights := make(map[panelID]int, len(collapsibles))
-	if focus != panelSessions {
-		for _, p := range collapsibles {
-			if p != focus {
-				continue
-			}
-			want := g.bodyHeight / 4
-			if want < 3 {
-				want = 3
-			}
-			// Every other collapsible still needs its header line; the
-			// focused panel may only take what is left after those.
-			if cap := remaining - (len(collapsibles) - 1); want > cap {
-				want = cap
-			}
-			if want < 0 {
-				want = 0
-			}
-			heights[p] = want
-			remaining -= want
-		}
+	heights := [numPanels]int{
+		panelProfiles: 1,
+		panelAgents:   1,
+		panelRepos:    1,
+		panelTags:     1,
+		panelSessions: 3,
+		panelDetail:   1,
 	}
-	for _, p := range collapsibles {
-		if _, done := heights[p]; done {
+	used := 8
+	for _, p := range [...]panelID{panelDetail, panelTags, panelRepos, panelAgents, panelProfiles, panelSessions} {
+		if p == focus {
 			continue
 		}
-		n := minInt(collapsedH, remaining)
-		heights[p] = n
-		remaining -= n
+		for used > g.bodyHeight && heights[p] > 0 {
+			heights[p]--
+			used--
+		}
 	}
+	if used > g.bodyHeight {
+		// This is possible only when Sessions itself is focused at one or
+		// two body rows. Its three-row preference is expendable; its last
+		// line is not, because focus must remain represented whenever the
+		// terminal can show any panel at all.
+		take := minInt(used-g.bodyHeight, heights[focus]-1)
+		heights[focus] -= take
+		used -= take
+	}
+
+	remaining := g.bodyHeight - used
+	if focus != panelSessions {
+		want := g.bodyHeight / 4
+		if want < 3 {
+			want = 3
+		}
+		if extra := want - heights[focus]; extra > 0 {
+			extra = minInt(extra, remaining)
+			heights[focus] += extra
+			remaining -= extra
+		}
+	}
+	heights[panelSessions] += remaining
 
 	g.profilesH = heights[panelProfiles]
 	g.agentsH = heights[panelAgents]
 	g.reposH = heights[panelRepos]
 	g.tagsH = heights[panelTags]
+	g.sessionsH = heights[panelSessions]
 	g.detailH = heights[panelDetail]
-	g.sessionsH = reserved + remaining
 }
 
 func maxInt(a, b int) int {
@@ -1964,6 +1987,13 @@ func (m browseModel) sessionsPanel(g geometry) panelBox {
 		Style:   m.style,
 	}
 	box.Number, box.HasNumber = panelSessions.jumpKey()
+	if box.Height == 1 {
+		// A one-row Sessions allocation is its numbered header, not a
+		// two-border box. Rendering the latter spends a row geometry did
+		// not provide and is enough on its own to scroll a four-row frame.
+		box.Collapsed = true
+		return box
+	}
 
 	if len(m.visible) == 0 {
 		box.Lines = append(box.Lines, style("  no session matches the filters in use.", ansiDim, m.style))
@@ -1974,6 +2004,7 @@ func (m browseModel) sessionsPanel(g geometry) panelBox {
 	if top > maxInt(len(m.visible)-h, 0) {
 		top = maxInt(len(m.visible)-h, 0)
 	}
+	baseRowWidth := m.sessionRowWidth()
 	end := minInt(top+h, len(m.visible))
 	for i := top; i < end; i++ {
 		it := m.visible[i]
@@ -1986,18 +2017,12 @@ func (m browseModel) sessionsPanel(g geometry) panelBox {
 		if m.showAll && it.Archived {
 			marker = " " + style(archivedMarker, ansiDim, m.style)
 		}
-		// The base width (before the marker) comes from sessionRowWidth
-		// rather than being computed again here, so this row and
-		// matchText's haystack for it are the same width by construction -
-		// the property defect 1 of the terminal-width audit was missing
-		// (change fit-filter-to-drawn-width).
-		rowOpts := RenderOptions{Width: m.sessionRowWidth() - visibleWidth(marker), Style: m.style}
-		if rowOpts.Width < 1 {
-			// Never pass <= 0 through to RenderRow: 0/negative is that
-			// function's "width wasn't set at all, use the default" sentinel,
-			// which is the opposite of what a too-narrow terminal means here.
-			rowOpts.Width = 1
-		}
+		// sessionRowWidthFor shares the exact showAll/archive predicate
+		// applyTextFilter uses. RenderRow and the filter therefore shorten
+		// this particular row to the same text, including the eleven
+		// columns an archive marker takes away, instead of agreeing only
+		// for ordinary rows.
+		rowOpts := RenderOptions{Width: m.sessionRowWidthFor(it, baseRowWidth), Style: m.style}
 
 		line := RenderRow(it, rowOpts) + marker
 		if i == m.cursor {
