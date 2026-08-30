@@ -47,6 +47,19 @@ type panelBox struct {
 	Height    int
 	Focused   bool
 	Style     bool // false = NO_COLOR / not a terminal: emit no escapes at all
+
+	// Collapsed renders the panel as one header line instead of a box - the
+	// accordion layout's minimum (see geometry, browse.go). Height must be 1
+	// for that line to fit the budget the caller has already divided; a
+	// caller handing out a taller height gets the full box.
+	Collapsed bool
+	// Value is what a collapsed panel is currently pointed at - the applied
+	// filter for a facet, the active profile for Profiles - drawn where a
+	// full box draws its Count annotation. It exists because a collapsed
+	// panel has no rows to carry the applied-value mark the full box puts on
+	// its ● row, and a header that said only "Repos" would hide the very
+	// state the panels exist to keep visible.
+	Value string
 }
 
 // innerWidth is the space a panel's content actually gets: its outer width
@@ -71,7 +84,8 @@ func (p panelBox) innerHeight() int {
 	return h
 }
 
-// render draws the panel as Height lines of exactly Width columns.
+// render draws the panel as Height lines of exactly Width columns - a single
+// header line when Collapsed, otherwise a full box.
 //
 // The box is drawn by hand rather than with lipgloss.Border because the
 // title and the count live *inside* the top border, which lipgloss v1 has
@@ -90,50 +104,20 @@ func (p panelBox) render() string {
 		return border.Render(s)
 	}
 
-	var b strings.Builder
+	if p.Collapsed {
+		// A collapsed accordion panel is its top border alone: the number
+		// and title say which panel this is, and the Value says what it is
+		// filtering by. There is no content and no bottom border - the panel
+		// is yielding its rows to the one that is expanded, and drawing a
+		// closed box would pretend it had some. Like render's last line, the
+		// returned line carries no trailing newline: stackPanels joins
+		// rendered panels with "\n", so a part that ends in one would leave
+		// a blank line in the column.
+		return p.borderLine(paint, p.Value, true)
+	}
 
-	// Top border: ╭─1 Title ────────── 290 ─╮
-	title := p.Title
-	if p.HasNumber {
-		title = itoa(p.Number) + " " + title
-	}
-	// The title can carry styling of its own - the detail pane's tab strip
-	// is a title - so both ends of the border are measured by visible
-	// width. Counting escape bytes as columns here is what makes a border
-	// stop short of the panel it is supposed to close.
-	left := "─" + title + " "
-	right := ""
-	if p.Count != "" {
-		right = " " + p.Count + " "
-	}
-	fill := inner - visibleWidth(left) - visibleWidth(right)
-	if fill < 0 {
-		// Too narrow for both: keep the title, drop the count.
-		right = ""
-		left = truncateVisible(left, inner)
-		fill = inner - visibleWidth(left)
-		title = truncateVisible(title, maxInt(inner-2, 1))
-	}
-	if fill < 0 {
-		fill = 0
-	}
-	b.WriteString(paint("╭"))
-	b.WriteString(paint("─"))
-	if p.Style {
-		b.WriteString(panelTitle.Render(title))
-	} else {
-		b.WriteString(title)
-	}
-	b.WriteString(paint(" "))
-	b.WriteString(paint(strings.Repeat("─", fill)))
-	if right != "" {
-		if p.Style {
-			b.WriteString(paint(" ") + panelCount.Render(p.Count) + paint(" "))
-		} else {
-			b.WriteString(right)
-		}
-	}
-	b.WriteString(paint("╮"))
+	var b strings.Builder
+	b.WriteString(p.borderLine(paint, p.Count, false))
 	b.WriteString("\n")
 
 	// Content, padded or truncated to exactly innerHeight lines.
@@ -150,6 +134,69 @@ func (p panelBox) render() string {
 
 	// Bottom border.
 	b.WriteString(paint("╰" + strings.Repeat("─", inner) + "╯"))
+	return b.String()
+}
+
+// borderLine draws the panel's top border - the number and title on the
+// left, the annotation on the right, exactly Width columns wide. It is the
+// first of a full box's lines and the whole of a collapsed one, so the two
+// renderings cannot drift apart on the arithmetic that keeps a border
+// exactly Width columns wide. annotation is Count for a full box and Value
+// for a collapsed panel; keepAnnotation picks the too-narrow policy -
+// truncate a value, drop a count - because the value is the point of a
+// collapsed header while a count is a bonus.
+func (p panelBox) borderLine(paint func(string) string, annotation string, keepAnnotation bool) string {
+	inner := p.innerWidth()
+	title := p.Title
+	if p.HasNumber {
+		title = itoa(p.Number) + " " + title
+	}
+	// The title can carry styling of its own - the detail pane's tab strip
+	// is a title - so both ends of the border are measured by visible
+	// width. Counting escape bytes as columns here is what makes a border
+	// stop short of the panel it is supposed to close.
+	left := "─" + title + " "
+	right := ""
+	if annotation != "" {
+		right = " " + annotation + " "
+	}
+	fill := inner - visibleWidth(left) - visibleWidth(right)
+	if fill < 0 && annotation != "" && keepAnnotation {
+		// Not enough room for the whole value, but it is still the reason
+		// the header exists, so shorten it rather than dropping it like a
+		// count - the two spaces bracketing it are what the 2 pays for.
+		annotation = truncateToWidth(annotation, maxInt(inner-visibleWidth(left)-2, 1))
+		right = " " + annotation + " "
+		fill = inner - visibleWidth(left) - visibleWidth(right)
+	}
+	if fill < 0 {
+		// Too narrow for both: keep the title, drop the annotation.
+		right = ""
+		left = truncateVisible(left, inner)
+		fill = inner - visibleWidth(left)
+		title = truncateVisible(title, maxInt(inner-2, 1))
+	}
+	if fill < 0 {
+		fill = 0
+	}
+	var b strings.Builder
+	b.WriteString(paint("╭"))
+	b.WriteString(paint("─"))
+	if p.Style {
+		b.WriteString(panelTitle.Render(title))
+	} else {
+		b.WriteString(title)
+	}
+	b.WriteString(paint(" "))
+	b.WriteString(paint(strings.Repeat("─", fill)))
+	if right != "" {
+		if p.Style {
+			b.WriteString(paint(" ") + panelCount.Render(annotation) + paint(" "))
+		} else {
+			b.WriteString(right)
+		}
+	}
+	b.WriteString(paint("╮"))
 	return b.String()
 }
 

@@ -692,14 +692,15 @@ func (m *browseModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.keepCursorVisible()
 
 		// A resize can also drop the panel that currently has focus: the
-		// whole left column collapses below minSidebarWidth, or Tags alone
-		// drops out when the body is too short for it (geometry's
-		// "rest < 8" branch). setFocus and moveFocusSpatial already refuse
-		// to land focus on a panel panelDrawn reports as not on screen;
-		// this is that same check on the one path that changes what is
-		// drawn without the user pressing a focus key at all - so j/k, /,
-		// Enter and the action menu can never keep acting on something
-		// invisible until the user happens to press Tab or a digit next.
+		// whole left column collapses below minSidebarWidth. setFocus and
+		// moveFocusSpatial already refuse to land focus on a panel panelDrawn
+		// reports as not on screen; this is that same check on the one path
+		// that changes what is drawn without the user pressing a focus key at
+		// all - so j/k, /, Enter and the action menu can never keep acting on
+		// something invisible until the user happens to press Tab or a digit
+		// next. (A short terminal used to drop Tags on its own as well, via
+		// geometry's "rest < 8" branch; the accordion layout abolished that,
+		// so the width collapse is the only way a panel can disappear now.)
 		// Sessions is always panelDrawn (defect 2 of the same audit), so
 		// this reassignment can never itself need a further fallback.
 		if !m.panelDrawn(m.focus) {
@@ -863,24 +864,17 @@ func (m *browseModel) handleBrowseKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // somewhere invisible from one path and be refused it from the other.
 //
 // The left column collapses as a whole below minSidebarWidth
-// (geometry().sidebar); within it, Tags can additionally drop out on its
-// own when the body is too short to give every left panel a usable window
-// (geometry's "rest < 8" case, which sets tagsH to 0 - see the comment
-// there). stackPanels (panel.go) already skips a zero-height box for the
-// same reason at draw time; this is that same fact asked before a box
-// exists, which is what focus needs it for.
+// (geometry().sidebar); nothing inside it can disappear on its own any
+// more. That used to be false: a short terminal dropped Tags alone
+// (geometry's "rest < 8" case set tagsH to 0), which is why panelDrawn
+// once had a per-panel test here. The accordion layout abolished the case -
+// every left panel is at least a one-line header whenever the sidebar is
+// drawn - so "drawn" for a left panel is exactly "the sidebar is drawn".
 func (m *browseModel) panelDrawn(p panelID) bool {
 	if p == panelSessions || p == panelDetail {
 		return true
 	}
-	g := m.geometry()
-	if !g.sidebar {
-		return false
-	}
-	if p == panelTags {
-		return g.tagsH > 0
-	}
-	return true
+	return m.geometry().sidebar
 }
 
 // setFocus moves focus to p directly, refusing a panel panelDrawn reports as
@@ -902,14 +896,17 @@ func (m *browseModel) setFocus(p panelID) {
 //
 // panelDrawn, not the sidebar bool alone, decides "drawn": sidebar being
 // true only means the left column exists, not that every panel inside it
-// does. Tags alone can drop out of a sidebar that is otherwise present
-// (geometry's "rest < 8" branch, tagsH == 0) - the old condition here,
-// `sidebar || m.focus == panelSessions || m.focus == panelDetail`, treated
-// the whole column as landable the moment it existed, so Tab could stop the
-// cycle on a zero-height Tags panel on a short terminal with a sidebar.
-// panelDrawn is the same predicate setFocus and moveFocusSpatial already
-// defer to, so all three ways of moving focus agree about what is on
-// screen by construction rather than by three call sites agreeing to.
+// does. The distinction was made real by geometry's "rest < 8" branch,
+// which dropped Tags (tagsH == 0) from an otherwise-present sidebar on a
+// short terminal - the old condition here, `sidebar || m.focus ==
+// panelSessions || m.focus == panelDetail`, treated the whole column as
+// landable the moment it existed, so Tab could stop the cycle on a
+// zero-height Tags panel. The accordion layout draws every left panel at
+// least as a header, so only the whole-column width collapse can remove one
+// now - but the indirection stays, because panelDrawn is the same predicate
+// setFocus and moveFocusSpatial already defer to, and all three ways of
+// moving focus agree about what is on screen by construction rather than by
+// three call sites agreeing to.
 func (m *browseModel) moveFocus(delta int) {
 	for i := 0; i < int(numPanels); i++ {
 		m.focus = panelID((int(m.focus) + delta + int(numPanels)) % int(numPanels))
@@ -948,10 +945,12 @@ const (
 // Each branch below is an ordered chain of candidates - normally one panel,
 // but J/K's chains run all the way to the far end of the left column - and
 // focus goes to the first candidate panelDrawn still finds on screen. That
-// is what lets a move continue past a panel the frame has dropped (Tags, in
-// a short terminal) to the next one still drawn, rather than landing on it
-// or refusing to move at all; an empty or exhausted chain is exactly the
-// no-op an edge is supposed to be.
+// is what lets a move continue past a panel the frame has dropped to the
+// next one still drawn, rather than landing on it or refusing to move at
+// all; an empty or exhausted chain is exactly the no-op an edge is supposed
+// to be. Dropping is now only the width collapse of the whole column, but
+// the chains were built to survive the old per-panel drops (Tags, in a
+// short terminal) and cost nothing to keep.
 func (m *browseModel) moveFocusSpatial(dir direction) {
 	var candidates []panelID
 	switch {
@@ -1495,7 +1494,9 @@ const minSidebarWidth = 76
 // taller than the terminal and the terminal would scroll it, silently
 // pushing the top panel off the screen. That failure mode is invisible to
 // a unit test comparing strings, which is why it is computed once here
-// rather than per-panel at draw time.
+// rather than per-panel at draw time. A collapsed side panel's height of 1
+// is that panel's header line (panelBox's Collapsed rendering); it needs no
+// border arithmetic of its own, which is what lets four panels always fit.
 type geometry struct {
 	sidebar       bool
 	leftWidth     int
@@ -1536,26 +1537,49 @@ func (m browseModel) geometry() geometry {
 	}
 	g.rightWidth = m.width - g.leftWidth
 
-	// Left column: Profiles and Agents are short, known-length lists and
-	// get only what they need; Repos and Tags share whatever is left, with
-	// Repos favoured because it is the longest list on a real machine.
+	// Left column, accordion: every panel collapses to a single header line
+	// except the one currently in use, which takes everything that is left -
+	// the layout lazygit's ExpandFocusedSidePanel established. The old
+	// design split the column by row count and, when the terminal was too
+	// short to give four panels a usable window, silently dropped Tags
+	// (tagsH = 0) - a panel that vanished also refused focus, so a short
+	// terminal ended up missing a whole dimension. The accordion's minimum
+	// is one line per collapsed panel, so four panels always fit; nothing is
+	// ever dropped, only collapsed.
+	//
+	// Which panel expands is not literally "the focused one": when focus is
+	// on Sessions or Detail nothing in the left column is focused, and the
+	// column still has to decide who gets the space. The panel carrying a
+	// filter expands instead - it is the one whose state the user is relying
+	// on, and the natural thing to look at - and Repos when none does,
+	// because it is the longest list on a real machine and therefore the
+	// most likely to be worth looking at (the same reason the old 3:5 split
+	// favoured it). With several filters applied the first match is
+	// arbitrary: any of them answers "what am I filtering by" just as well.
 	if g.sidebar {
-		g.profilesH = boxHeight(len(m.profiles_.rows), 1, 4)
-		g.agentsH = boxHeight(len(m.agents.rows), 1, 5)
-		rest := g.bodyHeight - g.profilesH - g.agentsH
-		if rest < 8 {
-			// Too short to give all four panels a usable window: drop Tags
-			// and let Repos have the remainder, rather than rendering two
-			// panels one row tall each.
+		const collapsedH = 1
+		expanded := panelRepos
+		switch {
+		case m.focus.isLeftColumn():
+			expanded = m.focus
+		case m.agents.Sel != "":
+			expanded = panelAgents
+		case m.repos.Sel != "":
+			expanded = panelRepos
+		case m.tags.Sel != "":
+			expanded = panelTags
+		}
+		g.profilesH, g.agentsH, g.reposH, g.tagsH = collapsedH, collapsedH, collapsedH, collapsedH
+		rest := g.bodyHeight - 3*collapsedH
+		switch expanded {
+		case panelProfiles:
+			g.profilesH = rest
+		case panelAgents:
+			g.agentsH = rest
+		case panelRepos:
 			g.reposH = rest
-			g.tagsH = 0
-			if g.reposH < 3 {
-				g.agentsH += g.reposH - 3
-				g.reposH = 3
-			}
-		} else {
-			g.reposH = rest * 3 / 5
-			g.tagsH = rest - g.reposH
+		case panelTags:
+			g.tagsH = rest
 		}
 	}
 
@@ -1573,18 +1597,6 @@ func (m browseModel) geometry() geometry {
 	g.sessionsInner = maxInt(g.sessionsH-2, 0)
 	g.detailInner = maxInt(g.detailH-2, 0)
 	return g
-}
-
-// boxHeight is the outer height a panel needs to show n rows, clamped to
-// between min and max content rows.
-func boxHeight(n, minRows, maxRows int) int {
-	if n < minRows {
-		n = minRows
-	}
-	if n > maxRows {
-		n = maxRows
-	}
-	return n + 2
 }
 
 func maxInt(a, b int) int {
@@ -1719,6 +1731,24 @@ func (m browseModel) facetPanel(id panelID, f *facet, width, height int, sel str
 	}
 	box.Number, box.HasNumber = id.jumpKey()
 	if height <= 0 {
+		return box
+	}
+	if height == 1 {
+		// A collapsed accordion header: one line, no rows, whose whole job
+		// is to say what the panel is and what it currently applies. The
+		// full box marks the applied value as a ● row; a header has no rows
+		// to carry that mark, so the value moves into the border - without
+		// it, a filtered panel and an empty one would look identical from a
+		// collapsed header, which would be the panels' point turned against
+		// them.
+		box.Collapsed = true
+		if id == panelProfiles {
+			// Profiles filters nothing; its analogue of an applied value is
+			// the active profile, exactly what its ● row marks when open.
+			box.Value = sanitizeSingleLine(m.profileName)
+		} else {
+			box.Value = sanitizeSingleLine(sel)
+		}
 		return box
 	}
 	if f.filter != "" {
