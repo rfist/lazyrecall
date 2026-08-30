@@ -11,6 +11,20 @@ import (
 // afterward, including unsetting ones that were not previously set.
 func withEnv(t *testing.T, kv map[string]string) {
 	t.Helper()
+	// Redirecting HOME is not on its own enough to isolate a test from the
+	// machine it runs on: $XDG_CONFIG_HOME outranks $HOME/.config in
+	// config.Path, and CI runners set it (GitHub's ubuntu images do, its
+	// macOS images and a typical laptop do not). Without this, these tests
+	// isolate themselves on some machines and read the real user's config on
+	// others - which is how the suite passed locally and on macOS and failed
+	// on the first Linux CI run. Neutralised here rather than at fifteen call
+	// sites so a new test cannot forget it; a caller that means to exercise
+	// XDG itself can still set it explicitly and wins.
+	if _, redirectsHome := kv["HOME"]; redirectsHome {
+		if _, setsXDG := kv["XDG_CONFIG_HOME"]; !setsXDG {
+			kv["XDG_CONFIG_HOME"] = ""
+		}
+	}
 	for k, v := range kv {
 		old, existed := os.LookupEnv(k)
 		os.Setenv(k, v)
