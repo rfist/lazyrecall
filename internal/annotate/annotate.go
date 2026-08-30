@@ -13,7 +13,7 @@ import (
 	"fmt"
 	"time"
 
-	"lazyrecall/internal/sqlitex"
+	"github.com/rfist/lazyrecall/internal/sqlitex"
 )
 
 // Comment is one free-text comment attached to a lineage (spec

@@ -19,9 +19,9 @@ import (
 	"strings"
 	"time"
 
-	"lazyrecall/internal/adapter"
-	"lazyrecall/internal/profile"
-	"lazyrecall/internal/session"
+	"github.com/rfist/lazyrecall/internal/adapter"
+	"github.com/rfist/lazyrecall/internal/profile"
+	"github.com/rfist/lazyrecall/internal/session"
 )
 
 type Adapter struct{}

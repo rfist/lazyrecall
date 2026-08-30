@@ -26,7 +26,7 @@ import (
 	"sort"
 	"strings"
 
-	"lazyrecall/internal/config"
+	"github.com/rfist/lazyrecall/internal/config"
 )
 
 // Profile is one isolated identity: a bundle of config roots, at most one

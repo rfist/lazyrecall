@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"lazyrecall/internal/config"
-	"lazyrecall/internal/schema"
-	"lazyrecall/internal/session"
-	"lazyrecall/internal/sqlitex"
+	"github.com/rfist/lazyrecall/internal/config"
+	"github.com/rfist/lazyrecall/internal/schema"
+	"github.com/rfist/lazyrecall/internal/session"
+	"github.com/rfist/lazyrecall/internal/sqlitex"
 )
 
 // All fixtures below are synthetic, hand-written data - no real session

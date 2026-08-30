@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"lazyrecall/internal/search"
+	"github.com/rfist/lazyrecall/internal/search"
 )
 
 func TestWriteItemsJSONUsesSnakeCaseAndOmitsAbsentFields(t *testing.T) {

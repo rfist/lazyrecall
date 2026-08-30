@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sort"
 
-	"lazyrecall/internal/session"
+	"github.com/rfist/lazyrecall/internal/session"
 )
 
 var sessionColumns = []string{

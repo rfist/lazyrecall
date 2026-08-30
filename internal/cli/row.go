@@ -16,8 +16,8 @@ import (
 
 	"github.com/mattn/go-runewidth"
 
-	"lazyrecall/internal/search"
-	"lazyrecall/internal/session"
+	"github.com/rfist/lazyrecall/internal/search"
+	"github.com/rfist/lazyrecall/internal/session"
 )
 
 // slot indices into the fixed-order row layout. Optional fields (age,

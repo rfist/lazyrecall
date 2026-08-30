@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strconv"
 
-	"lazyrecall/internal/session"
-	"lazyrecall/internal/sqlitex"
+	"github.com/rfist/lazyrecall/internal/session"
+	"github.com/rfist/lazyrecall/internal/sqlitex"
 )
 
 // ItemForIdentifier resolves a single session identifier typed by the user

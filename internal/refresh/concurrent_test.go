@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"lazyrecall/internal/sqlitex"
+	"github.com/rfist/lazyrecall/internal/sqlitex"
 )
 
 // TestRefreshToleratesConcurrentTranscriptWrites verifies a refresh

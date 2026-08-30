@@ -33,13 +33,13 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 
-	"lazyrecall/internal/annotate"
-	"lazyrecall/internal/config"
-	"lazyrecall/internal/profile"
-	"lazyrecall/internal/refresh"
-	"lazyrecall/internal/search"
-	"lazyrecall/internal/session"
-	"lazyrecall/internal/sqlitex"
+	"github.com/rfist/lazyrecall/internal/annotate"
+	"github.com/rfist/lazyrecall/internal/config"
+	"github.com/rfist/lazyrecall/internal/profile"
+	"github.com/rfist/lazyrecall/internal/refresh"
+	"github.com/rfist/lazyrecall/internal/search"
+	"github.com/rfist/lazyrecall/internal/session"
+	"github.com/rfist/lazyrecall/internal/sqlitex"
 )
 
 // BrowserOptions carries the initial state for one browsing session.

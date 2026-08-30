@@ -12,7 +12,7 @@ import (
 	"os"
 	"time"
 
-	"lazyrecall/internal/session"
+	"github.com/rfist/lazyrecall/internal/session"
 )
 
 // Kind is the normalized vocabulary every source's records are mapped into

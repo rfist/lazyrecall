@@ -3,7 +3,7 @@ package hermes
 import (
 	"testing"
 
-	"lazyrecall/internal/session"
+	"github.com/rfist/lazyrecall/internal/session"
 )
 
 func strp(s string) *string { return &s }

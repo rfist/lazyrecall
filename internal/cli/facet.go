@@ -13,7 +13,7 @@ import (
 	"sort"
 	"strings"
 
-	"lazyrecall/internal/search"
+	"github.com/rfist/lazyrecall/internal/search"
 )
 
 // facetRow is one selectable value in a facet panel. The zero Value is the

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"lazyrecall/internal/sqlitex"
+	"github.com/rfist/lazyrecall/internal/sqlitex"
 )
 
 // AddTag applies a named tag to a lineage (spec session-annotations,

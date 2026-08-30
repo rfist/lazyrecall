@@ -15,15 +15,15 @@ import (
 	"strings"
 	"time"
 
-	"lazyrecall/internal/annotate"
-	"lazyrecall/internal/cli"
-	"lazyrecall/internal/config"
-	"lazyrecall/internal/profile"
-	"lazyrecall/internal/refresh"
-	"lazyrecall/internal/resume"
-	"lazyrecall/internal/review"
-	"lazyrecall/internal/search"
-	"lazyrecall/internal/sqlitex"
+	"github.com/rfist/lazyrecall/internal/annotate"
+	"github.com/rfist/lazyrecall/internal/cli"
+	"github.com/rfist/lazyrecall/internal/config"
+	"github.com/rfist/lazyrecall/internal/profile"
+	"github.com/rfist/lazyrecall/internal/refresh"
+	"github.com/rfist/lazyrecall/internal/resume"
+	"github.com/rfist/lazyrecall/internal/review"
+	"github.com/rfist/lazyrecall/internal/search"
+	"github.com/rfist/lazyrecall/internal/sqlitex"
 )
 
 // version and buildTime are set at build time via
