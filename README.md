@@ -1,10 +1,18 @@
 # lazyrecall
 
-lazyrecall is a retrospective index over the sessions coding agents already wrote to disk. It reads the transcripts and history files that are already there, makes them searchable, lets you annotate them with tags and comments, and can drop you back into any of them with the original agent. It is not a live monitor and does not run agents on its own; resuming a session is the one deliberate, user-initiated exception, and it happens in your terminal.
-
-## Screenshot
+A terminal UI for every coding-agent session you have already had.
 
 ![lazyrecall](docs/screenshot.png)
+
+You have been pairing with Claude Code. And with pi, and omp, and hermes, sometimes all of them in the same week. Somewhere in there you fixed the flaky retry test, worked out why the migration deadlocks, and wrote the one prompt that finally got the refactor right.
+
+Now find it again. Which agent was it? Which repo? Was that Tuesday or the Tuesday before? Every tool keeps its own history, in its own format, in its own directory, and not one of them has any idea what the other three were doing. So you scroll back through a terminal that no longer has it, or you just do the work twice.
+
+lazyrecall reads what those agents already wrote to your disk and turns it into one list. Every session from every agent, newest first, with the repository it ran in, how it ended, and what it was about. Search the prompts you actually typed. Tag the good ones, leave yourself a comment on the one you will need in a month, and filter down by repo or agent until the list is short.
+
+Then press enter, and you are back in that session - the same agent, the same working directory, right where you left off.
+
+It does not run agents, watch anything, or send your sessions anywhere. It is a reader over files that are already on your disk. Resuming is the only thing that starts a process, and only because you asked it to.
 
 ## Install
 
