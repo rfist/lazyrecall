@@ -199,10 +199,11 @@ func (r *Refresher) Refresh(opts Options) (Summary, error) {
 			rawID := d.Session.ID // adapter.Discover's own composite id, before any correction below - the fallbackPrompts key tier2ForSource looks up by (it walks the same discovered slice, never the corrected s)
 			prior := existing.priorFor(s.ID, d.TranscriptPath)
 
+			replaced := false
 			if d.TranscriptPath != "" {
 				var cursorRow map[string]any
 				var prompts []transcript.PromptText
-				s, cursorRow, prompts = r.applyTranscript(s, d, prior, cursors[cursorKey(a.Name(), s.SourceSessionID)])
+				s, cursorRow, prompts, replaced = r.applyTranscript(s, d, prior, cursors[cursorKey(a.Name(), s.SourceSessionID)])
 				cursorRecords = append(cursorRecords, cursorRow)
 				if len(prompts) > 0 {
 					fallbackPrompts[rawID] = prompts
@@ -234,12 +235,14 @@ func (r *Refresher) Refresh(opts Options) (Summary, error) {
 			}
 
 			// Git identity (repo root + the canonical root worktrees
-			// share) is resolved once and then cached forever via the
-			// prior-row merge below - it costs a git subprocess call only
-			// the first time a session's directory is seen to exist and
-			// nothing is known yet (spec session-search, "Grouping by
-			// repository and worktree").
-			if prior != nil {
+			// share) is resolved once and then cached via the prior-row merge
+			// below - it costs a git subprocess call only the first time a
+			// session's directory is seen to exist and nothing is known yet
+			// (spec session-search, "Grouping by repository and worktree").
+			// A replaced transcript is not eligible for that cache: its CWD
+			// evidence was re-derived from new bytes, so the old CWD's
+			// repository identity is stale rather than a useful fallback.
+			if prior != nil && !replaced {
 				if s.GitRepoRoot == nil {
 					s.GitRepoRoot = prior.GitRepoRoot
 				}

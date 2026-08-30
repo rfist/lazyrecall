@@ -1203,6 +1203,156 @@ func TestOriginAgreesAcrossIncrementalAndFullRebuild(t *testing.T) {
 	}
 }
 
+// TestOriginAgreesAcrossIncrementalAndFullRebuildWhenAutomationComesFirst
+// covers the ordering the earlier regression did not: the first pass already
+// finds automation, and a later plain-cli delta carries an interactive
+// fallback. The first record is padded beyond the rewrite detector's window,
+// so appending the second cannot accidentally turn this into a from-zero scan:
+// the assertion is specifically about merging two separate folds.
+func TestOriginAgreesAcrossIncrementalAndFullRebuildWhenAutomationComesFirst(t *testing.T) {
+	home := t.TempDir()
+	dataDir := t.TempDir()
+	os.Setenv("LAZYRECALL_HOME", dataDir)
+	t.Cleanup(func() { os.Unsetenv("LAZYRECALL_HOME") })
+
+	claudeRoot := filepath.Join(home, ".claude-personal")
+	writeFile(t, filepath.Join(claudeRoot, "history.jsonl"),
+		`{"display":"run it unattended","timestamp":1700000000000,"project":"/work/repo","sessionId":"c1"}`+"\n")
+	transcript := filepath.Join(claudeRoot, "projects", "-work-repo", "c1.jsonl")
+	writeFile(t, transcript,
+		`{"type":"user","message":{"role":"user","content":"run it unattended"},"cwd":"/work/repo","entrypoint":"sdk-cli","pad":"`+strings.Repeat("x", 300)+`","timestamp":"2026-01-01T00:00:00Z"}`+"\n")
+
+	p := profile.Profile{Name: "claude-personal", Roots: map[string]string{"claude": claudeRoot}}
+	r, err := New(p, sqlite3Path(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	state := func(when string) (origin string, messageCount int64) {
+		t.Helper()
+		var rows []struct {
+			Origin       string `json:"origin"`
+			MessageCount int64  `json:"message_count"`
+		}
+		if err := r.DB.Query(`SELECT origin, message_count FROM sessions WHERE source = 'claude';`, &rows); err != nil {
+			t.Fatal(err)
+		}
+		if len(rows) != 1 {
+			t.Fatalf("%s: got %d claude session rows, want 1", when, len(rows))
+		}
+		return rows[0].Origin, rows[0].MessageCount
+	}
+
+	if _, err := r.Refresh(Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if origin, _ := state("automated-only pass"); origin != string(session.OriginAutomated) {
+		t.Fatalf("origin after the sdk-cli-only pass = %q, want %q", origin, session.OriginAutomated)
+	}
+
+	f, err := os.OpenFile(transcript, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"The script completed."}],"stop_reason":"end_turn"},"entrypoint":"cli","timestamp":"2026-01-01T00:01:00Z"}` + "\n"); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	if _, err := r.Refresh(Options{}); err != nil {
+		t.Fatal(err)
+	}
+	incrementalOrigin, messageCount := state("after the plain-cli delta")
+	if messageCount != 2 {
+		t.Fatalf("message_count after the separate incremental delta = %d, want 2 - a different count means this test tripped a rewrite re-scan instead", messageCount)
+	}
+	if incrementalOrigin != string(session.OriginAutomated) {
+		t.Errorf("origin after an incremental refresh of the plain-cli delta = %q, want %q: one automated record in the earlier pass decides the whole session", incrementalOrigin, session.OriginAutomated)
+	}
+
+	if _, err := r.Refresh(Options{FullRebuild: true}); err != nil {
+		t.Fatal(err)
+	}
+	fullOrigin, _ := state("after refresh --full")
+	if incrementalOrigin != fullOrigin {
+		t.Fatalf("origin diverges by refresh path: incremental = %q, refresh --full = %q - the same session must classify the same way regardless of record ordering", incrementalOrigin, fullOrigin)
+	}
+}
+
+// TestRewriteDiscardsPriorTranscriptState covers the case no ordinary
+// incremental merge can represent: once a file is known to have been
+// replaced, every fact read from its old bytes is stale. The replacement
+// deliberately removes the human prompt and editor client, and has one
+// recognizable record, so origin, client, and message_count each prove that
+// the refresh used replacement evidence alone.
+func TestRewriteDiscardsPriorTranscriptState(t *testing.T) {
+	home := t.TempDir()
+	dataDir := t.TempDir()
+	os.Setenv("LAZYRECALL_HOME", dataDir)
+	t.Cleanup(func() { os.Unsetenv("LAZYRECALL_HOME") })
+
+	claudeRoot := filepath.Join(home, ".claude-personal")
+	writeFile(t, filepath.Join(claudeRoot, "history.jsonl"),
+		`{"display":"started in an editor","timestamp":1700000000000,"project":"/work/repo","sessionId":"c1"}`+"\n")
+	transcript := filepath.Join(claudeRoot, "projects", "-work-repo", "c1.jsonl")
+	writeFile(t, transcript,
+		`{"type":"user","message":{"role":"user","content":"started in an editor"},"cwd":"/work/repo","entrypoint":"sdk-ts","origin":{"kind":"human"},"pad":"`+strings.Repeat("x", 300)+`","timestamp":"2026-01-01T00:00:00Z"}`+"\n"+
+			`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Acknowledged."}],"stop_reason":"end_turn"},"entrypoint":"sdk-ts","timestamp":"2026-01-01T00:00:05Z"}`+"\n")
+
+	p := profile.Profile{Name: "claude-personal", Roots: map[string]string{"claude": claudeRoot}}
+	r, err := New(p, sqlite3Path(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Refresh(Options{}); err != nil {
+		t.Fatal(err)
+	}
+
+	var initial []struct {
+		Origin string  `json:"origin"`
+		Client *string `json:"client"`
+	}
+	if err := r.DB.Query(`SELECT origin, client FROM sessions WHERE source = 'claude';`, &initial); err != nil {
+		t.Fatal(err)
+	}
+	if len(initial) != 1 || initial[0].Origin != string(session.OriginInteractive) || initial[0].Client == nil || *initial[0].Client != "sdk-ts" {
+		t.Fatalf("initial transcript state = %+v, want interactive sdk-ts", initial)
+	}
+
+	writeFile(t, transcript,
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Replacement automation."}],"stop_reason":"end_turn"},"entrypoint":"sdk-cli","timestamp":"2026-01-01T00:01:00Z"}`+"\n")
+	if _, err := r.Refresh(Options{}); err != nil {
+		t.Fatal(err)
+	}
+
+	var rows []struct {
+		Origin       string  `json:"origin"`
+		Client       *string `json:"client"`
+		MessageCount int64   `json:"message_count"`
+	}
+	if err := r.DB.Query(`SELECT origin, client, message_count FROM sessions WHERE source = 'claude';`, &rows); err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("got %d claude session rows after replacement, want 1", len(rows))
+	}
+	if rows[0].Origin != string(session.OriginAutomated) {
+		t.Errorf("origin after replacement = %q, want %q: the old human prompt no longer exists", rows[0].Origin, session.OriginAutomated)
+	}
+	if rows[0].Client == nil || *rows[0].Client != "sdk-cli" {
+		// Deref for the message: a *string prints as an address, which
+		// tells the reader nothing about which client was wrongly kept.
+		got := "<nil>"
+		if rows[0].Client != nil {
+			got = *rows[0].Client
+		}
+		t.Errorf("client after replacement = %q, want sdk-cli: the old editor client no longer exists", got)
+	}
+	if rows[0].MessageCount != 1 {
+		t.Errorf("message_count after replacement = %d, want 1: the old transcript's records must not be added to the replacement's scan", rows[0].MessageCount)
+	}
+}
+
 // TestClientAgreesAcrossIncrementalAndFullRebuild reproduces the audit
 // finding on commit 9feca0a (defect 2): a chat created in an editor
 // (entrypoint "sdk-ts") and later resumed in the source's own terminal
