@@ -7,10 +7,10 @@ import (
 	"strings"
 	"testing"
 
-	"lazyrecall/internal/config"
-	"lazyrecall/internal/profile"
-	"lazyrecall/internal/search"
-	"lazyrecall/internal/session"
+	"github.com/rfist/lazyrecall/internal/config"
+	"github.com/rfist/lazyrecall/internal/profile"
+	"github.com/rfist/lazyrecall/internal/search"
+	"github.com/rfist/lazyrecall/internal/session"
 )
 
 // All fixtures below are synthetic, hand-written test data - no real

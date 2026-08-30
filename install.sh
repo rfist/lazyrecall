@@ -1,7 +1,7 @@
 #!/bin/sh
 set -e
 
-REPO="OWNER/lazyrecall"
+REPO="rfist/lazyrecall"
 
 # --- platform detection -------------------------------------------------
 case "$(uname -s)" in

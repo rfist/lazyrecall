@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"lazyrecall/internal/config"
+	"github.com/rfist/lazyrecall/internal/config"
 )
 
 func strp(s string) *string { return &s }

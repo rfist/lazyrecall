@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"lazyrecall/internal/profile"
+	"github.com/rfist/lazyrecall/internal/profile"
 )
 
 // The pre-rename data directory holds the short handles, comments, and tags

@@ -9,10 +9,10 @@ import (
 	"strings"
 	"testing"
 
-	"lazyrecall/internal/annotate"
-	"lazyrecall/internal/profile"
-	"lazyrecall/internal/schema"
-	"lazyrecall/internal/sqlitex"
+	"github.com/rfist/lazyrecall/internal/annotate"
+	"github.com/rfist/lazyrecall/internal/profile"
+	"github.com/rfist/lazyrecall/internal/schema"
+	"github.com/rfist/lazyrecall/internal/sqlitex"
 )
 
 // newTestFlagSet builds the same FlagSet configuration every real

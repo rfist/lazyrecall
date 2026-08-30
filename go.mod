@@ -1,4 +1,4 @@
-module lazyrecall
+module github.com/rfist/lazyrecall
 
 go 1.26.5
 

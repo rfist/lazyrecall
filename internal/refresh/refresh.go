@@ -15,17 +15,17 @@ import (
 	"path/filepath"
 	"time"
 
-	"lazyrecall/internal/adapter"
-	claudeadapter "lazyrecall/internal/adapter/claude"
-	hermesadapter "lazyrecall/internal/adapter/hermes"
-	ompadapter "lazyrecall/internal/adapter/omp"
-	piadapter "lazyrecall/internal/adapter/pi"
-	"lazyrecall/internal/gitutil"
-	"lazyrecall/internal/profile"
-	"lazyrecall/internal/schema"
-	"lazyrecall/internal/session"
-	"lazyrecall/internal/sqlitex"
-	"lazyrecall/internal/transcript"
+	"github.com/rfist/lazyrecall/internal/adapter"
+	claudeadapter "github.com/rfist/lazyrecall/internal/adapter/claude"
+	hermesadapter "github.com/rfist/lazyrecall/internal/adapter/hermes"
+	ompadapter "github.com/rfist/lazyrecall/internal/adapter/omp"
+	piadapter "github.com/rfist/lazyrecall/internal/adapter/pi"
+	"github.com/rfist/lazyrecall/internal/gitutil"
+	"github.com/rfist/lazyrecall/internal/profile"
+	"github.com/rfist/lazyrecall/internal/schema"
+	"github.com/rfist/lazyrecall/internal/session"
+	"github.com/rfist/lazyrecall/internal/sqlitex"
+	"github.com/rfist/lazyrecall/internal/transcript"
 )
 
 // InactivityThreshold is how long a session with no clear terminal marker

@@ -4,9 +4,9 @@ import (
 	"encoding/json"
 	"time"
 
-	"lazyrecall/internal/adapter"
-	"lazyrecall/internal/session"
-	"lazyrecall/internal/transcript"
+	"github.com/rfist/lazyrecall/internal/adapter"
+	"github.com/rfist/lazyrecall/internal/session"
+	"github.com/rfist/lazyrecall/internal/transcript"
 )
 
 // cursorRow is one row from LazyRecall's own cursors table.

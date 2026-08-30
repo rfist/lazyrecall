@@ -1,6 +1,6 @@
 package transcript
 
-import "lazyrecall/internal/session"
+import "github.com/rfist/lazyrecall/internal/session"
 
 // ClassifyEndState derives a session's end state from the tail of its
 // transcript (task 4.5; spec session-review, "Session end state

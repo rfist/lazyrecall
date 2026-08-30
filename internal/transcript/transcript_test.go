@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"lazyrecall/internal/session"
+	"github.com/rfist/lazyrecall/internal/session"
 )
 
 func writeFile(t *testing.T, dir, name, content string) string {

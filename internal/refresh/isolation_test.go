@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"lazyrecall/internal/profile"
-	"lazyrecall/internal/search"
+	"github.com/rfist/lazyrecall/internal/profile"
+	"github.com/rfist/lazyrecall/internal/search"
 )
 
 // TestNoOperationReturnsSessionsFromMultipleProfiles refreshes two

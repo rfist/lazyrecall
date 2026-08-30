@@ -38,10 +38,14 @@ jobs:
           set -euo pipefail
           version="${TAG#v}"
           mkdir -p dist
-          archive="dist/lazyrecall_${version}_${GOOS}_${GOARCH}.tar.gz"
+          archive="lazyrecall_${version}_${GOOS}_${GOARCH}.tar.gz"
           CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${version} -X main.buildTime=${DATE}" -o lazyrecall ./cmd/lazyrecall
-          tar -czf "${archive}" lazyrecall
-          sha256sum "${archive}" > "dist/checksums-${GOOS}-${GOARCH}.txt"
+          tar -czf "dist/${archive}" lazyrecall
+          # Checksum from inside dist/ so the file records the bare archive
+          # name. install.sh looks the archive up by name (awk '$2 == a'), so
+          # a "dist/" prefix here makes every install abort at verification
+          # with "not found in checksums.txt".
+          ( cd dist && sha256sum "${archive}" > "checksums-${GOOS}-${GOARCH}.txt" )
       - uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.goos }}-${{ matrix.goarch }}

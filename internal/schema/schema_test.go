@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"lazyrecall/internal/sqlitex"
+	"github.com/rfist/lazyrecall/internal/sqlitex"
 )
 
 func testRunner(t *testing.T) *sqlitex.Runner {

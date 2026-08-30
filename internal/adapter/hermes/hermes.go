@@ -16,10 +16,10 @@ import (
 	"path/filepath"
 	"time"
 
-	"lazyrecall/internal/adapter"
-	"lazyrecall/internal/profile"
-	"lazyrecall/internal/session"
-	"lazyrecall/internal/sqlitex"
+	"github.com/rfist/lazyrecall/internal/adapter"
+	"github.com/rfist/lazyrecall/internal/profile"
+	"github.com/rfist/lazyrecall/internal/session"
+	"github.com/rfist/lazyrecall/internal/sqlitex"
 )
 
 type Adapter struct {

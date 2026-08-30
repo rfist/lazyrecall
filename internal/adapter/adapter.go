@@ -6,8 +6,8 @@
 package adapter
 
 import (
-	"lazyrecall/internal/profile"
-	"lazyrecall/internal/session"
+	"github.com/rfist/lazyrecall/internal/profile"
+	"github.com/rfist/lazyrecall/internal/session"
 )
 
 // Discovered is one session an adapter found, with whatever its source's

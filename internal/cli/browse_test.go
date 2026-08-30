@@ -13,12 +13,12 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"lazyrecall/internal/annotate"
-	"lazyrecall/internal/config"
-	"lazyrecall/internal/profile"
-	"lazyrecall/internal/schema"
-	"lazyrecall/internal/search"
-	"lazyrecall/internal/sqlitex"
+	"github.com/rfist/lazyrecall/internal/annotate"
+	"github.com/rfist/lazyrecall/internal/config"
+	"github.com/rfist/lazyrecall/internal/profile"
+	"github.com/rfist/lazyrecall/internal/schema"
+	"github.com/rfist/lazyrecall/internal/search"
+	"github.com/rfist/lazyrecall/internal/sqlitex"
 )
 
 // All fixtures below are synthetic, hand-written data - never real session

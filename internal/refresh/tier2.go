@@ -4,11 +4,11 @@ import (
 	"strconv"
 	"time"
 
-	"lazyrecall/internal/adapter"
-	claudeadapter "lazyrecall/internal/adapter/claude"
-	hermesadapter "lazyrecall/internal/adapter/hermes"
-	ompadapter "lazyrecall/internal/adapter/omp"
-	"lazyrecall/internal/transcript"
+	"github.com/rfist/lazyrecall/internal/adapter"
+	claudeadapter "github.com/rfist/lazyrecall/internal/adapter/claude"
+	hermesadapter "github.com/rfist/lazyrecall/internal/adapter/hermes"
+	ompadapter "github.com/rfist/lazyrecall/internal/adapter/omp"
+	"github.com/rfist/lazyrecall/internal/transcript"
 )
 
 // tier2ForSource ingests one source's prompts for the search index (task
