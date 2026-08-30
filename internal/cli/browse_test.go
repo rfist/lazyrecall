@@ -371,21 +371,26 @@ func TestSpatialMoveSkipsUndrawnLeftColumn(t *testing.T) {
 	}
 }
 
-// When the body is too short to give every left panel a usable window,
-// geometry drops Tags on its own (tagsH == 0) even though the rest of the
-// left column is still drawn. J from Repos must not land on the panel that
-// is not being drawn - and since Tags is the last panel in the column,
-// there is nothing further to continue to, so the move does nothing.
-func TestSpatialMoveSkipsDroppedTagsPanel(t *testing.T) {
+// The accordion layout keeps every left panel on screen at every height:
+// a collapsed panel costs one header line, so the "rest < 8" branch that
+// used to drop Tags (tagsH == 0) on a short terminal is gone. At the old
+// vanishing size, J from Repos now moves onto Tags instead of finding
+// nothing drawn and doing nothing. This test used to assert the drop - it
+// was called TestSpatialMoveSkipsDroppedTagsPanel - and was rewritten the
+// other way around when the accordion made a dropped Tags impossible.
+func TestSpatialMoveReachesTagsOnAShortTerminal(t *testing.T) {
 	m := fixtureBrowser(t)
 	m = update(t, m, tea.WindowSizeMsg{Width: 100, Height: 18})
-	if g := m.geometry(); !g.sidebar || g.tagsH != 0 {
-		t.Fatalf("fixture at 100x18 has sidebar=%v tagsH=%d, want sidebar and tagsH=0 for this test to mean anything", g.sidebar, g.tagsH)
+	if g := m.geometry(); !g.sidebar || g.tagsH < 1 {
+		t.Fatalf("fixture at 100x18 has sidebar=%v tagsH=%d, want a drawn Tags panel for this test to mean anything", g.sidebar, g.tagsH)
+	}
+	if !m.panelDrawn(panelTags) {
+		t.Fatal("Tags is not drawn at 100x18; the accordion was supposed to keep every panel visible")
 	}
 	m.focus = panelRepos
 	m = update(t, m, keyRunes("J"))
-	if m.focus != panelRepos {
-		t.Errorf("J from Repos with Tags dropped landed on %v, want it to stay on Repos", m.focus)
+	if m.focus != panelTags {
+		t.Errorf("J from Repos landed on %v, want Tags now that every left panel is drawn", m.focus)
 	}
 }
 
@@ -421,26 +426,131 @@ func TestResizeMovesFocusOffAPanelThatDisappears(t *testing.T) {
 	}
 }
 
-// TestTabDoesNotLandOnZeroHeightTagsPanel is the other half of defect 2:
-// moveFocus (Tab) only checked geometry().sidebar, not panelDrawn, so on a
-// short terminal where the sidebar exists but geometry sets tagsH to 0
-// (the "rest < 8" branch - see TestSpatialMoveSkipsDroppedTagsPanel, which
-// establishes this same 100x18 fixture drops Tags on its own), Tab from
-// Repos would stop cycling the instant it reached Tags, landing on a panel
-// with no lines to draw.
-func TestTabDoesNotLandOnZeroHeightTagsPanel(t *testing.T) {
+// Tab used to have to skip a zero-height Tags panel on a short terminal
+// (moveFocus checked the sidebar bool, not per-panel drawnness, and
+// geometry's "rest < 8" branch set tagsH to 0 - see
+// TestSpatialMoveReachesTagsOnAShortTerminal for the same fixture and the
+// same reversal). There is no zero-height Tags any more: every left panel
+// is at least a header whenever the sidebar is drawn, so Tab from Repos
+// cycles straight onto Tags, which is focused, expanded, and drawn. This
+// test was called TestTabDoesNotLandOnZeroHeightTagsPanel and was rewritten
+// with the behavior it used to forbid.
+func TestTabLandsOnTagsOnAShortTerminal(t *testing.T) {
 	m := fixtureBrowser(t)
 	m = update(t, m, tea.WindowSizeMsg{Width: 100, Height: 18})
-	if g := m.geometry(); !g.sidebar || g.tagsH != 0 {
-		t.Fatalf("fixture at 100x18 has sidebar=%v tagsH=%d, want sidebar and tagsH=0 for this test to mean anything", g.sidebar, g.tagsH)
+	if g := m.geometry(); !g.sidebar || g.tagsH < 1 {
+		t.Fatalf("fixture at 100x18 has sidebar=%v tagsH=%d, want a drawn Tags panel for this test to mean anything", g.sidebar, g.tagsH)
 	}
 	m.focus = panelRepos
 	m = update(t, m, tea.KeyMsg{Type: tea.KeyTab})
-	if m.focus == panelTags {
-		t.Error("Tab from Repos landed on Tags, which this terminal size draws at zero height")
+	if m.focus != panelTags {
+		t.Errorf("Tab from Repos landed on %v, want Tags now that every left panel is drawn", m.focus)
 	}
 	if !m.panelDrawn(m.focus) {
 		t.Errorf("Tab left focus on %v, which is not currently drawn", m.focus)
+	}
+}
+
+// ---------------------------------------------------------------------
+// Accordion side panels
+// ---------------------------------------------------------------------
+
+// Every left panel is drawn at every height the sidebar exists at. The old
+// layout's floor was a three-line box, so four panels stopped fitting below
+// a certain body height and Tags was dropped (the "rest < 8" branch); a
+// collapsed panel's floor is one header line, so 100x18 - the size that
+// used to drop Tags - now shows all four.
+func TestAllSidePanelsDrawnAtShortHeight(t *testing.T) {
+	m := fixtureBrowser(t)
+	m = update(t, m, tea.WindowSizeMsg{Width: 100, Height: 18})
+	if g := m.geometry(); !g.sidebar {
+		t.Fatal("fixture at 100x18 has no sidebar; pick a wider terminal for this test to mean anything")
+	}
+	g := m.geometry()
+	if g.profilesH < 1 || g.agentsH < 1 || g.reposH < 1 || g.tagsH < 1 {
+		t.Errorf("a side panel has zero height at 100x18: %+v", g)
+	}
+	for _, p := range []panelID{panelProfiles, panelAgents, panelRepos, panelTags} {
+		if !m.panelDrawn(p) {
+			t.Errorf("%s is not drawn at 100x18", p.title())
+		}
+	}
+}
+
+// The focused panel takes the space the others give up: the three unfocused
+// panels are one-line headers, the focused one gets everything that is left,
+// and the four still tile the column exactly - the invariant that keeps the
+// frame from outgrowing the terminal.
+func TestFocusedPanelIsTallerThanTheUnfocusedOnes(t *testing.T) {
+	m := fixtureBrowser(t)
+	m = update(t, m, keyRunes("2")) // Agents
+	g := m.geometry()
+	if g.agentsH <= g.profilesH || g.agentsH <= g.reposH || g.agentsH <= g.tagsH {
+		t.Errorf("focused Agents (%d) is not taller than the unfocused panels (P=%d R=%d T=%d)", g.agentsH, g.profilesH, g.reposH, g.tagsH)
+	}
+	if g.profilesH != 1 || g.reposH != 1 || g.tagsH != 1 {
+		t.Errorf("unfocused panels are not one-line headers: P=%d R=%d T=%d", g.profilesH, g.reposH, g.tagsH)
+	}
+	if g.profilesH+g.agentsH+g.reposH+g.tagsH != g.bodyHeight {
+		t.Errorf("left column %d != body %d", g.profilesH+g.agentsH+g.reposH+g.tagsH, g.bodyHeight)
+	}
+}
+
+// The expansion follows focus: the panel a Tab or a digit key lands on is
+// the one that gets the space, so moving from Profiles to Repos and back
+// swaps which of the two is tall and which is a header.
+func TestMovingFocusMovesTheExpansion(t *testing.T) {
+	m := fixtureBrowser(t)
+	m = update(t, m, keyRunes("1")) // Profiles
+	g := m.geometry()
+	if g.profilesH != g.bodyHeight-3 || g.agentsH != 1 || g.reposH != 1 || g.tagsH != 1 {
+		t.Fatalf("with Profiles focused: P=%d A=%d R=%d T=%d, want P=body-3 and the rest 1", g.profilesH, g.agentsH, g.reposH, g.tagsH)
+	}
+	m = update(t, m, keyRunes("3")) // Repos
+	g = m.geometry()
+	if g.reposH != g.bodyHeight-3 || g.profilesH != 1 || g.agentsH != 1 || g.tagsH != 1 {
+		t.Fatalf("with Repos focused: P=%d A=%d R=%d T=%d, want R=body-3 and the rest 1", g.profilesH, g.agentsH, g.reposH, g.tagsH)
+	}
+}
+
+// With focus on the right column no left panel is focused, so the expansion
+// has to be decided by state rather than by focus: the panel carrying a
+// filter gets the space (it is the one whose state the user is relying on),
+// and Repos gets it when none does - it is the longest list on a real
+// machine, so the most likely to be worth looking at.
+func TestRightColumnFocusExpandsThePanelWithAFilterOrRepos(t *testing.T) {
+	m := fixtureBrowser(t)
+	m = update(t, m, keyRunes("0")) // Sessions
+	if g := m.geometry(); g.reposH != g.bodyHeight-3 {
+		t.Fatalf("with no filter applied the expansion should go to Repos, got R=%d want %d", g.reposH, g.bodyHeight-3)
+	}
+	m.agents.Sel = "pi"
+	m.rebuild()
+	if g := m.geometry(); g.agentsH != g.bodyHeight-3 {
+		t.Fatalf("with an agent filter the expansion should go to Agents, got A=%d want %d", g.agentsH, g.bodyHeight-3)
+	}
+}
+
+// A collapsed panel is a header line that still says what it filters by:
+// with Repos collapsed and a repository applied, the header carries that
+// repository instead of a bare title, so the filter is never invisible just
+// because the panel lost its rows.
+func TestCollapsedPanelShowsItsAppliedValue(t *testing.T) {
+	m := fixtureBrowser(t)
+	m.repos.Sel = "/Users/x/work/api"
+	m.rebuild()
+	m = update(t, m, keyRunes("2")) // Agents expands, Repos collapses
+	g := m.geometry()
+	box := m.facetPanel(panelRepos, &m.repos, g.leftWidth, g.reposH, m.repos.Sel)
+	if !box.Collapsed {
+		t.Fatal("Repos is not collapsed while Agents is focused")
+	}
+	line := box.render()
+	if !strings.Contains(line, "work/api") {
+		t.Errorf("collapsed Repos header %q does not show the applied filter", line)
+	}
+	if len(strings.Split(strings.TrimRight(line, "\n"), "\n")) != 1 {
+		t.Errorf("collapsed Repos renders %q, which is not a single line", line)
 	}
 }
 
@@ -851,8 +961,14 @@ func TestSwitchingProfileResetsTheView(t *testing.T) {
 	}
 }
 
+// The active profile is marked in the Profiles panel. The accordion layout
+// gives a side panel its rows only while it is the one expanded, so the
+// panel has to be focused first for this assertion to have rows to look at
+// - the unfocused Profiles panel is a one-line header by design, and there
+// is nothing in it to mark.
 func TestActiveProfileIsMarkedInThePanel(t *testing.T) {
 	m := fixtureBrowser(t)
+	m = update(t, m, keyRunes("1"))
 	g := m.geometry()
 	box := m.facetPanel(panelProfiles, &m.profiles_, g.leftWidth, g.profilesH, "")
 	if len(box.Lines) == 0 {
