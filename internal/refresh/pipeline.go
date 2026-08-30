@@ -173,8 +173,9 @@ func (e existingSessions) priorFor(id, transcriptPath string) *session.Session {
 // applyTranscript incrementally scans d's transcript, merges the result
 // into s (falling back to prior's already-known values for anything this
 // pass's delta didn't touch), and returns the updated session, the cursor
-// row to persist, and the raw prompts extracted (for tier 2 fallback).
-func (r *Refresher) applyTranscript(s session.Session, d adapter.Discovered, prior *session.Session, cur cursorRow) (session.Session, map[string]any, []transcript.PromptText) {
+// row to persist, the raw prompts extracted (for tier 2 fallback), and
+// whether a successful scan replaced the prior transcript.
+func (r *Refresher) applyTranscript(s session.Session, d adapter.Discovered, prior *session.Session, cur cursorRow) (session.Session, map[string]any, []transcript.PromptText, bool) {
 	// The cursor key must stay whatever adapter.Discover computed this
 	// session's SourceSessionID to be - the same value refresh.go used to
 	// look cur up in the first place - regardless of what this function may
@@ -185,17 +186,19 @@ func (r *Refresher) applyTranscript(s session.Session, d adapter.Discovered, pri
 	// forever (change fix-resume-session-identity).
 	cursorSourceID := s.SourceSessionID
 
+	rewritten := false
 	fromOffset := int64(0)
 	if cur.ByteOffset != nil {
 		fromOffset = *cur.ByteOffset
-		if sizeShrank(cur, d.FileSize) || leadingBytesChanged(cur, d.TranscriptPath) {
+		rewritten = transcriptRewritten(cur, d.FileSize, d.TranscriptPath)
+		if rewritten {
 			fromOffset = 0 // task 6.2: rewrite detected, re-read in full
 		}
 	}
 
 	vocab, ok := transcript.VocabFor(s.Source)
 	if !ok {
-		return s, nil, nil
+		return s, nil, nil, false
 	}
 
 	res, err := transcript.Scan(d.TranscriptPath, fromOffset, vocab)
@@ -208,7 +211,19 @@ func (r *Refresher) applyTranscript(s session.Session, d adapter.Discovered, pri
 			mergePrior(&s, prior)
 		}
 		s.TranscriptPath = &d.TranscriptPath
-		return s, cursorRecord(s.Source, cursorSourceID, fromOffset, d.FileSize, ""), nil
+		return s, cursorRecord(s.Source, cursorSourceID, fromOffset, d.FileSize, ""), nil, false
+	}
+
+	// A successful from-zero re-read after a rewrite is a new transcript,
+	// not another delta of the old one. Every row value applyTranscript
+	// normally folds forward comes from transcript bytes: CWD, branch, topic,
+	// custom title, last prompt, the recorded source id, HumanPrompt, Origin,
+	// Client, compaction events, record count, last activity, and end state.
+	// None can survive replacement; Git roots are derived from CWD and the
+	// caller applies this same check before preserving those too. Annotations
+	// need no exception here: they live on lineages, never on this row.
+	if rewritten {
+		prior = nil
 	}
 
 	if res.CWD != nil {
@@ -260,13 +275,14 @@ func (r *Refresher) applyTranscript(s session.Session, d adapter.Discovered, pri
 	// to.
 	s.HumanPrompt = res.HumanPrompt || (prior != nil && prior.HumanPrompt)
 
-	// Origin: this pass's scan either named one (the strongest signal any
-	// of its records carried - transcript.Scan already folded them, so one
-	// automated record decides), or a prior pass did, or the session stays
-	// unknown (sources that record no entrypoint field, or a delta whose
-	// records never carried one - the field rides the first record, so an
-	// incremental scan past it sees it only via prior).
-	if res.Origin != session.OriginUnknown {
+	// Origin folds across passes with the same precedence Scan uses within
+	// one pass: any automated record decides, and an interactive result only
+	// wins when neither this delta nor an earlier one found automation.
+	// HumanPrompt below remains the one explicit override: it is source
+	// evidence about a person rather than another entrypoint classification.
+	if res.Origin == session.OriginAutomated || (prior != nil && prior.Origin == session.OriginAutomated) {
+		s.Origin = session.OriginAutomated
+	} else if res.Origin != session.OriginUnknown {
 		s.Origin = res.Origin
 	} else if prior != nil {
 		s.Origin = prior.Origin
@@ -358,7 +374,8 @@ func (r *Refresher) applyTranscript(s session.Session, d adapter.Discovered, pri
 	s.TranscriptPath = &d.TranscriptPath
 
 	hash, _ := leadingBytesHash(d.TranscriptPath, 256)
-	return s, cursorRecord(s.Source, cursorSourceID, res.EndOffset, d.FileSize, hash), res.Prompts
+	return s, cursorRecord(s.Source, cursorSourceID, res.EndOffset, d.FileSize, hash), res.Prompts, rewritten
+
 }
 
 func mergePrior(s *session.Session, prior *session.Session) {
@@ -389,6 +406,15 @@ func mergePrior(s *session.Session, prior *session.Session) {
 	s.Compaction = prior.Compaction
 	s.MessageCount = prior.MessageCount
 	s.LastActivityAt = prior.LastActivityAt
+}
+
+// transcriptRewritten identifies a cursor whose saved prefix cannot belong
+// to path any more. It is shared by the transcript merge and the caller's
+// CWD-derived Git cache merge: both must reject the same prior row, or a
+// replacement could combine fresh transcript facts with stale repository
+// identity.
+func transcriptRewritten(cur cursorRow, fileSize int64, path string) bool {
+	return sizeShrank(cur, fileSize) || leadingBytesChanged(cur, path)
 }
 
 // sizeShrank is the cheap first rewrite check (task 6.2): a file that is
