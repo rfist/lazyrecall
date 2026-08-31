@@ -1589,7 +1589,25 @@ func (g *geometry) wideHeights(m browseModel) {
 		expanded = panelTags
 	}
 
-	if g.bodyHeight >= 4 {
+	// Accordion only when the column cannot afford four panels at once.
+	// Profiles and Agents are short, known-length lists and need only what
+	// they hold; if what is left over still gives Repos and Tags a usable
+	// window each, every panel shows content and nothing collapses. That is
+	// the sizing this browser had before the accordion, and it is the right
+	// one whenever there is room: a wide, tall terminal has space for all
+	// four, and collapsing three of them there hides dimensions the user
+	// could otherwise read at a glance without pressing anything.
+	//
+	// The accordion below is for the case that sizing could not handle -
+	// the old "rest < 8" branch, which dropped Tags outright. Collapsing a
+	// panel to a header line is strictly better than deleting it, but it is
+	// a concession to a short column, not an improvement on a roomy one.
+	if room := g.bodyHeight - boxHeight(len(m.profiles_.rows), 1, 4) - boxHeight(len(m.agents.rows), 1, 5); room >= 8 {
+		g.profilesH = boxHeight(len(m.profiles_.rows), 1, 4)
+		g.agentsH = boxHeight(len(m.agents.rows), 1, 5)
+		g.reposH = room * 3 / 5
+		g.tagsH = room - g.reposH
+	} else if g.bodyHeight >= 4 {
 		g.profilesH, g.agentsH, g.reposH, g.tagsH = 1, 1, 1, 1
 		switch expanded {
 		case panelProfiles:
@@ -1725,6 +1743,19 @@ func (g *geometry) narrowHeights(focus panelID) {
 	g.tagsH = heights[panelTags]
 	g.sessionsH = heights[panelSessions]
 	g.detailH = heights[panelDetail]
+}
+
+// boxHeight is the outer height a panel needs to show n rows, clamped to
+// between min and max content rows. Used by the roomy left-column sizing,
+// where a panel takes only what its list actually holds.
+func boxHeight(n, minRows, maxRows int) int {
+	if n < minRows {
+		n = minRows
+	}
+	if n > maxRows {
+		n = maxRows
+	}
+	return n + 2
 }
 
 func maxInt(a, b int) int {

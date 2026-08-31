@@ -571,6 +571,12 @@ func TestAllSidePanelsDrawnAtShortHeight(t *testing.T) {
 // frame from outgrowing the terminal.
 func TestFocusedPanelIsTallerThanTheUnfocusedOnes(t *testing.T) {
 	m := fixtureBrowser(t)
+	// A short column: the fixture's Profiles and Agents take 10 rows
+	// between them, so anything under a body of 18 leaves Repos and Tags
+	// too little to share and the accordion takes over. At a taller size
+	// the roomy sizing applies instead and every panel keeps its content,
+	// which is what this test would otherwise be asserting against.
+	m = update(t, m, tea.WindowSizeMsg{Width: 100, Height: 18})
 	m = update(t, m, keyRunes("2")) // Agents
 	g := m.geometry()
 	if g.agentsH <= g.profilesH || g.agentsH <= g.reposH || g.agentsH <= g.tagsH {
@@ -589,6 +595,12 @@ func TestFocusedPanelIsTallerThanTheUnfocusedOnes(t *testing.T) {
 // swaps which of the two is tall and which is a header.
 func TestMovingFocusMovesTheExpansion(t *testing.T) {
 	m := fixtureBrowser(t)
+	// A short column: the fixture's Profiles and Agents take 10 rows
+	// between them, so anything under a body of 18 leaves Repos and Tags
+	// too little to share and the accordion takes over. At a taller size
+	// the roomy sizing applies instead and every panel keeps its content,
+	// which is what this test would otherwise be asserting against.
+	m = update(t, m, tea.WindowSizeMsg{Width: 100, Height: 18})
 	m = update(t, m, keyRunes("1")) // Profiles
 	g := m.geometry()
 	if g.profilesH != g.bodyHeight-3 || g.agentsH != 1 || g.reposH != 1 || g.tagsH != 1 {
@@ -608,6 +620,12 @@ func TestMovingFocusMovesTheExpansion(t *testing.T) {
 // machine, so the most likely to be worth looking at.
 func TestRightColumnFocusExpandsThePanelWithAFilterOrRepos(t *testing.T) {
 	m := fixtureBrowser(t)
+	// A short column: the fixture's Profiles and Agents take 10 rows
+	// between them, so anything under a body of 18 leaves Repos and Tags
+	// too little to share and the accordion takes over. At a taller size
+	// the roomy sizing applies instead and every panel keeps its content,
+	// which is what this test would otherwise be asserting against.
+	m = update(t, m, tea.WindowSizeMsg{Width: 100, Height: 18})
 	m = update(t, m, keyRunes("0")) // Sessions
 	if g := m.geometry(); g.reposH != g.bodyHeight-3 {
 		t.Fatalf("with no filter applied the expansion should go to Repos, got R=%d want %d", g.reposH, g.bodyHeight-3)
@@ -625,6 +643,16 @@ func TestRightColumnFocusExpandsThePanelWithAFilterOrRepos(t *testing.T) {
 // because the panel lost its rows.
 func TestCollapsedPanelShowsItsAppliedValue(t *testing.T) {
 	m := fixtureBrowser(t)
+	// A short column: the fixture's Profiles and Agents take 10 rows
+	// between them, so anything under a body of 18 leaves Repos and Tags
+	// too little to share and the accordion takes over. At a taller size
+	// the roomy sizing applies instead and every panel keeps its content,
+	// which is what this test would otherwise be asserting against.
+	// Shorter than the other accordion tests on purpose: applying a
+	// repository filter shrinks the Agents list, which gives the column
+	// back rows and tips it into the roomy sizing at 18. 14 keeps it short
+	// however the facets narrow.
+	m = update(t, m, tea.WindowSizeMsg{Width: 100, Height: 14})
 	m.repos.Sel = "/Users/x/work/api"
 	m.rebuild()
 	m = update(t, m, keyRunes("2")) // Agents expands, Repos collapses
