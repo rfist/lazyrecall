@@ -2300,3 +2300,133 @@ func TestEveryOfferedFacetRowLeadsSomewhere(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------
+// Half-page scrolling in the detail pane
+// ---------------------------------------------------------------------
+
+// Ctrl-D/Ctrl-U used to move the detail pane a single line: the pane is not
+// a facet, so the height lookup reported zero for it and the half-page
+// distance fell through to its one-line floor. A long transcript is what
+// made it obvious.
+func TestHalfScreenUsesTheDetailPaneHeight(t *testing.T) {
+	m := fixtureBrowser(t)
+	m.focus = panelDetail
+	inner := m.geometry().detailInner
+	if inner < 4 {
+		t.Fatalf("detail pane is %d rows at the fixture size; too small for this test to mean anything", inner)
+	}
+	if got, want := m.halfScreen(), inner/2; got != want {
+		t.Errorf("halfScreen on the detail pane = %d, want half of its %d inner rows (%d)", got, inner, want)
+	}
+}
+
+// ---------------------------------------------------------------------
+// J/K in the stacked layout
+// ---------------------------------------------------------------------
+
+// When the terminal is too narrow for two columns every panel is stacked
+// into one, so J and K have to walk the whole stack. They used to follow a
+// table written for the two-column layout, which left Sessions and Detail
+// unreachable by J even though they are drawn directly below Tags.
+func TestSpatialDownWalksTheWholeStackWhenNarrow(t *testing.T) {
+	m := fixtureBrowser(t)
+	m = update(t, m, tea.WindowSizeMsg{Width: 60, Height: 24})
+	if m.geometry().sidebar {
+		t.Fatal("fixture at 60x24 still draws two columns; pick a narrower width")
+	}
+
+	m.focus = panelProfiles
+	want := []panelID{panelAgents, panelRepos, panelTags, panelSessions, panelDetail}
+	for _, w := range want {
+		m = update(t, m, keyRunes("J"))
+		if m.focus != w {
+			t.Fatalf("J landed on %v, want %v (walking the stack from Profiles)", m.focus, w)
+		}
+	}
+	// And back up again.
+	for i := len(want) - 2; i >= 0; i-- {
+		m = update(t, m, keyRunes("K"))
+		if m.focus != want[i] {
+			t.Fatalf("K landed on %v, want %v (walking back up the stack)", m.focus, want[i])
+		}
+	}
+}
+
+// The two-column layout must be unchanged by that: J from Tags stays put,
+// because Sessions is in the other column there, not below it.
+func TestSpatialDownStopsAtTheColumnEndWhenWide(t *testing.T) {
+	m := fixtureBrowser(t)
+	if !m.geometry().sidebar {
+		t.Fatal("fixture is not in the two-column layout")
+	}
+	m.focus = panelTags
+	m = update(t, m, keyRunes("J"))
+	if m.focus != panelTags {
+		t.Errorf("J from Tags landed on %v; with two columns Tags is the bottom of its own", m.focus)
+	}
+}
+
+// ---------------------------------------------------------------------
+// d: remove the tag under the cursor
+// ---------------------------------------------------------------------
+
+func TestRemoveTagUnderCursor(t *testing.T) {
+	m := fixtureBrowser(t)
+	// The fixture tags L0 and L2 "wip"; L0 is the newest, so it is the
+	// selected row.
+	if it := m.current(); it == nil || !hasTag(*it, "wip") {
+		t.Fatalf("expected the selected session to carry the fixture tag, got %+v", m.current())
+	}
+	m = update(t, m, keyRunes("4")) // Tags panel
+	if m.focus != panelTags {
+		t.Fatalf("focus is %v, want Tags", m.focus)
+	}
+	m.tags.cursor = 0
+	tag := m.tags.rows[0].Value
+
+	m = update(t, m, keyRunes("d"))
+	if it := m.current(); it != nil && hasTag(*it, tag) {
+		t.Errorf("session still carries #%s after d", tag)
+	}
+	if !strings.Contains(m.notice, tag) {
+		t.Errorf("notice = %q, want it to name the tag that was removed", m.notice)
+	}
+}
+
+// d elsewhere must not guess which tag was meant - it says where the key
+// works instead of removing something the user never pointed at.
+func TestRemoveTagUnderCursorOnlyActsInTheTagsPanel(t *testing.T) {
+	m := fixtureBrowser(t)
+	m.focus = panelSessions
+	before := m.current().Tags
+
+	m = update(t, m, keyRunes("d"))
+	if got := m.current().Tags; len(got) != len(before) {
+		t.Errorf("d outside the Tags panel changed the tags from %v to %v", before, got)
+	}
+	if !strings.Contains(m.notice, "Tags panel") {
+		t.Errorf("notice = %q, want it to say where d works", m.notice)
+	}
+}
+
+// The Tags panel lists every tag in the profile, so the cursor can easily
+// be on one the selected session does not carry. Removing it would report
+// success and change nothing, which reads as the key having failed.
+func TestRemoveTagUnderCursorSaysWhenTheSessionLacksTheTag(t *testing.T) {
+	m := fixtureBrowser(t)
+	if err := annotate.AddTag(m.db, "L1", "other-tag"); err != nil {
+		t.Fatal(err)
+	}
+	m.loadAll()
+	m = update(t, m, keyRunes("4"))
+	for i, r := range m.tags.rows {
+		if r.Value == "other-tag" {
+			m.tags.cursor = i
+		}
+	}
+	m = update(t, m, keyRunes("d"))
+	if !strings.Contains(m.notice, "not tagged") {
+		t.Errorf("notice = %q, want it to say the selected session does not carry the tag", m.notice)
+	}
+}

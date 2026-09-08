@@ -69,12 +69,13 @@ A session held somewhere other than the agent's own terminal - a Neovim CodeComp
 | `esc` | Clear what this panel is filtering by |
 | `[` / `]` | Previous / next tab in the detail pane (Detail, Prompts, Transcript, Comments) |
 | `n` / `N` | On the Transcript tab, scroll to the next / previous occurrence of the search phrase |
+| `d` | Take the tag under the cursor off the selected session (Tags panel) |
 | `/` | Keep only the focused panel's rows containing what you type |
 | `s` | Full-text search over your own prompts |
 | `x` | Action menu for the focused panel |
 | `X` | Clear all filters |
 | `R` | Refresh the index |
-| `m` / `M` | Add / remove a tag on the selected session |
+| `m` / `M` | Add / remove a tag on the selected session (`d` in the Tags panel is usually easier) |
 | `c` / `C` | Add / remove a comment on the selected session |
 | `?` | Show this list |
 | `q`, `Ctrl-C` | Quit |
@@ -87,9 +88,9 @@ The right-hand pane has four tabs, reached with `[` and `]`.
 
 **Prompts** is what you actually typed in that session, which is usually the only part of it you remember.
 
-**Transcript** is the conversation itself - your turns, the agent's replies, the tools it called, and any compaction boundaries - read straight from the agent's own transcript file when you select the session. It exists so you can tell whether a session is the one you meant *before* resuming it, since resuming takes over the terminal and moves you into the session's working directory. The end of the conversation is what it keeps: how a session started is already answered by Prompts, and what you need before resuming is where it was left. When there is a search phrase in play, every occurrence is highlighted and `n` / `N` step through them.
+**Transcript** is the conversation itself - your turns, the agent's replies, the tools it called, and any compaction boundaries - read when you select the session. It exists so you can tell whether a session is the one you meant *before* resuming it, since resuming takes over the terminal and moves you into the session's working directory. The end of the conversation is what it keeps: how a session started is already answered by Prompts, and what you need before resuming is where it was left. When there is a search phrase in play, every occurrence is highlighted and `n` / `N` step through them.
 
-The four sources that keep their sessions in a SQLite database rather than in per-session files (`hermes`, `goose`, `opencode`, `antigravity`) write no transcript at all, and the tab says so rather than reporting an error. A transcript the agent has since cleaned up is reported the same way.
+It works for every source but one, from whichever place that source keeps its conversation. `claude`, `pi` and `omp` write transcript files, which are read directly. `hermes`, `goose`, `opencode` and `kilo` write no files at all, but the conversation is in the same database lazyrecall already reads for the session list, so it is read back from there - no agent is ever invoked to fetch it. `antigravity` is the exception: its per-conversation detail is protobuf with no available schema, so the tab says the format cannot be decoded rather than reporting an error. A transcript file the agent has since cleaned up is reported in the same spirit.
 
 **Comments** is your own freeform notes on the session, with the ids `comment rm` takes.
 
@@ -103,11 +104,12 @@ The four sources that keep their sessions in a SQLite database rather than in pe
 | `hermes` | SQLite at `~/.hermes/state.db` | niche |
 | `goose` (Block's Goose) | SQLite at `~/.local/share/goose/sessions/sessions.db` | niche |
 | `opencode` | SQLite at `~/.local/share/opencode/opencode.db` | niche |
+| `kilo` | SQLite at `~/.local/share/kilo/kilo.db` | niche |
 | `antigravity` (Antigravity CLI, `agy`) | SQLite at `~/.gemini/antigravity-cli/conversation_summaries.db`; listing only, not full-text searchable - see note below | niche |
 
 Plainly: if you use Claude Code, `claude` is the one you will actually have; the rest are niche tools most people will not have installed at all. Each source is a set of roots to scan plus an adapter; new sources are added via the `[sources]` config table (see [Configuration](#configuration)) and an adapter in the code.
 
-`goose`, `opencode`, and `antigravity` keep everything in one SQLite database rather than per-session transcript files, the same shape `hermes` already used - so they need no transcript parser, just a query. `antigravity` is the exception worth knowing about: its per-conversation detail is stored as protobuf with no available schema to decode, so its sessions show up with a topic, working directory, and end time like everything else, but `s` (full-text prompt search) will never find anything inside them - only their title/preview, which `/` (the row filter) already covers.
+`goose`, `opencode`, `kilo`, and `antigravity` keep everything in one SQLite database rather than per-session transcript files, the same shape `hermes` already used - so they need no transcript parser, just a query. `kilo` ships `opencode`'s schema and `--session` flag verbatim under its own name, so one adapter serves both. `antigravity` is the exception worth knowing about: its per-conversation detail is stored as protobuf with no available schema to decode, so its sessions show up with a topic, working directory, and end time like everything else, but `s` (full-text prompt search) will never find anything inside them - only their title/preview, which `/` (the row filter) already covers.
 
 ## Configuration
 
@@ -116,8 +118,8 @@ Configuration is optional and lives at `~/.config/lazyrecall/config.toml` (`$LAZ
 | Key | Default |
 | --- | --- |
 | `default_profile` | (none; the program applies its own rule) |
-| `sources.<agent>.roots` | `claude`: `["~/.claude-personal", "~/.claude"]`, `pi`: `["~/.pi"]`, `omp`: `["~/.omp"]`, `hermes`: `["~/.hermes"]`, `goose`: `["~/.local/share/goose/sessions"]`, `opencode`: `["~/.local/share/opencode"]`, `antigravity`: `["~/.gemini/antigravity-cli"]` |
-| `sources.<agent>.resume` | `claude --resume {id}`, `pi --session {id}`, `omp --resume {id}`, `hermes --resume {id}`, `goose session --resume --session-id {id}`, `opencode --session {id}`, `agy --conversation {id}` |
+| `sources.<agent>.roots` | `claude`: `["~/.claude-personal", "~/.claude"]`, `pi`: `["~/.pi"]`, `omp`: `["~/.omp"]`, `hermes`: `["~/.hermes"]`, `goose`: `["~/.local/share/goose/sessions"]`, `opencode`: `["~/.local/share/opencode"]`, `kilo`: `["~/.local/share/kilo"]`, `antigravity`: `["~/.gemini/antigravity-cli"]` |
+| `sources.<agent>.resume` | `claude --resume {id}`, `pi --session {id}`, `omp --resume {id}`, `hermes --resume {id}`, `goose session --resume --session-id {id}`, `opencode --session {id}`, `kilo --session {id}`, `agy --conversation {id}` |
 | `sources.<agent>.env_var` | `claude`: `CLAUDE_CONFIG_DIR`; the rest: none |
 | `sources.<agent>.single_install` | everything but `claude`: `true` |
 | `hide.non_interactive` | `true` |
