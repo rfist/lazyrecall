@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,7 +9,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rfist/lazyrecall/internal/profile"
 	"github.com/rfist/lazyrecall/internal/search"
+	"github.com/rfist/lazyrecall/internal/sqlitex"
 )
 
 // All transcript content below is synthetic, hand-written test data -
@@ -30,13 +33,19 @@ func writeFixtureTranscript(t *testing.T) string {
 	return p
 }
 
+// noProfile stands in for the profile resolver the database-backed sources
+// need. These tests all use claude, which reads a file and never asks.
+func noProfile() (profile.Profile, error) {
+	return profile.Profile{}, errors.New("no profile in this test")
+}
+
 func transcriptItem(path string) search.Item {
 	return search.Item{SessionID: "claude:p:s0", Source: "claude", TranscriptPath: &path}
 }
 
 func TestTranscriptTabRendersTheConversation(t *testing.T) {
 	c := &conversationCache{}
-	out := renderItemTranscript(c, transcriptItem(writeFixtureTranscript(t)), "", RenderOptions{Width: 60})
+	out := renderItemTranscript(c, transcriptItem(writeFixtureTranscript(t)), "", noProfile, RenderOptions{Width: 60})
 
 	for _, want := range []string{
 		"you", "why is the migration failing",
@@ -55,21 +64,55 @@ func TestTranscriptTabRendersTheConversation(t *testing.T) {
 	}
 }
 
-// The sources that keep everything in a database write no transcript at
-// all. That is a fact about the agent, not a failure, and the tab has to
-// say so in those words - and point at the tab that does have something.
-func TestTranscriptTabExplainsDatabaseBackedSources(t *testing.T) {
-	c := &conversationCache{}
-	out := renderItemTranscript(c, search.Item{SessionID: "goose:p:s0", Source: "goose"}, "", RenderOptions{Width: 60})
+// A database-backed source is read from its own database rather than from a
+// transcript file, so the tab shows the conversation for it too. This is the
+// browser end of adapter.ConversationReader; the per-source queries are
+// tested in each adapter's own package.
+func TestTranscriptTabReadsADatabaseBackedSource(t *testing.T) {
+	root := t.TempDir()
+	r := &sqlitex.Runner{DBPath: filepath.Join(root, "state.db")}
+	if err := r.Exec(`
+CREATE TABLE messages (
+	id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, role TEXT NOT NULL,
+	content TEXT, tool_calls TEXT, tool_name TEXT, timestamp REAL NOT NULL
+);
+INSERT INTO messages (session_id, role, content, timestamp) VALUES
+  ('s_a', 'user', 'read from the database', 1000),
+  ('s_a', 'assistant', 'and answered from it', 1001);`); err != nil {
+		t.Fatal(err)
+	}
+	prof := func() (profile.Profile, error) {
+		return profile.Profile{Name: "p", Roots: map[string]string{"hermes": root}}, nil
+	}
 
-	if !strings.Contains(out, "database") {
-		t.Errorf("expected an explanation of a database-backed source, got:\n%s", out)
+	c := &conversationCache{}
+	it := search.Item{SessionID: "hermes:p:s_a", Source: "hermes", SourceSessionID: "s_a"}
+	out := renderItemTranscript(c, it, "", prof, RenderOptions{Width: 60})
+
+	if !strings.Contains(out, "read from the database") || !strings.Contains(out, "and answered from it") {
+		t.Errorf("expected the database-backed conversation, got:\n%s", out)
+	}
+	if c.source != sourceKeepsDatabase {
+		t.Errorf("cache source = %v, want sourceKeepsDatabase", c.source)
+	}
+}
+
+// antigravity is the one source whose conversations cannot be read at all -
+// protobuf with no available schema. That is a fact about the agent, not a
+// failure, and the tab says so in those words while pointing at the tab that
+// does have something.
+func TestTranscriptTabExplainsAnUndecodableSource(t *testing.T) {
+	c := &conversationCache{}
+	out := renderItemTranscript(c, search.Item{SessionID: "antigravity:p:s0", Source: "antigravity"}, "", noProfile, RenderOptions{Width: 60})
+
+	if !strings.Contains(out, "cannot decode") {
+		t.Errorf("expected an explanation that the format cannot be decoded, got:\n%s", out)
 	}
 	if !strings.Contains(out, "Prompts") {
 		t.Errorf("expected a pointer to the Prompts tab, got:\n%s", out)
 	}
 	if strings.Contains(strings.ToLower(out), "error") {
-		t.Errorf("a source with no transcript is not an error:\n%s", out)
+		t.Errorf("an undecodable source is not an error:\n%s", out)
 	}
 }
 
@@ -79,7 +122,7 @@ func TestTranscriptTabExplainsDatabaseBackedSources(t *testing.T) {
 // agent's storage shape.
 func TestTranscriptTabDistinguishesAMissingPathFromADatabaseSource(t *testing.T) {
 	c := &conversationCache{}
-	out := renderItemTranscript(c, search.Item{SessionID: "claude:p:s0", Source: "claude"}, "", RenderOptions{Width: 60})
+	out := renderItemTranscript(c, search.Item{SessionID: "claude:p:s0", Source: "claude"}, "", noProfile, RenderOptions{Width: 60})
 
 	if strings.Contains(out, "database") {
 		t.Errorf("claude keeps transcripts; this is a missing path, not a database source:\n%s", out)
@@ -95,7 +138,7 @@ func TestTranscriptTabDistinguishesAMissingPathFromADatabaseSource(t *testing.T)
 func TestTranscriptTabExplainsAMissingFile(t *testing.T) {
 	c := &conversationCache{}
 	gone := filepath.Join(t.TempDir(), "cleaned-up.jsonl")
-	out := renderItemTranscript(c, transcriptItem(gone), "", RenderOptions{Width: 60})
+	out := renderItemTranscript(c, transcriptItem(gone), "", noProfile, RenderOptions{Width: 60})
 
 	if !strings.Contains(out, "cleaned it up") {
 		t.Errorf("expected the cleanup explanation, got:\n%s", out)
@@ -104,7 +147,7 @@ func TestTranscriptTabExplainsAMissingFile(t *testing.T) {
 
 func TestTranscriptTabRecordsMatchLinesForTheSearchPhrase(t *testing.T) {
 	c := &conversationCache{}
-	out := renderItemTranscript(c, transcriptItem(writeFixtureTranscript(t)), "migration", RenderOptions{Width: 60})
+	out := renderItemTranscript(c, transcriptItem(writeFixtureTranscript(t)), "migration", noProfile, RenderOptions{Width: 60})
 
 	if len(c.hits) != 3 {
 		t.Fatalf("hits = %v, want one per line containing the phrase:\n%s", c.hits, out)
@@ -131,11 +174,11 @@ func TestTranscriptTabCachesTheReadForTheSameSession(t *testing.T) {
 	it := transcriptItem(path)
 	c := &conversationCache{}
 
-	first := renderItemTranscript(c, it, "", RenderOptions{Width: 60})
+	first := renderItemTranscript(c, it, "", noProfile, RenderOptions{Width: 60})
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
-	second := renderItemTranscript(c, it, "", RenderOptions{Width: 60})
+	second := renderItemTranscript(c, it, "", noProfile, RenderOptions{Width: 60})
 
 	if first != second {
 		t.Errorf("second render re-read the file:\nfirst:\n%s\nsecond:\n%s", first, second)
@@ -146,10 +189,10 @@ func TestTranscriptTabCachesTheReadForTheSameSession(t *testing.T) {
 // transcript.
 func TestTranscriptTabRereadsForADifferentSession(t *testing.T) {
 	c := &conversationCache{}
-	renderItemTranscript(c, transcriptItem(writeFixtureTranscript(t)), "", RenderOptions{Width: 60})
+	renderItemTranscript(c, transcriptItem(writeFixtureTranscript(t)), "", noProfile, RenderOptions{Width: 60})
 
 	other := search.Item{SessionID: "claude:p:s1", Source: "claude"}
-	out := renderItemTranscript(c, other, "", RenderOptions{Width: 60})
+	out := renderItemTranscript(c, other, "", noProfile, RenderOptions{Width: 60})
 	if strings.Contains(out, "why is the migration failing") {
 		t.Errorf("a second session was served the first one's transcript:\n%s", out)
 	}

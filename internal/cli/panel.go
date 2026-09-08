@@ -20,13 +20,28 @@ import (
 	"github.com/mattn/go-runewidth"
 )
 
-// Border colours: the focused panel is the only bright thing on screen, so
-// "where am I" is answerable at a glance without reading any text.
+// Panel chrome colours: the focused panel is the only bright thing on
+// screen, so "where am I" is answerable at a glance without reading any
+// text.
+//
+// The title follows the border rather than being unconditionally bold. A
+// bold-white title on every panel made all six read as equally active and
+// put the chrome at the same weight as the content inside it, which is the
+// opposite of what the border colours are for: the eye should find the
+// focused panel first and the text second.
+// Unfocused chrome is ANSI 8 (the terminal's own "bright black") rather
+// than a fixed point on the 256-colour ramp. 240 sits high enough in that
+// ramp to render as light grey on a dark theme, which put the borders at
+// almost the same weight as the white text they were supposed to frame; 8
+// is whatever the user's theme has already chosen as its muted colour, so
+// it stays muted under a light theme too.
 var (
-	focusedBorder = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))   // cyan
-	blurredBorder = lipgloss.NewStyle().Foreground(lipgloss.Color("240")) // grey
-	panelTitle    = lipgloss.NewStyle().Bold(true)
-	panelCount    = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	focusedBorder = lipgloss.NewStyle().Foreground(lipgloss.Color("6")) // cyan
+	blurredBorder = lipgloss.NewStyle().Foreground(lipgloss.Color("8")) // the theme's dim grey
+	focusedTitle  = lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Bold(true)
+	blurredTitle  = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	focusedCount  = lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Bold(true)
+	panelCount    = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 )
 
 // panelBox describes one bordered panel. Width and Height are the box's
@@ -149,7 +164,10 @@ func (p panelBox) borderLine(paint func(string) string, annotation string, keepA
 	inner := p.innerWidth()
 	title := p.Title
 	if p.HasNumber {
-		title = itoa(p.Number) + " " + title
+		// Bracketed, the way lazygit writes its own jump keys: "[1] Repos"
+		// reads as a key you can press, where "1 Repos" reads as a count of
+		// one repo.
+		title = "[" + itoa(p.Number) + "] " + title
 	}
 	// The title can carry styling of its own - the detail pane's tab strip
 	// is a title - so both ends of the border are measured by visible
@@ -165,7 +183,13 @@ func (p panelBox) borderLine(paint func(string) string, annotation string, keepA
 		// Not enough room for the whole value, but it is still the reason
 		// the header exists, so shorten it rather than dropping it like a
 		// count - the two spaces bracketing it are what the 2 pays for.
-		annotation = truncateToWidth(annotation, maxInt(inner-visibleWidth(left)-2, 1))
+		//
+		// The tail is what is kept. A collapsed header's value is a
+		// repository path, a profile name or a tag, and when two of those
+		// have to be told apart it is the end that does it: "…/work/api"
+		// and "…/personal/api" are distinguishable where "/Users/x/wo…"
+		// and "/Users/x/pe…" are barely.
+		annotation = truncateToWidthTail(annotation, maxInt(inner-visibleWidth(left)-2, 1))
 		right = " " + annotation + " "
 		fill = inner - visibleWidth(left) - visibleWidth(right)
 	}
@@ -182,22 +206,67 @@ func (p panelBox) borderLine(paint func(string) string, annotation string, keepA
 	var b strings.Builder
 	b.WriteString(paint("╭"))
 	b.WriteString(paint("─"))
-	if p.Style {
-		b.WriteString(panelTitle.Render(title))
-	} else {
-		b.WriteString(title)
-	}
+	b.WriteString(p.renderTitle(title))
 	b.WriteString(paint(" "))
 	b.WriteString(paint(strings.Repeat("─", fill)))
 	if right != "" {
 		if p.Style {
-			b.WriteString(paint(" ") + panelCount.Render(annotation) + paint(" "))
+			count := panelCount
+			if p.Focused {
+				count = focusedCount
+			}
+			b.WriteString(paint(" ") + count.Render(annotation) + paint(" "))
 		} else {
 			b.WriteString(right)
 		}
 	}
 	b.WriteString(paint("╮"))
 	return b.String()
+}
+
+// renderTitle colours a panel's title to match its border, so a glance at
+// the chrome alone says which panel is live.
+//
+// A title that carries styling of its own is left exactly as it is: the
+// detail pane's title is the tab strip, which is already using bold and dim
+// to say which tab is active, and re-colouring the whole strip here would
+// overwrite that meaning with a different one.
+func (p panelBox) renderTitle(title string) string {
+	if !p.Style || strings.Contains(title, "\x1b") {
+		return title
+	}
+	if p.Focused {
+		return focusedTitle.Render(title)
+	}
+	return blurredTitle.Render(title)
+}
+
+// truncateToWidthTail is truncateToWidth's mirror: it keeps the *end* of s
+// and marks the cut with a leading ellipsis. Use it where the tail of a
+// value is what identifies it - a path, above all - and truncateToWidth
+// where the head is, which is the usual case for prose.
+func truncateToWidthTail(s string, maxWidth int) string {
+	if maxWidth <= 0 {
+		return ""
+	}
+	if runewidth.StringWidth(s) <= maxWidth {
+		return s
+	}
+	budget := maxWidth - runewidth.RuneWidth(ellipsisRune)
+	if budget < 0 {
+		return string(ellipsisRune)
+	}
+	runes := []rune(s)
+	w, start := 0, len(runes)
+	for i := len(runes) - 1; i >= 0; i-- {
+		rw := runewidth.RuneWidth(runes[i])
+		if w+rw > budget {
+			break
+		}
+		w += rw
+		start = i
+	}
+	return string(ellipsisRune) + string(runes[start:])
 }
 
 // padToWidth right-pads s with spaces to exactly w display columns,

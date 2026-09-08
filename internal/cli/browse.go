@@ -869,6 +869,8 @@ func (m *browseModel) handleBrowseKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.startInput(modeAddTag)
 	case "M":
 		return m.startInput(modeRemoveTag)
+	case "d":
+		m.removeTagUnderCursor()
 	case "c":
 		return m.startInput(modeAddComment)
 	case "C":
@@ -988,33 +990,17 @@ const (
 // the move against geometry that ceases to exist the moment it succeeds.
 func (m *browseModel) moveFocusSpatial(dir direction) {
 	var candidates []panelID
-	switch {
-	case dir == dirLeft && (m.focus == panelSessions || m.focus == panelDetail):
-		candidates = []panelID{panelProfiles}
-	case dir == dirRight && m.focus.isLeftColumn():
-		candidates = []panelID{panelSessions}
-	case dir == dirDown:
-		switch m.focus {
-		case panelProfiles:
-			candidates = []panelID{panelAgents, panelRepos, panelTags}
-		case panelAgents:
-			candidates = []panelID{panelRepos, panelTags}
-		case panelRepos:
-			candidates = []panelID{panelTags}
-		case panelSessions:
-			candidates = []panelID{panelDetail}
-		}
-	case dir == dirUp:
-		switch m.focus {
-		case panelAgents:
+	switch dir {
+	case dirLeft:
+		if m.focus == panelSessions || m.focus == panelDetail {
 			candidates = []panelID{panelProfiles}
-		case panelRepos:
-			candidates = []panelID{panelAgents, panelProfiles}
-		case panelTags:
-			candidates = []panelID{panelRepos, panelAgents, panelProfiles}
-		case panelDetail:
+		}
+	case dirRight:
+		if m.focus.isLeftColumn() {
 			candidates = []panelID{panelSessions}
 		}
+	case dirDown, dirUp:
+		candidates = m.columnNeighbours(dir)
 	}
 	for _, p := range candidates {
 		if m.panelDrawnWhenFocused(p) {
@@ -1023,6 +1009,48 @@ func (m *browseModel) moveFocusSpatial(dir direction) {
 			return
 		}
 	}
+}
+
+// visualColumn is the column containing p, in the order it is drawn top to
+// bottom. It is what makes J and K follow the screen rather than a fixed
+// table: when the terminal is too narrow for two columns every panel is
+// stacked into one, and a table written for the two-column layout leaves
+// Sessions and Detail unreachable by J/K there - they are directly below
+// Tags on screen, but the table says they are in a different column.
+func (m browseModel) visualColumn(p panelID) []panelID {
+	if !m.geometry().sidebar {
+		return []panelID{panelProfiles, panelAgents, panelRepos, panelTags, panelSessions, panelDetail}
+	}
+	if p.isLeftColumn() {
+		return []panelID{panelProfiles, panelAgents, panelRepos, panelTags}
+	}
+	return []panelID{panelSessions, panelDetail}
+}
+
+// columnNeighbours lists the panels J or K should consider, nearest first:
+// everything past the focused panel in that direction, so a collapsed or
+// undrawn neighbour is stepped over rather than blocking the move.
+func (m browseModel) columnNeighbours(dir direction) []panelID {
+	col := m.visualColumn(m.focus)
+	at := -1
+	for i, p := range col {
+		if p == m.focus {
+			at = i
+			break
+		}
+	}
+	if at < 0 {
+		return nil
+	}
+	var out []panelID
+	if dir == dirDown {
+		out = append(out, col[at+1:]...)
+		return out
+	}
+	for i := at - 1; i >= 0; i-- {
+		out = append(out, col[i])
+	}
+	return out
 }
 
 // move shifts the focused panel's cursor by delta.
@@ -1071,8 +1099,18 @@ func (m *browseModel) moveTo(idx int) {
 // halfScreen is the number of rows Ctrl-D/Ctrl-U move by in the focused
 // panel - half of that panel's height, by vim convention.
 func (m *browseModel) halfScreen() int {
-	h := m.geometry().sessionsInner
-	if m.focus != panelSessions {
+	g := m.geometry()
+	var h int
+	switch m.focus {
+	case panelSessions:
+		h = g.sessionsInner
+	case panelDetail:
+		// The detail pane is not a facet, so facetInnerHeight reports zero
+		// for it and Ctrl-D/Ctrl-U used to fall through to the one-line
+		// floor - a half-page key that scrolled a line, which is what a
+		// long transcript made obvious.
+		h = g.detailInner
+	default:
 		h = m.facetInnerHeight(m.focus)
 	}
 	if h /= 2; h < 1 {
@@ -1179,6 +1217,56 @@ func (m *browseModel) toggleArchive() {
 	m.notice = fmt.Sprintf("%s %s.", verb, it.SessionID)
 	m.detailOf = ""
 	m.loadAll()
+}
+
+// removeTagUnderCursor is "d" in the Tags panel: take the tag the cursor is
+// on off the selected session. It is the same operation as M, reached by
+// pointing at the tag instead of retyping it - which is the only way the
+// operation is usable at all once tags are longer than a word.
+//
+// It removes the tag from the selected session, not from every session that
+// carries it: the Tags panel is a filter over the whole profile, so a key
+// that deleted a tag everywhere would destroy other sessions' annotations
+// from a panel that never showed them. The notice names both the tag and
+// the session so what happened is never in doubt.
+func (m *browseModel) removeTagUnderCursor() {
+	if m.focus != panelTags {
+		m.notice = "d removes a tag - move to the Tags panel (4) and put the cursor on it."
+		return
+	}
+	f := m.facetFor(panelTags)
+	if f == nil || f.cursor < 0 || f.cursor >= len(f.rows) {
+		return
+	}
+	tag := f.rows[f.cursor].Value
+	it := m.current()
+	if it == nil {
+		m.notice = "No session selected, so there is nothing to take the tag off."
+		return
+	}
+	// Removing a tag a session does not have would report success and
+	// change nothing, which reads as the key having silently failed on the
+	// session the user meant.
+	if !hasTag(*it, tag) {
+		m.notice = fmt.Sprintf("The selected session is not tagged #%s.", tag)
+		return
+	}
+	if err := annotate.RemoveTag(m.db, it.LineageID, tag); err != nil {
+		m.notice = "tag: " + err.Error()
+		return
+	}
+	m.notice = fmt.Sprintf("removed #%s from %s.", tag, it.SessionID)
+	m.detailOf = ""
+	m.loadAll()
+}
+
+func hasTag(it search.Item, tag string) bool {
+	for _, t := range it.Tags {
+		if t == tag {
+			return true
+		}
+	}
+	return false
 }
 
 // toggleShowAll flips the browser between applying and ignoring the hide
@@ -1999,12 +2087,15 @@ func (m browseModel) facetPanel(id panelID, f *facet, width, height int, sel str
 		}
 		return box
 	}
+	// Every panel says where the cursor is and how many rows it has. The
+	// applied filter is deliberately not repeated here: the full box marks
+	// it as a ● row, and spending the border on it too would cost the
+	// count on a narrow sidebar, where the annotation is dropped whole. A
+	// typed narrowing is the exception - it has no row of its own, so
+	// without this the panel would silently be showing a subset.
+	box.Count = positionCount(f.cursor, len(f.rows))
 	if f.filter != "" {
-		box.Count = "/" + truncateToWidth(sanitizeSingleLine(f.filter), 8)
-	} else if id == panelProfiles {
-		box.Count = ""
-	} else if sel != "" {
-		box.Count = "filtered"
+		box.Count = "/" + truncateToWidth(sanitizeSingleLine(f.filter), 8) + " " + box.Count
 	}
 
 	inner := box.innerWidth()
@@ -2153,14 +2244,33 @@ func (m browseModel) sessionsPanel(g geometry) panelBox {
 // drops the annotation when the border is too narrow for it, so the hidden
 // count never widens the frame.
 func (m browseModel) sessionsCount() string {
-	count := strconv.Itoa(len(m.all))
+	count := positionCount(m.cursor, len(m.visible))
+	// The filtered-out sessions are still worth naming when there are any:
+	// "12 of 40" alone would leave the user wondering where the other 75
+	// went, which is the question the panels exist to keep answerable.
 	if len(m.visible) != len(m.all) {
-		count = fmt.Sprintf("%d/%d", len(m.visible), len(m.all))
+		count += fmt.Sprintf(" of %d", len(m.all))
 	}
 	if m.hidden > 0 && !m.showAll {
 		count += fmt.Sprintf(" · %d hidden", m.hidden)
 	}
 	return count
+}
+
+// positionCount is the "6 of 38" a panel's border carries: where the cursor
+// is and how many rows there are, so the size of a list and the reader's
+// place in it are both legible without scrolling to the end of it.
+func positionCount(cursor, total int) string {
+	if total <= 0 {
+		return "0 of 0"
+	}
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor >= total {
+		cursor = total - 1
+	}
+	return fmt.Sprintf("%d of %d", cursor+1, total)
 }
 
 // detailPanel draws the right-hand pane: a tab strip in the top border and
@@ -2226,11 +2336,20 @@ func (m browseModel) detailContent(opts RenderOptions) string {
 	case tabPrompts:
 		return renderItemPrompts(m.db, *it, opts)
 	case tabTranscript:
-		return renderItemTranscript(m.convo, *it, m.transcriptPhrase(), opts)
+		return renderItemTranscript(m.convo, *it, m.transcriptPhrase(), m.currentProfile, opts)
 	case tabComments:
 		return renderItemComments(m.db, *it, opts)
 	}
 	return renderItemDetail(m.db, *it, opts)
+}
+
+// currentProfile resolves the profile being browsed, which is what a
+// database-backed source's conversation reader needs: the roots that say
+// where that agent's database is. It is passed to the renderer as a
+// function rather than a value so the resolution happens only for the
+// sources that need it - the file-backed ones already have a path.
+func (m browseModel) currentProfile() (profile.Profile, error) {
+	return m.resolve(m.profileName)
 }
 
 // transcriptPhrase is what the Transcript tab highlights and what n and N
@@ -2251,6 +2370,9 @@ func (m browseModel) footer() string {
 	if m.notice != "" {
 		return style(truncateToWidth(sanitizeSingleLine(m.notice), m.width), ansiDim, m.style)
 	}
+	if s := m.searchStatus(); s != "" {
+		return s
+	}
 	var parts []string
 	for _, a := range browseActions {
 		if a.showsFor(m.focus) {
@@ -2258,6 +2380,52 @@ func (m browseModel) footer() string {
 		}
 	}
 	return style(truncateToWidth(strings.Join(parts, "  "), m.width), ansiDim, m.style)
+}
+
+// searchStatus is the footer line shown while a search phrase is in play:
+// what is being searched for, how much it found, and the keys that act on
+// it. It replaces the general action list rather than sharing the line,
+// because a search is a mode the user is in and the keys that leave it are
+// the ones worth the columns while they are in it.
+//
+// On the Transcript tab it counts matches within the conversation and says
+// which one the pane is on; anywhere else it counts the sessions the phrase
+// selected, which is what the phrase did at that point.
+func (m browseModel) searchStatus() string {
+	phrase := m.transcriptPhrase()
+	if phrase == "" {
+		return ""
+	}
+	quoted := "'" + sanitizeSingleLine(phrase) + "'"
+
+	var line string
+	if m.tab == tabTranscript && len(m.convo.hits) > 0 {
+		line = fmt.Sprintf("Search: matches for %s (%d of %d)  n: next match, N: previous match",
+			quoted, m.convo.hitIndex(m.detail.YOffset), len(m.convo.hits))
+	} else if m.tab == tabTranscript {
+		line = fmt.Sprintf("Search: %s - no match in this transcript", quoted)
+	} else {
+		line = fmt.Sprintf("Search: %s (%d sessions)", quoted, len(m.visible))
+	}
+	if m.query != "" {
+		line += ",  s: change, X: clear"
+	} else {
+		line += ",  /: change, esc: clear"
+	}
+	return style(truncateToWidth(line, m.width), ansiDim, m.style)
+}
+
+// hitIndex is which match the pane is sitting on, 1-based, for the "1 of 2"
+// in the search footer: the last match at or above the top visible line.
+// Zero means the pane is scrolled above the first one.
+func (c *conversationCache) hitIndex(yOffset int) int {
+	idx := 0
+	for i, h := range c.hits {
+		if h <= yOffset {
+			idx = i + 1
+		}
+	}
+	return idx
 }
 
 // highlightLine renders a selected row in reverse video. style() emits one
@@ -2359,6 +2527,7 @@ var browseActions = []browseAction{
 	{key: "X", label: "clear all filters"},
 	{key: "R", label: "refresh the index"},
 	{key: "m/M", label: "add/remove a tag", help: "add/remove a tag on the selected session"},
+	{key: "d", label: "remove this tag", help: "take the tag under the cursor off the selected session", panels: []panelID{panelTags}, footer: true},
 	{key: "c/C", label: "add/remove a comment", help: "add/remove a comment on the selected session"},
 	{key: "a", label: "archive", help: "archive/unarchive the selected session", footer: true},
 	{key: ".", label: "show all", help: "toggle showing sessions the hide rules and the archive flag suppress", footer: true},
@@ -2501,15 +2670,39 @@ type conversationCache struct {
 	dropped int
 	err     error
 	loaded  bool
-	// sourceKeepsTranscripts distinguishes "this agent writes no
-	// transcript at all" from "this session has no transcript recorded",
-	// which need different explanations.
-	sourceKeepsTranscripts bool
-	hits                   []int
+	// source says where this session's conversation can be read from,
+	// which is what the three "nothing to show" messages are told apart
+	// by: a source with no readable conversation at all, a source that
+	// keeps transcript files but has no path recorded for this session,
+	// and a database-backed source that simply had no turns.
+	source conversationSource
+	hits   []int
 }
 
-// load reads the session's transcript unless the cache already holds it.
-func (c *conversationCache) load(it search.Item) {
+// conversationSource is where a session's conversation lives.
+type conversationSource int
+
+const (
+	// sourceUnreadable is a source whose conversations this program cannot
+	// read at all - antigravity, whose per-conversation detail is protobuf
+	// with no available schema. It is the zero value because it is what a
+	// cache that found no reader is left holding.
+	sourceUnreadable conversationSource = iota
+	// sourceKeepsTranscript writes per-session transcript files.
+	sourceKeepsTranscript
+	// sourceKeepsDatabase keeps the conversation in its own database.
+	sourceKeepsDatabase
+)
+
+// load reads the session's conversation unless the cache already holds it.
+//
+// There are two ways to get one. claude, pi and omp write transcript files,
+// which internal/transcript reads. goose, hermes, opencode and kilo write
+// no file at all - but the conversation is not lost, it is in the same
+// database the adapter already queries, so the adapter reads it back. Only
+// antigravity has neither, because its per-conversation detail is protobuf
+// with no available schema.
+func (c *conversationCache) load(it search.Item, prof func() (profile.Profile, error)) {
 	path := ""
 	if it.TranscriptPath != nil {
 		path = *it.TranscriptPath
@@ -2520,24 +2713,34 @@ func (c *conversationCache) load(it search.Item) {
 	}
 	*c = conversationCache{key: key, loaded: true}
 
-	// Not an error when there is no vocab: hermes, goose, opencode and
-	// antigravity keep their sessions in a database and write no
-	// transcript at all. The renderer says so in those words rather than
-	// reporting a failure to read a file that was never supposed to exist.
-	vocab, ok := transcript.VocabFor(it.Source)
-	c.sourceKeepsTranscripts = ok
-	if !ok || path == "" {
+	if vocab, ok := transcript.VocabFor(it.Source); ok {
+		c.source = sourceKeepsTranscript
+		if path == "" {
+			return
+		}
+		c.turns, c.dropped, c.err = transcript.Conversation(path, vocab, transcript.DefaultConversationLimits)
 		return
 	}
-	c.turns, c.dropped, c.err = transcript.Conversation(path, vocab, transcript.DefaultConversationLimits)
+
+	reader, ok := refresh.ConversationReaderFor(it.Source, "")
+	if !ok {
+		return
+	}
+	c.source = sourceKeepsDatabase
+	p, err := prof()
+	if err != nil {
+		c.err = err
+		return
+	}
+	c.turns, c.dropped, c.err = reader.Conversation(p, it.SourceSessionID, transcript.DefaultConversationLimits)
 }
 
 // renderItemTranscript renders the Transcript tab: the conversation itself,
 // as far back as the read budget allows, with the active search phrase
 // highlighted. This is the tab that answers "is this the session I meant"
 // without having to resume it and find out.
-func renderItemTranscript(c *conversationCache, it search.Item, phrase string, opts RenderOptions) string {
-	c.load(it)
+func renderItemTranscript(c *conversationCache, it search.Item, phrase string, prof func() (profile.Profile, error), opts RenderOptions) string {
+	c.load(it, prof)
 
 	if c.err != nil {
 		// A transcript the index has a path for but that cannot be read is
@@ -2548,10 +2751,10 @@ func renderItemTranscript(c *conversationCache, it search.Item, phrase string, o
 		}
 		return "transcript: " + c.err.Error()
 	}
-	if !c.sourceKeepsTranscripts {
-		return style("This agent keeps its sessions in a database, not a transcript file, so there is nothing to read here. Prompts still shows what you asked.", ansiDim, opts.Style)
+	if c.source == sourceUnreadable {
+		return style("This agent stores its conversations in a format lazyrecall cannot decode, so there is nothing to read here. Prompts still shows what you asked.", ansiDim, opts.Style)
 	}
-	if it.TranscriptPath == nil || *it.TranscriptPath == "" {
+	if c.source == sourceKeepsTranscript && (it.TranscriptPath == nil || *it.TranscriptPath == "") {
 		return style("The index has no transcript file recorded for this session. A refresh (R) may pick one up.", ansiDim, opts.Style)
 	}
 	if len(c.turns) == 0 {
