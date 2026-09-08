@@ -8,6 +8,7 @@ package adapter
 import (
 	"github.com/rfist/lazyrecall/internal/profile"
 	"github.com/rfist/lazyrecall/internal/session"
+	"github.com/rfist/lazyrecall/internal/transcript"
 )
 
 // Discovered is one session an adapter found, with whatever its source's
@@ -43,6 +44,31 @@ type Adapter interface {
 	// block the other sources (spec session-index, "Source discovery";
 	// task 5.6).
 	Discover(p profile.Profile) ([]Discovered, error)
+}
+
+// ConversationReader is the optional second half of an adapter, implemented
+// by the sources that keep their sessions in a database instead of in
+// transcript files. Those sources have no path for internal/transcript's
+// file reader to open, but the conversation is not lost - it is in the
+// tables the adapter already queries, so the adapter is the only place that
+// knows how to read it back.
+//
+// It is deliberately not part of Adapter. Reading a conversation is display
+// work, done for one session at a time when a reader asks to see it; an
+// Adapter's job is enumeration, and every source has to do that. Sources
+// whose conversations cannot be read at all (antigravity, whose
+// per-conversation detail is protobuf with no available schema) simply do
+// not implement this, and the caller says so rather than failing.
+type ConversationReader interface {
+	// Conversation returns the session's turns in order, newest-last,
+	// keeping at most the limits allow and reporting how many earlier turns
+	// were dropped - the same contract as transcript.Conversation, so the
+	// two paths are interchangeable to a caller that just wants to display
+	// a session.
+	//
+	// sourceSessionID is the source's own identifier for the session (the
+	// sessions table's source_session_id), never LazyRecall's composite id.
+	Conversation(p profile.Profile, sourceSessionID string, limits transcript.ConversationLimits) (turns []transcript.Turn, dropped int, err error)
 }
 
 // Unavailable is returned by Discover when a source has no root configured

@@ -26,15 +26,33 @@ import (
 	"github.com/rfist/lazyrecall/internal/profile"
 	"github.com/rfist/lazyrecall/internal/session"
 	"github.com/rfist/lazyrecall/internal/sqlitex"
+	"github.com/rfist/lazyrecall/internal/transcript"
 )
 
+// Adapter reads one OpenCode-schema database. The source name and the
+// database's file name are fields rather than constants because Kilo ships
+// the same schema under a different name: identical session/message/part
+// tables, an identical `kilo --session <id>` resume flag, and a database at
+// ~/.local/share/kilo/kilo.db (verified against both databases on a machine
+// carrying each). Two copies of these queries that had to be kept in step
+// would be worse than one that is told which name it is reading.
 type Adapter struct {
 	SQLite3Path string
+	name        string
+	dbFile      string
 }
 
-func New(sqlite3Path string) *Adapter { return &Adapter{SQLite3Path: sqlite3Path} }
+func New(sqlite3Path string) *Adapter {
+	return &Adapter{SQLite3Path: sqlite3Path, name: "opencode", dbFile: "opencode.db"}
+}
 
-func (*Adapter) Name() string { return "opencode" }
+// NewFor builds an adapter over another tool that ships the OpenCode
+// schema. internal/adapter/kilo is the one caller.
+func NewFor(name, dbFile, sqlite3Path string) *Adapter {
+	return &Adapter{SQLite3Path: sqlite3Path, name: name, dbFile: dbFile}
+}
+
+func (a *Adapter) Name() string { return a.name }
 
 type sessionRow struct {
 	ID            string  `json:"id"`
@@ -51,11 +69,11 @@ type sessionRow struct {
 func (a *Adapter) Discover(p profile.Profile) ([]adapter.Discovered, error) {
 	root := p.Roots[a.Name()]
 	if root == "" {
-		return nil, &adapter.Unavailable{Reason: "no opencode root for this profile"}
+		return nil, &adapter.Unavailable{Reason: "no " + a.name + " root for this profile"}
 	}
-	dbPath := filepath.Join(root, "opencode.db")
+	dbPath := filepath.Join(root, a.dbFile)
 	if _, err := os.Stat(dbPath); err != nil {
-		return nil, &adapter.Unavailable{Reason: "no opencode database on this machine"}
+		return nil, &adapter.Unavailable{Reason: "no " + a.name + " database on this machine"}
 	}
 	r := &sqlitex.Runner{BinPath: a.SQLite3Path, DBPath: dbPath, ReadOnly: true}
 
@@ -80,14 +98,14 @@ LEFT JOIN last_msg lm ON lm.session_id = s.id AND lm.rn = 1;`
 
 	var rows []sessionRow
 	if err := r.Query(q, &rows); err != nil {
-		return nil, fmt.Errorf("opencode: querying opencode.db: %w", err)
+		return nil, fmt.Errorf("%s: querying %s: %w", a.name, a.dbFile, err)
 	}
 
 	out := make([]adapter.Discovered, 0, len(rows))
 	for _, row := range rows {
 		s := session.Session{
-			ID:              "opencode:" + p.Name + ":" + row.ID,
-			Source:          "opencode",
+			ID:              a.name + ":" + p.Name + ":" + row.ID,
+			Source:          a.name,
 			Profile:         p.Name,
 			SourceSessionID: row.ID,
 			Topic:           nonEmpty(row.Title),
@@ -179,7 +197,7 @@ func (a *Adapter) PromptsSince(p profile.Profile, fromID int64) ([]PromptEntry, 
 	if root == "" {
 		return nil, fromID, nil
 	}
-	dbPath := filepath.Join(root, "opencode.db")
+	dbPath := filepath.Join(root, a.dbFile)
 	if _, err := os.Stat(dbPath); err != nil {
 		return nil, fromID, nil
 	}
@@ -201,7 +219,7 @@ WHERE json_extract(m.data, '$.role') = 'user'
   AND p.rowid > %d
 ORDER BY p.rowid;`, fromID)
 	if err := r.Query(q, &rows); err != nil {
-		return nil, fromID, fmt.Errorf("opencode: querying part: %w", err)
+		return nil, fromID, fmt.Errorf("%s: querying part: %w", a.name, err)
 	}
 
 	newCursor := fromID
@@ -220,4 +238,73 @@ ORDER BY p.rowid;`, fromID)
 		}
 	}
 	return out, newCursor, nil
+}
+
+// Conversation reads one session's exchange back out of the message/part
+// tables (adapter.ConversationReader). OpenCode - and so Kilo - stores no
+// transcript file; a message is a row and its content is a set of `part`
+// rows hanging off it, so the two are joined here and read in part order.
+//
+// Of the part types on a real database (text, reasoning, tool, patch,
+// step-start, step-finish), only text and tool say anything a reader wants:
+// reasoning is the model thinking to itself, and the step and patch parts
+// are bookkeeping for the turn rather than content of it.
+func (a *Adapter) Conversation(p profile.Profile, sourceSessionID string, limits transcript.ConversationLimits) ([]transcript.Turn, int, error) {
+	root := p.Roots[a.Name()]
+	if root == "" {
+		return nil, 0, nil
+	}
+	dbPath := filepath.Join(root, a.dbFile)
+	if _, err := os.Stat(dbPath); err != nil {
+		return nil, 0, nil
+	}
+	r := &sqlitex.Runner{BinPath: a.SQLite3Path, DBPath: dbPath, ReadOnly: true}
+
+	pf, err := r.WriteParams(map[string]any{"sid": sourceSessionID})
+	if err != nil {
+		return nil, 0, fmt.Errorf("%s: binding session id: %w", a.name, err)
+	}
+	defer pf.Close()
+
+	var rows []struct {
+		Role string  `json:"role"`
+		Type string  `json:"type"`
+		Text *string `json:"text"`
+		Tool *string `json:"tool"`
+		At   int64   `json:"time_created"`
+	}
+	q := `SELECT json_extract(m.data, '$.role') AS role,
+	json_extract(pt.data, '$.type') AS type,
+	json_extract(pt.data, '$.text') AS text,
+	json_extract(pt.data, '$.tool') AS tool,
+	pt.time_created AS time_created
+FROM part pt JOIN message m ON m.id = pt.message_id
+WHERE pt.session_id = ` + pf.Ref("sid") + `
+ORDER BY pt.time_created, pt.id;`
+	if err := r.Query(q, &rows); err != nil {
+		return nil, 0, fmt.Errorf("%s: querying part: %w", a.name, err)
+	}
+
+	var turns []transcript.Turn
+	for _, row := range rows {
+		at := epochMillis(row.At)
+		switch row.Type {
+		case "text":
+			if row.Text == nil {
+				continue
+			}
+			kind := transcript.KindAssistantText
+			if row.Role == "user" {
+				kind = transcript.KindUserPrompt
+			}
+			turns = append(turns, transcript.Turn{Kind: kind, Text: *row.Text, At: at})
+		case "tool":
+			turn := transcript.Turn{Kind: transcript.KindToolUse, At: at}
+			if row.Tool != nil && *row.Tool != "" {
+				turn.Tool = []string{*row.Tool}
+			}
+			turns = append(turns, turn)
+		}
+	}
+	return transcript.LimitTurns(turns, limits)
 }

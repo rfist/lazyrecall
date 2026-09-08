@@ -3,11 +3,13 @@ package goose
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/rfist/lazyrecall/internal/profile"
 	"github.com/rfist/lazyrecall/internal/session"
 	"github.com/rfist/lazyrecall/internal/sqlitex"
+	"github.com/rfist/lazyrecall/internal/transcript"
 )
 
 func strp(s string) *string { return &s }
@@ -237,5 +239,93 @@ func TestPromptsSinceNoRootIsNotAnError(t *testing.T) {
 	}
 	if entries != nil || cursor != 5 {
 		t.Errorf("got entries=%v cursor=%d, want nil/5 unchanged", entries, cursor)
+	}
+}
+
+// All content below is synthetic, hand-written test data - never real
+// session content.
+
+func TestConversation(t *testing.T) {
+	root := testDB(t)
+	r := &sqlitex.Runner{DBPath: filepath.Join(root, "sessions.db")}
+
+	inserts := `
+INSERT INTO sessions (id, working_dir) VALUES ('s_a', '/Users/x/project');
+INSERT INTO messages (session_id, role, content_json, created_timestamp) VALUES
+  ('s_a', 'user', '[{"type":"text","text":"why is the build red"}]', 1000),
+  ('s_a', 'assistant', '[{"type":"thinking","thinking":"reasoning to myself"}]', 1001),
+  ('s_a', 'assistant', '[{"type":"toolRequest","toolCall":{"value":{"name":"shell"}}}]', 1002),
+  ('s_a', 'user', '[{"type":"toolResponse","toolResult":{}}]', 1003),
+  ('s_a', 'assistant', '[{"type":"text","text":"a dependency moved"}]', 1004);`
+	if err := r.Exec(inserts); err != nil {
+		t.Fatal(err)
+	}
+
+	a := New("")
+	p := profile.Profile{Name: "default", Roots: map[string]string{"goose": root}}
+
+	turns, dropped, err := a.Conversation(p, "s_a", transcript.DefaultConversationLimits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dropped != 0 {
+		t.Errorf("dropped = %d, want 0", dropped)
+	}
+	// thinking is the model reasoning with itself and toolResponse is the
+	// result coming back; neither is a line a reader wants.
+	want := []transcript.Kind{
+		transcript.KindUserPrompt, transcript.KindToolUse, transcript.KindAssistantText,
+	}
+	if len(turns) != len(want) {
+		t.Fatalf("got %d turns, want %d: %+v", len(turns), len(want), turns)
+	}
+	for i, k := range want {
+		if turns[i].Kind != k {
+			t.Errorf("turn %d kind = %v, want %v", i, turns[i].Kind, k)
+		}
+	}
+	if turns[0].Text != "why is the build red" {
+		t.Errorf("first turn = %q", turns[0].Text)
+	}
+	if got := strings.Join(turns[1].Tool, ","); got != "shell" {
+		t.Errorf("tool name = %q, want shell", got)
+	}
+	if turns[2].Text != "a dependency moved" {
+		t.Errorf("last turn = %q", turns[2].Text)
+	}
+}
+
+// A session id belongs to one session only: another session's messages must
+// never leak into it.
+func TestConversationIsScopedToOneSession(t *testing.T) {
+	root := testDB(t)
+	r := &sqlitex.Runner{DBPath: filepath.Join(root, "sessions.db")}
+	inserts := `
+INSERT INTO sessions (id, working_dir) VALUES ('s_a', '/x'), ('s_b', '/y');
+INSERT INTO messages (session_id, role, content_json, created_timestamp) VALUES
+  ('s_a', 'user', '[{"type":"text","text":"belongs to a"}]', 1000),
+  ('s_b', 'user', '[{"type":"text","text":"belongs to b"}]', 1001);`
+	if err := r.Exec(inserts); err != nil {
+		t.Fatal(err)
+	}
+
+	turns, _, err := New("").Conversation(
+		profile.Profile{Name: "default", Roots: map[string]string{"goose": root}},
+		"s_a", transcript.DefaultConversationLimits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 1 || turns[0].Text != "belongs to a" {
+		t.Errorf("turns = %+v, want only session a's message", turns)
+	}
+}
+
+func TestConversationNoRootIsNotAnError(t *testing.T) {
+	turns, _, err := New("").Conversation(profile.Profile{Name: "x"}, "s_a", transcript.DefaultConversationLimits)
+	if err != nil {
+		t.Errorf("a profile with no goose root should not be an error, got %v", err)
+	}
+	if len(turns) != 0 {
+		t.Errorf("got %d turns from a profile with no goose root", len(turns))
 	}
 }

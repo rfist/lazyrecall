@@ -115,6 +115,30 @@ func Conversation(path string, vocab Vocab, limits ConversationLimits) (turns []
 	return trimToBudget(kept, limits.MaxTurns, &dropped), dropped, nil
 }
 
+// LimitTurns applies a Conversation budget to turns a caller assembled
+// itself, and is how the database-backed sources (goose, hermes, opencode)
+// reach the same result Conversation produces for a transcript file: they
+// know how to get their rows, this decides what an empty turn is, how long
+// a turn may be, and how many to keep. Without it each of them would answer
+// those three questions slightly differently and the same session would
+// read differently depending on which agent wrote it.
+func LimitTurns(turns []Turn, limits ConversationLimits) ([]Turn, int, error) {
+	if limits.MaxTurns <= 0 {
+		limits.MaxTurns = DefaultConversationLimits.MaxTurns
+	}
+	if limits.MaxTurnBytes <= 0 {
+		limits.MaxTurnBytes = DefaultConversationLimits.MaxTurnBytes
+	}
+	kept := make([]Turn, 0, len(turns))
+	for _, t := range turns {
+		if n, ok := normalizeTurn(t, limits.MaxTurnBytes); ok {
+			kept = append(kept, n)
+		}
+	}
+	dropped := 0
+	return trimToBudget(kept, limits.MaxTurns, &dropped), dropped, nil
+}
+
 func trimToBudget(turns []Turn, max int, dropped *int) []Turn {
 	if len(turns) <= max {
 		return turns
@@ -128,27 +152,46 @@ func trimToBudget(turns []Turn, max int, dropped *int) []Turn {
 // that turn out to carry nothing to show (a thinking-only assistant
 // fragment classifies as KindAssistantText with no text).
 func toTurn(rec Record, maxBytes int) (Turn, bool) {
-	switch rec.Kind {
+	text := ""
+	if rec.Text != nil {
+		text = *rec.Text
+	}
+	return normalizeTurn(Turn{Kind: rec.Kind, Text: text, Tool: rec.Tool, At: rec.Timestamp}, maxBytes)
+}
+
+// normalizeTurn is the single decision about what a displayable turn is,
+// shared by the transcript reader and by the database-backed adapters that
+// build Turns directly. It reports false for the kinds this view does not
+// show and for the ones that carry nothing to show - a thinking-only
+// assistant fragment, or a message whose whole text was whitespace.
+func normalizeTurn(t Turn, maxBytes int) (Turn, bool) {
+	switch t.Kind {
 	case KindUserPrompt, KindAssistantText:
-		if rec.Text == nil {
-			return Turn{}, false
-		}
-		text := strings.TrimSpace(*rec.Text)
+		text := strings.TrimSpace(t.Text)
 		if text == "" {
 			return Turn{}, false
 		}
-		truncated := false
+		// A harness-injected block is not something a person said, and
+		// showing one as a "you" turn misreports the conversation. The
+		// Claude vocab already drops these at classification time; the
+		// database-backed sources build Turns directly, and OpenCode and
+		// Kilo were observed storing "<system-reminder>" blocks as user
+		// messages exactly the way Claude Code writes them - so the check
+		// belongs here, where every path passes through it, rather than
+		// being repeated per adapter.
+		if t.Kind == KindUserPrompt && isInjectedBlock(text) {
+			return Turn{}, false
+		}
 		if len(text) > maxBytes {
 			text = truncateBytes(text, maxBytes)
-			truncated = true
+			t.Truncated = true
 		}
-		return Turn{Kind: rec.Kind, Text: text, Truncated: truncated, At: rec.Timestamp}, true
+		t.Text = text
+		return t, true
 
-	case KindToolUse:
-		return Turn{Kind: rec.Kind, Tool: rec.Tool, At: rec.Timestamp}, true
-
-	case KindCompactionBoundary:
-		return Turn{Kind: rec.Kind, At: rec.Timestamp}, true
+	case KindToolUse, KindCompactionBoundary:
+		t.Text = ""
+		return t, true
 	}
 	return Turn{}, false
 }

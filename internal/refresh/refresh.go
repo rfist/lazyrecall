@@ -20,6 +20,7 @@ import (
 	claudeadapter "github.com/rfist/lazyrecall/internal/adapter/claude"
 	gooseadapter "github.com/rfist/lazyrecall/internal/adapter/goose"
 	hermesadapter "github.com/rfist/lazyrecall/internal/adapter/hermes"
+	kiloadapter "github.com/rfist/lazyrecall/internal/adapter/kilo"
 	ompadapter "github.com/rfist/lazyrecall/internal/adapter/omp"
 	opencodeadapter "github.com/rfist/lazyrecall/internal/adapter/opencode"
 	piadapter "github.com/rfist/lazyrecall/internal/adapter/pi"
@@ -135,6 +136,7 @@ func (r *Refresher) adapters() []adapter.Adapter {
 		hermesadapter.New(r.SQLite3Path),
 		gooseadapter.New(r.SQLite3Path),
 		opencodeadapter.New(r.SQLite3Path),
+		kiloadapter.New(r.SQLite3Path),
 		antigravityadapter.New(r.SQLite3Path),
 	}
 }
@@ -394,4 +396,26 @@ func boolToInt(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+// ConversationReaderFor returns the reader for a source that keeps its
+// conversations in a database rather than in transcript files, so a display
+// caller can show the exchange without knowing which sources those are.
+//
+// It lives here rather than in the display layer because this package
+// already owns the list of adapters that exist; asking it is what keeps a
+// new database-backed source from having to be registered in two places.
+// The second return is false for the file-backed sources - whose
+// conversations internal/transcript reads instead - and for antigravity,
+// whose per-conversation detail cannot be decoded at all.
+func ConversationReaderFor(source, sqlite3Path string) (adapter.ConversationReader, bool) {
+	r := &Refresher{SQLite3Path: sqlite3Path}
+	for _, a := range r.adapters() {
+		if a.Name() != source {
+			continue
+		}
+		cr, ok := a.(adapter.ConversationReader)
+		return cr, ok
+	}
+	return nil, false
 }

@@ -11,6 +11,7 @@
 package hermes
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -20,6 +21,7 @@ import (
 	"github.com/rfist/lazyrecall/internal/profile"
 	"github.com/rfist/lazyrecall/internal/session"
 	"github.com/rfist/lazyrecall/internal/sqlitex"
+	"github.com/rfist/lazyrecall/internal/transcript"
 )
 
 type Adapter struct {
@@ -208,4 +210,108 @@ func (a *Adapter) PromptsSince(p profile.Profile, fromID int64) ([]PromptEntry, 
 		}
 	}
 	return out, newCursor, nil
+}
+
+// Conversation reads one session's exchange back out of hermes's messages
+// table (adapter.ConversationReader). hermes writes no transcript file, so
+// these rows are the conversation.
+//
+// Its shape is flatter than the block-structured sources: content is plain
+// text in a column, and a tool call is an assistant row carrying tool_calls
+// JSON. The "tool" role is the result coming back and is skipped, the same
+// way a tool_result record is skipped in a Claude transcript - it carries
+// no line a reader wants.
+func (a *Adapter) Conversation(p profile.Profile, sourceSessionID string, limits transcript.ConversationLimits) ([]transcript.Turn, int, error) {
+	root := p.Roots[a.Name()]
+	if root == "" {
+		return nil, 0, nil
+	}
+	dbPath := filepath.Join(root, "state.db")
+	if _, err := os.Stat(dbPath); err != nil {
+		return nil, 0, nil
+	}
+	r := &sqlitex.Runner{BinPath: a.SQLite3Path, DBPath: dbPath, ReadOnly: true}
+
+	pf, err := r.WriteParams(map[string]any{"sid": sourceSessionID})
+	if err != nil {
+		return nil, 0, fmt.Errorf("hermes: binding session id: %w", err)
+	}
+	defer pf.Close()
+
+	var rows []struct {
+		Role      string  `json:"role"`
+		Content   *string `json:"content"`
+		ToolName  *string `json:"tool_name"`
+		ToolCalls *string `json:"tool_calls"`
+		Timestamp float64 `json:"timestamp"`
+	}
+	q := `SELECT role, content, tool_name, tool_calls, timestamp FROM messages WHERE session_id = ` +
+		pf.Ref("sid") + ` ORDER BY timestamp, id;`
+	if err := r.Query(q, &rows); err != nil {
+		return nil, 0, fmt.Errorf("hermes: querying messages: %w", err)
+	}
+
+	var turns []transcript.Turn
+	for _, row := range rows {
+		at := time.Unix(int64(row.Timestamp), 0)
+		text := ""
+		if row.Content != nil {
+			text = *row.Content
+		}
+		switch row.Role {
+		case "user":
+			turns = append(turns, transcript.Turn{Kind: transcript.KindUserPrompt, Text: text, At: &at})
+		case "assistant":
+			// An assistant row can carry both a sentence and the tool calls
+			// that followed it, so it can produce two turns: what was said,
+			// then what was done. Dropping either would misreport the turn.
+			if text != "" {
+				turns = append(turns, transcript.Turn{Kind: transcript.KindAssistantText, Text: text, At: &at})
+			}
+			if row.ToolCalls != nil && *row.ToolCalls != "" {
+				turn := transcript.Turn{Kind: transcript.KindToolUse, At: &at}
+				turn.Tool = hermesToolNames(*row.ToolCalls)
+				turns = append(turns, turn)
+			}
+		}
+	}
+	return transcript.LimitTurns(turns, limits)
+}
+
+// hermesToolNames pulls the called tools' names out of an assistant row's
+// tool_calls JSON. The column holds the provider's own tool-call array, so
+// the name sits at either "name" or, in the OpenAI-shaped form hermes
+// stores for most providers, "function.name"; both are read because a row
+// written by either shape has to render with a name rather than without.
+func hermesToolNames(toolCalls string) []string {
+	var calls []struct {
+		Name     string `json:"name"`
+		Function struct {
+			Name string `json:"name"`
+		} `json:"function"`
+	}
+	if err := json.Unmarshal([]byte(toolCalls), &calls); err != nil {
+		return nil
+	}
+	var out []string
+	for _, c := range calls {
+		name := c.Name
+		if name == "" {
+			name = c.Function.Name
+		}
+		if name == "" {
+			continue
+		}
+		seen := false
+		for _, e := range out {
+			if e == name {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			out = append(out, name)
+		}
+	}
+	return out
 }
