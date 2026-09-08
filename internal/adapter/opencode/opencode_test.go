@@ -2,11 +2,13 @@ package opencode
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/rfist/lazyrecall/internal/profile"
 	"github.com/rfist/lazyrecall/internal/session"
 	"github.com/rfist/lazyrecall/internal/sqlitex"
+	"github.com/rfist/lazyrecall/internal/transcript"
 )
 
 func strp(s string) *string { return &s }
@@ -217,5 +219,126 @@ func TestPromptsSinceNoRootIsNotAnError(t *testing.T) {
 	}
 	if entries != nil || cursor != 5 {
 		t.Errorf("got entries=%v cursor=%d, want nil/5 unchanged", entries, cursor)
+	}
+}
+
+// All content below is synthetic, hand-written test data - never real
+// session content.
+
+func TestConversation(t *testing.T) {
+	root := testDB(t)
+	r := &sqlitex.Runner{DBPath: filepath.Join(root, "opencode.db")}
+	inserts := `
+INSERT INTO session (id, parent_id, directory, title, time_created, time_updated)
+VALUES ('ses_a', NULL, '/Users/x/project', 'A session', 1783455524064, 1783455607192);
+INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES
+  ('msg_1', 'ses_a', 1783455524064, 1783455524064, '{"role":"user"}'),
+  ('msg_2', 'ses_a', 1783455525000, 1783455525000, '{"role":"assistant"}');
+INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES
+  ('prt_1', 'msg_1', 'ses_a', 1783455524064, 1783455524064, '{"type":"text","text":"where did the config go"}'),
+  ('prt_2', 'msg_2', 'ses_a', 1783455525000, 1783455525000, '{"type":"reasoning","text":"thinking to myself"}'),
+  ('prt_3', 'msg_2', 'ses_a', 1783455525100, 1783455525100, '{"type":"tool","tool":"grep","callID":"c1"}'),
+  ('prt_4', 'msg_2', 'ses_a', 1783455525200, 1783455525200, '{"type":"step-finish"}'),
+  ('prt_5', 'msg_2', 'ses_a', 1783455525300, 1783455525300, '{"type":"text","text":"it moved under etc/"}');`
+	if err := r.Exec(inserts); err != nil {
+		t.Fatal(err)
+	}
+
+	p := profile.Profile{Name: "default", Roots: map[string]string{"opencode": root}}
+	turns, _, err := New("").Conversation(p, "ses_a", transcript.DefaultConversationLimits)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// reasoning is the model thinking to itself and step-finish is
+	// bookkeeping; neither is content a reader wants a line for.
+	want := []transcript.Kind{
+		transcript.KindUserPrompt, transcript.KindToolUse, transcript.KindAssistantText,
+	}
+	if len(turns) != len(want) {
+		t.Fatalf("got %d turns, want %d: %+v", len(turns), len(want), turns)
+	}
+	for i, k := range want {
+		if turns[i].Kind != k {
+			t.Errorf("turn %d kind = %v, want %v", i, turns[i].Kind, k)
+		}
+	}
+	if turns[0].Text != "where did the config go" {
+		t.Errorf("first turn = %q", turns[0].Text)
+	}
+	if got := strings.Join(turns[1].Tool, ","); got != "grep" {
+		t.Errorf("tool name = %q, want grep", got)
+	}
+	if turns[2].Text != "it moved under etc/" {
+		t.Errorf("last turn = %q", turns[2].Text)
+	}
+}
+
+// The role on a text part comes from its message, not from the part: a
+// user turn and an assistant turn are otherwise identical rows.
+func TestConversationTakesTheSpeakerFromTheMessage(t *testing.T) {
+	root := testDB(t)
+	r := &sqlitex.Runner{DBPath: filepath.Join(root, "opencode.db")}
+	inserts := `
+INSERT INTO session (id, parent_id, directory, title, time_created, time_updated)
+VALUES ('ses_a', NULL, '/x', 'A', 1, 2);
+INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES
+  ('msg_1', 'ses_a', 1, 1, '{"role":"assistant"}');
+INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES
+  ('prt_1', 'msg_1', 'ses_a', 1, 1, '{"type":"text","text":"said by the agent"}');`
+	if err := r.Exec(inserts); err != nil {
+		t.Fatal(err)
+	}
+	turns, _, err := New("").Conversation(
+		profile.Profile{Name: "default", Roots: map[string]string{"opencode": root}},
+		"ses_a", transcript.DefaultConversationLimits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 1 || turns[0].Kind != transcript.KindAssistantText {
+		t.Errorf("turns = %+v, want one assistant turn", turns)
+	}
+}
+
+// Kilo is this same adapter pointed at a different name and file, so the
+// conversation reader has to follow both rather than the opencode ones.
+func TestKiloVariantReadsItsOwnDatabase(t *testing.T) {
+	root := t.TempDir()
+	r := &sqlitex.Runner{DBPath: filepath.Join(root, "kilo.db")}
+	ddl := `
+CREATE TABLE session (
+	id text PRIMARY KEY, parent_id text, directory text NOT NULL,
+	title text NOT NULL, time_created integer NOT NULL, time_updated integer NOT NULL
+);
+CREATE TABLE message (
+	id text PRIMARY KEY, session_id text NOT NULL, time_created integer NOT NULL,
+	time_updated integer NOT NULL, data text NOT NULL
+);
+CREATE TABLE part (
+	id text PRIMARY KEY, message_id text NOT NULL, session_id text NOT NULL,
+	time_created integer NOT NULL, time_updated integer NOT NULL, data text NOT NULL
+);
+INSERT INTO session (id, parent_id, directory, title, time_created, time_updated)
+VALUES ('ses_k', NULL, '/x', 'K', 1, 2);
+INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES
+  ('msg_1', 'ses_k', 1, 1, '{"role":"user"}');
+INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES
+  ('prt_1', 'msg_1', 'ses_k', 1, 1, '{"type":"text","text":"from the kilo database"}');`
+	if err := r.Exec(ddl); err != nil {
+		t.Fatal(err)
+	}
+
+	a := NewFor("kilo", "kilo.db", "")
+	if a.Name() != "kilo" {
+		t.Errorf("Name() = %q, want kilo", a.Name())
+	}
+	turns, _, err := a.Conversation(
+		profile.Profile{Name: "default", Roots: map[string]string{"kilo": root}},
+		"ses_k", transcript.DefaultConversationLimits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 1 || turns[0].Text != "from the kilo database" {
+		t.Errorf("turns = %+v, want the kilo database's own message", turns)
 	}
 }

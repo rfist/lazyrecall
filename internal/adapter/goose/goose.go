@@ -40,6 +40,7 @@ import (
 	"github.com/rfist/lazyrecall/internal/profile"
 	"github.com/rfist/lazyrecall/internal/session"
 	"github.com/rfist/lazyrecall/internal/sqlitex"
+	"github.com/rfist/lazyrecall/internal/transcript"
 )
 
 type Adapter struct {
@@ -291,6 +292,92 @@ func textBlocks(contentJSON string) string {
 			out += "\n"
 		}
 		out += b.Text
+	}
+	return out
+}
+
+// Conversation reads one session's whole exchange back out of goose's
+// messages table (adapter.ConversationReader). goose keeps no transcript
+// file, so this is the only way to see what was said - but the rows are
+// right there, which is why the browser reads them rather than shelling out
+// to `goose session`.
+//
+// The block vocabulary is the same one PromptsSince already navigates:
+// "text" is what was said, "thinking" is the model reasoning with itself
+// and is skipped, "toolRequest" is a call (its name lives at
+// toolCall.value.name), and "toolResponse" is the result coming back, which
+// carries nothing a reader wants a line for.
+func (a *Adapter) Conversation(p profile.Profile, sourceSessionID string, limits transcript.ConversationLimits) ([]transcript.Turn, int, error) {
+	root := p.Roots[a.Name()]
+	if root == "" {
+		return nil, 0, nil
+	}
+	dbPath := filepath.Join(root, "sessions.db")
+	if _, err := os.Stat(dbPath); err != nil {
+		return nil, 0, nil
+	}
+	r := &sqlitex.Runner{BinPath: a.SQLite3Path, DBPath: dbPath, ReadOnly: true}
+
+	// The session id came out of a source database, so it is bound as a
+	// parameter rather than pasted into the SQL - the same rule every other
+	// external value in this program follows.
+	pf, err := r.WriteParams(map[string]any{"sid": sourceSessionID})
+	if err != nil {
+		return nil, 0, fmt.Errorf("goose: binding session id: %w", err)
+	}
+	defer pf.Close()
+
+	var rows []struct {
+		Role        string `json:"role"`
+		ContentJSON string `json:"content_json"`
+		Timestamp   int64  `json:"created_timestamp"`
+	}
+	q := `SELECT role, content_json, created_timestamp FROM messages WHERE session_id = ` +
+		pf.Ref("sid") + ` ORDER BY created_timestamp, id;`
+	if err := r.Query(q, &rows); err != nil {
+		return nil, 0, fmt.Errorf("goose: querying messages: %w", err)
+	}
+
+	var turns []transcript.Turn
+	for _, row := range rows {
+		at := time.Unix(row.Timestamp, 0)
+		for _, t := range gooseTurns(row.Role, row.ContentJSON, &at) {
+			turns = append(turns, t)
+		}
+	}
+	return transcript.LimitTurns(turns, limits)
+}
+
+// gooseTurns maps one message row's content blocks to displayable turns.
+func gooseTurns(role, contentJSON string, at *time.Time) []transcript.Turn {
+	var blocks []struct {
+		Type     string `json:"type"`
+		Text     string `json:"text"`
+		ToolCall struct {
+			Value struct {
+				Name string `json:"name"`
+			} `json:"value"`
+		} `json:"toolCall"`
+	}
+	if err := json.Unmarshal([]byte(contentJSON), &blocks); err != nil {
+		return nil
+	}
+	var out []transcript.Turn
+	for _, b := range blocks {
+		switch b.Type {
+		case "text":
+			kind := transcript.KindAssistantText
+			if role == "user" {
+				kind = transcript.KindUserPrompt
+			}
+			out = append(out, transcript.Turn{Kind: kind, Text: b.Text, At: at})
+		case "toolRequest":
+			turn := transcript.Turn{Kind: transcript.KindToolUse, At: at}
+			if n := b.ToolCall.Value.Name; n != "" {
+				turn.Tool = []string{n}
+			}
+			out = append(out, turn)
+		}
 	}
 	return out
 }

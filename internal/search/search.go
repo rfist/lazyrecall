@@ -77,8 +77,14 @@ type Item struct {
 	// sources, which record no transcript file at all - a reader must
 	// treat nil as "this source keeps no transcript", not as an error.
 	TranscriptPath *string
-	Resumable      bool
-	Tags           []string
+	// SourceSessionID is the identifier the source itself uses for this
+	// session, as distinct from SessionID, which is LazyRecall's composite
+	// "<source>:<profile>:<id>". It is what a source's own database has to
+	// be queried by, so a reader that goes back to the source for content
+	// needs this one and not the composite.
+	SourceSessionID string
+	Resumable       bool
+	Tags            []string
 	// Archived is true when the user archived the session (change
 	// add-archive-facility). The flag lives on lineages, so it survives a
 	// full index rebuild; it is shown by `archive list` and tagged on the
@@ -112,32 +118,33 @@ func (it Item) GroupKey() (key string, isRepo bool) {
 const itemFrom = `sessions s LEFT JOIN lineages l ON l.id = s.lineage_id`
 
 var itemColumns = `s.id, s.source, s.lineage_id, l.handle, s.cwd, s.git_branch, s.git_repo_root, s.git_common_root,
-	s.started_at, s.last_activity_at, s.topic, s.name, s.last_prompt, s.end_state, s.origin, s.client, s.dir_exists, s.message_count, s.transcript_path, s.resumable,
+	s.started_at, s.last_activity_at, s.topic, s.name, s.last_prompt, s.end_state, s.origin, s.client, s.dir_exists, s.message_count, s.transcript_path, s.source_session_id, s.resumable,
 	l.archived_at IS NOT NULL AS archived`
 
 type itemRow struct {
-	ID             string  `json:"id"`
-	Source         string  `json:"source"`
-	LineageID      string  `json:"lineage_id"`
-	Handle         *int    `json:"handle"`
-	CWD            *string `json:"cwd"`
-	GitBranch      *string `json:"git_branch"`
-	GitRepoRoot    *string `json:"git_repo_root"`
-	GitCommonRoot  *string `json:"git_common_root"`
-	StartedAt      *int64  `json:"started_at"`
-	LastActivityAt *int64  `json:"last_activity_at"`
-	Topic          *string `json:"topic"`
-	Name           *string `json:"name"`
-	LastPrompt     *string `json:"last_prompt"`
-	EndState       string  `json:"end_state"`
-	Origin         string  `json:"origin"`
-	Client         *string `json:"client"`
-	DirExists      *int64  `json:"dir_exists"`
-	MessageCount   *int64  `json:"message_count"`
-	TranscriptPath *string `json:"transcript_path"`
-	Resumable      int64   `json:"resumable"`
-	Archived       int64   `json:"archived"`
-	Tags           *string `json:"tags"`
+	ID              string  `json:"id"`
+	Source          string  `json:"source"`
+	LineageID       string  `json:"lineage_id"`
+	Handle          *int    `json:"handle"`
+	CWD             *string `json:"cwd"`
+	GitBranch       *string `json:"git_branch"`
+	GitRepoRoot     *string `json:"git_repo_root"`
+	GitCommonRoot   *string `json:"git_common_root"`
+	StartedAt       *int64  `json:"started_at"`
+	LastActivityAt  *int64  `json:"last_activity_at"`
+	Topic           *string `json:"topic"`
+	Name            *string `json:"name"`
+	LastPrompt      *string `json:"last_prompt"`
+	EndState        string  `json:"end_state"`
+	Origin          string  `json:"origin"`
+	Client          *string `json:"client"`
+	DirExists       *int64  `json:"dir_exists"`
+	MessageCount    *int64  `json:"message_count"`
+	TranscriptPath  *string `json:"transcript_path"`
+	SourceSessionID string  `json:"source_session_id"`
+	Resumable       int64   `json:"resumable"`
+	Archived        int64   `json:"archived"`
+	Tags            *string `json:"tags"`
 }
 
 func (row itemRow) toItem() Item {
@@ -149,23 +156,24 @@ func (row itemRow) toItem() Item {
 		origin = session.OriginUnknown
 	}
 	it := Item{
-		SessionID:      row.ID,
-		Source:         row.Source,
-		LineageID:      row.LineageID,
-		CWD:            row.CWD,
-		GitBranch:      row.GitBranch,
-		GitRepoRoot:    row.GitRepoRoot,
-		GitCommonRoot:  row.GitCommonRoot,
-		Topic:          row.Topic,
-		Name:           row.Name,
-		LastPrompt:     row.LastPrompt,
-		EndState:       session.EndState(row.EndState),
-		Origin:         origin,
-		Client:         row.Client,
-		MessageCount:   row.MessageCount,
-		TranscriptPath: row.TranscriptPath,
-		Resumable:      row.Resumable != 0,
-		Archived:       row.Archived != 0,
+		SessionID:       row.ID,
+		Source:          row.Source,
+		LineageID:       row.LineageID,
+		CWD:             row.CWD,
+		GitBranch:       row.GitBranch,
+		GitRepoRoot:     row.GitRepoRoot,
+		GitCommonRoot:   row.GitCommonRoot,
+		Topic:           row.Topic,
+		Name:            row.Name,
+		LastPrompt:      row.LastPrompt,
+		EndState:        session.EndState(row.EndState),
+		Origin:          origin,
+		Client:          row.Client,
+		MessageCount:    row.MessageCount,
+		TranscriptPath:  row.TranscriptPath,
+		SourceSessionID: row.SourceSessionID,
+		Resumable:       row.Resumable != 0,
+		Archived:        row.Archived != 0,
 	}
 	if row.Handle != nil {
 		it.Handle = *row.Handle

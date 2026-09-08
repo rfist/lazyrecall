@@ -8,6 +8,7 @@ import (
 	claudeadapter "github.com/rfist/lazyrecall/internal/adapter/claude"
 	gooseadapter "github.com/rfist/lazyrecall/internal/adapter/goose"
 	hermesadapter "github.com/rfist/lazyrecall/internal/adapter/hermes"
+	kiloadapter "github.com/rfist/lazyrecall/internal/adapter/kilo"
 	ompadapter "github.com/rfist/lazyrecall/internal/adapter/omp"
 	opencodeadapter "github.com/rfist/lazyrecall/internal/adapter/opencode"
 	"github.com/rfist/lazyrecall/internal/transcript"
@@ -105,21 +106,27 @@ func (r *Refresher) tier2ForSource(
 			}
 		}
 
-	case "opencode":
-		if r.Profile.Roots["opencode"] != "" {
+	case "opencode", "kilo":
+		// One branch for both: kilo ships opencode's schema under another
+		// name, so the same query answers for either once it is told which
+		// database it is reading (see internal/adapter/kilo).
+		if r.Profile.Roots[sourceName] != "" {
 			from := int64(0)
-			if c, ok := cursors[cursorKey("opencode", "*")]; ok && c.DBCursorKey != nil {
+			if c, ok := cursors[cursorKey(sourceName, "*")]; ok && c.DBCursorKey != nil {
 				from = parseInt64(*c.DBCursorKey)
 			}
 			a := opencodeadapter.New(r.SQLite3Path)
+			if sourceName == "kilo" {
+				a = kiloadapter.New(r.SQLite3Path)
+			}
 			prompts, newCursor, err := a.PromptsSince(r.Profile, from)
 			if err == nil {
 				for _, p := range prompts {
-					sid := "opencode:" + r.Profile.Name + ":" + p.SessionID
+					sid := sourceName + ":" + r.Profile.Name + ":" + p.SessionID
 					promptRecords = append(promptRecords, promptRecord(sid, p.Text))
 					covered[sid] = true
 				}
-				cursorRecords = append(cursorRecords, sourceCursorRecordDBKey("opencode", newCursor))
+				cursorRecords = append(cursorRecords, sourceCursorRecordDBKey(sourceName, newCursor))
 			}
 		}
 

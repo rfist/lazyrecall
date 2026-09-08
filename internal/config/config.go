@@ -137,6 +137,14 @@ func defaultSources() map[string]Source {
 			Resume:        []string{"opencode", "--session", "{id}"},
 			SingleInstall: true,
 		},
+		"kilo": {
+			// Kilo is OpenCode's schema and CLI under another name, so the
+			// resume flag is the same one - "-s, --session  session id to
+			// continue", confirmed from `kilo --help` before writing this.
+			Roots:         []string{"~/.local/share/kilo"},
+			Resume:        []string{"kilo", "--session", "{id}"},
+			SingleInstall: true,
+		},
 		"antigravity": {
 			Roots: []string{"~/.gemini/antigravity-cli"},
 			// --conversation "Resume a previous conversation by ID" -

@@ -204,3 +204,59 @@ func TestConversationShowsCompactionBoundaries(t *testing.T) {
 		t.Errorf("middle turn = %v, want a compaction boundary", turns[1].Kind)
 	}
 }
+
+// A harness-injected block is not something a person said. The Claude vocab
+// drops these at classification time, but the database-backed sources build
+// Turns directly - and OpenCode and Kilo were observed storing
+// "<system-reminder>" blocks as user messages exactly the way Claude Code
+// writes them - so LimitTurns has to drop them too, or they show up as
+// "you" turns the user never typed.
+func TestLimitTurnsDropsInjectedBlocks(t *testing.T) {
+	turns, dropped, err := LimitTurns([]Turn{
+		{Kind: KindUserPrompt, Text: "<system-reminder>Note: the user opened a file</system-reminder>"},
+		{Kind: KindUserPrompt, Text: "what actually changed here?"},
+		{Kind: KindUserPrompt, Text: "   "},
+	}, DefaultConversationLimits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dropped != 0 {
+		t.Errorf("dropped = %d; a filtered turn is not a budget drop", dropped)
+	}
+	if len(turns) != 1 || turns[0].Text != "what actually changed here?" {
+		t.Fatalf("turns = %+v, want only the real prompt", turns)
+	}
+}
+
+// An assistant turn is never filtered that way: the agent quoting a tag back
+// is content, and it was never claimed to be user input.
+func TestLimitTurnsKeepsAssistantTextThatLooksLikeATag(t *testing.T) {
+	turns, _, err := LimitTurns([]Turn{
+		{Kind: KindAssistantText, Text: "<system-reminder> is the wrapper you were asking about"},
+	}, DefaultConversationLimits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 1 {
+		t.Errorf("turns = %+v, want the assistant's explanation kept", turns)
+	}
+}
+
+// LimitTurns is the database-backed sources' route to the same budget the
+// file reader applies, so it has to keep the tail and truncate the same way.
+func TestLimitTurnsKeepsTheTailAndTruncates(t *testing.T) {
+	var in []Turn
+	for i := 0; i < 30; i++ {
+		in = append(in, Turn{Kind: KindUserPrompt, Text: strings.Repeat("x", 200)})
+	}
+	turns, dropped, err := LimitTurns(in, ConversationLimits{MaxTurns: 5, MaxTurnBytes: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 5 || dropped != 25 {
+		t.Fatalf("got %d turns and %d dropped, want 5 and 25", len(turns), dropped)
+	}
+	if len(turns[0].Text) != 50 || !turns[0].Truncated {
+		t.Errorf("turn was not truncated to the byte budget: %d bytes, truncated=%v", len(turns[0].Text), turns[0].Truncated)
+	}
+}
