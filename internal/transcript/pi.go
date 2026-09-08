@@ -51,6 +51,10 @@ func (piVocab) Classify(raw map[string]any) (Record, bool) {
 				stopPtr = &sr
 			}
 			if hasBlockType(content, "toolCall") {
+				// No Tool names: the field a "toolCall" block names its
+				// tool with has not been confirmed against a real
+				// transcript, and the Transcript tab shows an unnamed
+				// tool call rather than a guessed one.
 				return Record{Kind: KindToolUse, Timestamp: ts, StopReason: stopPtr}, true
 			}
 			if text, ok := textFromBlocks(content, "text", "text"); ok {

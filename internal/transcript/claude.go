@@ -199,7 +199,7 @@ func (claudeVocab) Classify(raw map[string]any) (Record, bool) {
 			stopPtr = &stopReason
 		}
 		if hasBlockType(content, "tool_use") {
-			return Record{Kind: KindToolUse, Timestamp: ts, StopReason: stopPtr, Origin: origin, Client: client, HumanTyped: human}, true
+			return Record{Kind: KindToolUse, Timestamp: ts, StopReason: stopPtr, Tool: namesFromBlocks(content, "tool_use"), Origin: origin, Client: client, HumanTyped: human}, true
 		}
 		if text, ok := textFromBlocks(content, "text", "text"); ok {
 			return Record{Kind: KindAssistantText, Timestamp: ts, StopReason: stopPtr, Text: strPtr(text), Origin: origin, Client: client, HumanTyped: human}, true

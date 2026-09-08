@@ -88,6 +88,14 @@ type Record struct {
 	// already applied to working directories). Only pi and omp's "session"
 	// records carry this today; nil for every other record.
 	SourceID *string
+
+	// Tool names the tools a KindToolUse record invoked, when the source
+	// records the name (Claude Code's "tool_use" blocks carry a "name"
+	// field; one record can hold several). It is display detail for the
+	// Transcript tab only - nothing in the index reads it - so a source
+	// whose tool-call block shape has not been confirmed leaves it empty
+	// and the reader shows an unnamed tool call rather than a guess.
+	Tool []string
 }
 
 // CompactionInfo is the compaction detail extracted from one
@@ -385,6 +393,39 @@ func hasBlockType(blocks []any, blockType string) bool {
 		}
 	}
 	return false
+}
+
+// namesFromBlocks collects the "name" field of every block of blockType,
+// in order and without duplicates - the tool names a single assistant
+// record's tool_use blocks invoked. A block with no name contributes
+// nothing rather than an empty entry: the reader renders "no name
+// recorded" and "no tool call" differently.
+func namesFromBlocks(blocks []any, blockType string) []string {
+	var out []string
+	for _, b := range blocks {
+		bm, ok := b.(map[string]any)
+		if !ok {
+			continue
+		}
+		if t, _ := bm["type"].(string); t != blockType {
+			continue
+		}
+		name, _ := bm["name"].(string)
+		if name == "" {
+			continue
+		}
+		seen := false
+		for _, existing := range out {
+			if existing == name {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 func strPtr(s string) *string {

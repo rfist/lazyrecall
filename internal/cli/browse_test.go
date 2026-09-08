@@ -889,14 +889,17 @@ func TestBracketsCycleDetailTabs(t *testing.T) {
 	if m.tab != tabPrompts {
 		t.Errorf("] went to %v, want Prompts", m.tab)
 	}
-	m = update(t, m, keyRunes("]"))
-	m = update(t, m, keyRunes("]"))
+	// Counted from the tab set rather than written out, so adding a tab
+	// does not silently turn this into a test of the first three.
+	for i := 1; i < int(numDetailTabs); i++ {
+		m = update(t, m, keyRunes("]"))
+	}
 	if m.tab != tabDetail {
-		t.Errorf("] three times landed on %v, want it to wrap to Detail", m.tab)
+		t.Errorf("] %d times landed on %v, want it to wrap to Detail", numDetailTabs, m.tab)
 	}
 	m = update(t, m, keyRunes("["))
-	if m.tab != tabComments {
-		t.Errorf("[ from Detail went to %v, want it to wrap to Comments", m.tab)
+	if m.tab != numDetailTabs-1 {
+		t.Errorf("[ from Detail went to %v, want it to wrap to the last tab", m.tab)
 	}
 }
 
