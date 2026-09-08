@@ -16,9 +16,12 @@ import (
 	"time"
 
 	"github.com/rfist/lazyrecall/internal/adapter"
+	antigravityadapter "github.com/rfist/lazyrecall/internal/adapter/antigravity"
 	claudeadapter "github.com/rfist/lazyrecall/internal/adapter/claude"
+	gooseadapter "github.com/rfist/lazyrecall/internal/adapter/goose"
 	hermesadapter "github.com/rfist/lazyrecall/internal/adapter/hermes"
 	ompadapter "github.com/rfist/lazyrecall/internal/adapter/omp"
+	opencodeadapter "github.com/rfist/lazyrecall/internal/adapter/opencode"
 	piadapter "github.com/rfist/lazyrecall/internal/adapter/pi"
 	"github.com/rfist/lazyrecall/internal/gitutil"
 	"github.com/rfist/lazyrecall/internal/profile"
@@ -130,6 +133,9 @@ func (r *Refresher) adapters() []adapter.Adapter {
 		piadapter.New(),
 		ompadapter.New(r.SQLite3Path),
 		hermesadapter.New(r.SQLite3Path),
+		gooseadapter.New(r.SQLite3Path),
+		opencodeadapter.New(r.SQLite3Path),
+		antigravityadapter.New(r.SQLite3Path),
 	}
 }
 

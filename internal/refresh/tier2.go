@@ -6,17 +6,23 @@ import (
 
 	"github.com/rfist/lazyrecall/internal/adapter"
 	claudeadapter "github.com/rfist/lazyrecall/internal/adapter/claude"
+	gooseadapter "github.com/rfist/lazyrecall/internal/adapter/goose"
 	hermesadapter "github.com/rfist/lazyrecall/internal/adapter/hermes"
 	ompadapter "github.com/rfist/lazyrecall/internal/adapter/omp"
+	opencodeadapter "github.com/rfist/lazyrecall/internal/adapter/opencode"
 	"github.com/rfist/lazyrecall/internal/transcript"
 )
 
 // tier2ForSource ingests one source's prompts for the search index (task
 // 6.4). It prefers the source's own prompt index (claude's history.jsonl,
-// omp's history table, hermes's messages table) and falls back to
-// transcript-extracted prompts, already collected during this pass's tier-1
-// scan, for any session that index doesn't cover - most notably pi, which
-// has no prompt index at all.
+// omp's history table, hermes/goose/opencode's messages tables) and falls
+// back to transcript-extracted prompts, already collected during this
+// pass's tier-1 scan, for any session that index doesn't cover - most
+// notably pi, which has no prompt index at all, and antigravity, whose
+// per-conversation detail is undecodable protobuf (see that adapter's
+// package doc) so it has no prompt index and no transcript to fall back to
+// either - its sessions are simply never covered here, the same as any
+// other source's fallback-only sessions.
 func (r *Refresher) tier2ForSource(
 	sourceName string,
 	cursors map[string]cursorRow,
@@ -81,9 +87,50 @@ func (r *Refresher) tier2ForSource(
 			}
 		}
 
-	case "pi":
-		// No source index at all: every prompt comes from the fallback
-		// (task 5.4).
+	case "goose":
+		if r.Profile.Roots["goose"] != "" {
+			from := int64(0)
+			if c, ok := cursors[cursorKey("goose", "*")]; ok && c.DBCursorKey != nil {
+				from = parseInt64(*c.DBCursorKey)
+			}
+			a := gooseadapter.New(r.SQLite3Path)
+			prompts, newCursor, err := a.PromptsSince(r.Profile, from)
+			if err == nil {
+				for _, p := range prompts {
+					sid := "goose:" + r.Profile.Name + ":" + p.SessionID
+					promptRecords = append(promptRecords, promptRecord(sid, p.Text))
+					covered[sid] = true
+				}
+				cursorRecords = append(cursorRecords, sourceCursorRecordDBKey("goose", newCursor))
+			}
+		}
+
+	case "opencode":
+		if r.Profile.Roots["opencode"] != "" {
+			from := int64(0)
+			if c, ok := cursors[cursorKey("opencode", "*")]; ok && c.DBCursorKey != nil {
+				from = parseInt64(*c.DBCursorKey)
+			}
+			a := opencodeadapter.New(r.SQLite3Path)
+			prompts, newCursor, err := a.PromptsSince(r.Profile, from)
+			if err == nil {
+				for _, p := range prompts {
+					sid := "opencode:" + r.Profile.Name + ":" + p.SessionID
+					promptRecords = append(promptRecords, promptRecord(sid, p.Text))
+					covered[sid] = true
+				}
+				cursorRecords = append(cursorRecords, sourceCursorRecordDBKey("opencode", newCursor))
+			}
+		}
+
+	case "pi", "antigravity":
+		// pi has no source index at all: every prompt comes from the
+		// fallback (task 5.4). antigravity has neither a source index nor
+		// a transcript for the fallback to draw on (see the package doc
+		// on why its per-conversation detail cannot be read) - its
+		// sessions simply carry no tier-2 prompts, browsable and filterable
+		// like any other session, just not full-text searchable by prompt
+		// content.
 	}
 
 	// Fallback: any discovered session from this source with no prompt

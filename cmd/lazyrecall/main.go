@@ -1,7 +1,8 @@
 // Command lazyrecall is a cross-agent index over coding-agent sessions already
-// written to disk by Claude Code, pi, omp, and hermes. It is read-only with
-// respect to every source; the only file it writes is its own per-profile
-// database (see internal/profile.DataDir).
+// written to disk by Claude Code, pi, omp, hermes, Goose, OpenCode, and the
+// Antigravity CLI. It is read-only with respect to every source; the only
+// file it writes is its own per-profile database (see
+// internal/profile.DataDir).
 package main
 
 import (
@@ -237,7 +238,7 @@ type filterFlags struct {
 
 func parseFilterFlags(fs *flag.FlagSet) filterFlags {
 	return filterFlags{
-		agent:  fs.String("agent", "", "filter by agent (claude, pi, omp, hermes)"),
+		agent:  fs.String("agent", "", "filter by agent (claude, pi, omp, hermes, goose, opencode, antigravity)"),
 		client: fs.String("client", "", "filter by the program the session was driven through (acp, sdk, cli)"),
 		repo:   fs.String("repo", "", "filter by repository root or working directory"),
 		tag:    fs.String("tag", "", "filter by tag"),
@@ -873,6 +874,18 @@ const defaultConfigFile = `# LazyRecall configuration (lazyrecall config).
 # [sources.hermes]
 # roots = ["~/.hermes"]
 # resume = ["hermes", "--resume", "{id}"]
+
+# [sources.goose]
+# roots = ["~/.local/share/goose/sessions"]
+# resume = ["goose", "session", "--resume", "--session-id", "{id}"]
+
+# [sources.opencode]
+# roots = ["~/.local/share/opencode"]
+# resume = ["opencode", "--session", "{id}"]
+
+# [sources.antigravity]
+# roots = ["~/.gemini/antigravity-cli"]
+# resume = ["agy", "--conversation", "{id}"]
 
 # [hide]
 # non_interactive = true
