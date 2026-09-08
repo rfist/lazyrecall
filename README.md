@@ -67,7 +67,8 @@ A session held somewhere other than the agent's own terminal - a Neovim CodeComp
 | `g` / `G` | First / last row |
 | `enter` | Resume the selected session (Sessions); filter by the selected value (Agents, Repos, Tags); switch to the selected profile (Profiles) |
 | `esc` | Clear what this panel is filtering by |
-| `[` / `]` | Previous / next tab in the detail pane |
+| `[` / `]` | Previous / next tab in the detail pane (Detail, Prompts, Transcript, Comments) |
+| `n` / `N` | On the Transcript tab, scroll to the next / previous occurrence of the search phrase |
 | `/` | Keep only the focused panel's rows containing what you type |
 | `s` | Full-text search over your own prompts |
 | `x` | Action menu for the focused panel |
@@ -77,6 +78,20 @@ A session held somewhere other than the agent's own terminal - a Neovim CodeComp
 | `c` / `C` | Add / remove a comment on the selected session |
 | `?` | Show this list |
 | `q`, `Ctrl-C` | Quit |
+
+## The detail pane
+
+The right-hand pane has four tabs, reached with `[` and `]`.
+
+**Detail** is the session's metadata: its identifier and handle, the agent and the client it was driven through, working directory and branch, end state, last activity, name, topic and tags.
+
+**Prompts** is what you actually typed in that session, which is usually the only part of it you remember.
+
+**Transcript** is the conversation itself - your turns, the agent's replies, the tools it called, and any compaction boundaries - read straight from the agent's own transcript file when you select the session. It exists so you can tell whether a session is the one you meant *before* resuming it, since resuming takes over the terminal and moves you into the session's working directory. The end of the conversation is what it keeps: how a session started is already answered by Prompts, and what you need before resuming is where it was left. When there is a search phrase in play, every occurrence is highlighted and `n` / `N` step through them.
+
+The four sources that keep their sessions in a SQLite database rather than in per-session files (`hermes`, `goose`, `opencode`, `antigravity`) write no transcript at all, and the tab says so rather than reporting an error. A transcript the agent has since cleaned up is reported the same way.
+
+**Comments** is your own freeform notes on the session, with the ids `comment rm` takes.
 
 ## Supported sources
 

@@ -40,6 +40,7 @@ import (
 	"github.com/rfist/lazyrecall/internal/search"
 	"github.com/rfist/lazyrecall/internal/session"
 	"github.com/rfist/lazyrecall/internal/sqlitex"
+	"github.com/rfist/lazyrecall/internal/transcript"
 )
 
 // BrowserOptions carries the initial state for one browsing session.
@@ -221,9 +222,15 @@ func (p panelID) isLeftColumn() bool {
 // detailTab is which page of the right-hand pane is showing.
 type detailTab int
 
+// The order is the order you need them in: what the session is, what you
+// asked it, what actually happened, and what you wrote down about it.
+// Transcript sits next to Prompts because they answer the same question at
+// two depths - Prompts to recognise the session, Transcript to see where it
+// was left.
 const (
 	tabDetail detailTab = iota
 	tabPrompts
+	tabTranscript
 	tabComments
 	numDetailTabs
 )
@@ -232,6 +239,8 @@ func (t detailTab) title() string {
 	switch t {
 	case tabPrompts:
 		return "Prompts"
+	case tabTranscript:
+		return "Transcript"
 	case tabComments:
 		return "Comments"
 	}
@@ -338,6 +347,13 @@ type browseModel struct {
 	detail   *viewport.Model
 	detailOf string // session id the viewport's content was built for
 
+	// convo caches the transcript the Transcript tab is showing. The pane
+	// is rebuilt on every frame, and a transcript is a file read rather
+	// than a query against the already-loaded result set, so without this
+	// every keystroke would re-read it. Behind a pointer for the same
+	// reason the viewport is: the render path takes the model by value.
+	convo *conversationCache
+
 	mode       inputMode
 	input      textinput.Model
 	inputLabel string
@@ -388,6 +404,7 @@ func newBrowseModel(opts BrowserOptions) browseModel {
 	m.input.CharLimit = 1000
 	detail := viewport.New(m.width, 12)
 	m.detail = &detail
+	m.convo = &conversationCache{}
 	m.loadAll()
 	return m
 }
@@ -844,6 +861,10 @@ func (m *browseModel) handleBrowseKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.cycleTab(-1)
 	case "]":
 		m.cycleTab(1)
+	case "n":
+		m.jumpToHit(1)
+	case "N":
+		m.jumpToHit(-1)
 	case "m":
 		return m.startInput(modeAddTag)
 	case "M":
@@ -1187,6 +1208,60 @@ func (m *browseModel) cycleTab(delta int) {
 	m.tab = detailTab((int(m.tab) + delta + int(numDetailTabs)) % int(numDetailTabs))
 	m.detailOf = "" // force a re-render of the pane's content
 	m.detail.GotoTop()
+}
+
+// jumpToHit scrolls the detail pane to the next (delta > 0) or previous
+// match of the active search phrase in the transcript - n and N.
+//
+// The hit offsets come from the render that produced the lines currently on
+// screen (see conversationCache), so this reads them rather than
+// recomputing: recomputing would need the pane's width, which only the
+// layout knows, and a jump measured against the wrong width lands in the
+// wrong place.
+func (m *browseModel) jumpToHit(delta int) {
+	if m.tab != tabTranscript {
+		m.notice = "n and N step through matches on the Transcript tab."
+		return
+	}
+	phrase := m.transcriptPhrase()
+	if phrase == "" {
+		m.notice = "No search phrase to step through - press s to search, or / to narrow."
+		return
+	}
+	hits := m.convo.hits
+	if len(hits) == 0 {
+		m.notice = fmt.Sprintf("No match for %q in the part of the transcript that was read.", phrase)
+		return
+	}
+
+	// The pane is scrolled to a line, not to a hit, so "next" is the first
+	// hit strictly below the top line and "previous" the last one strictly
+	// above it. Stepping past either end wraps, which is what makes n
+	// alone enough to walk every match.
+	target := -1
+	if delta > 0 {
+		for _, h := range hits {
+			if h > m.detail.YOffset {
+				target = h
+				break
+			}
+		}
+		if target < 0 {
+			target = hits[0]
+		}
+	} else {
+		for i := len(hits) - 1; i >= 0; i-- {
+			if hits[i] < m.detail.YOffset {
+				target = hits[i]
+				break
+			}
+		}
+		if target < 0 {
+			target = hits[len(hits)-1]
+		}
+	}
+	m.detail.SetYOffset(target)
+	m.notice = fmt.Sprintf("%d matches for %q.", len(hits), phrase)
 }
 
 func clampIndex(i, n int) int {
@@ -2150,10 +2225,23 @@ func (m browseModel) detailContent(opts RenderOptions) string {
 	switch m.tab {
 	case tabPrompts:
 		return renderItemPrompts(m.db, *it, opts)
+	case tabTranscript:
+		return renderItemTranscript(m.convo, *it, m.transcriptPhrase(), opts)
 	case tabComments:
 		return renderItemComments(m.db, *it, opts)
 	}
 	return renderItemDetail(m.db, *it, opts)
+}
+
+// transcriptPhrase is what the Transcript tab highlights and what n and N
+// step through: the full-text search phrase when there is one, otherwise
+// the row filter. Both are things the user typed to find this session, and
+// the transcript is where they will want to see why it matched.
+func (m browseModel) transcriptPhrase() string {
+	if m.query != "" {
+		return m.query
+	}
+	return m.textFilter
 }
 
 // footer is the bottom line: a transient notice when there is one,
@@ -2264,6 +2352,7 @@ var browseActions = []browseAction{
 	{key: "enter", label: "switch", help: "switch to the selected profile", panels: []panelID{panelProfiles}, footer: true},
 	{key: "esc", label: "clear filter", help: "clear what this panel is filtering by", panels: []panelID{panelSessions, panelAgents, panelRepos, panelTags}, footer: true},
 	{key: "[/]", label: "tab", help: "previous/next tab in the detail pane", panels: []panelID{panelSessions, panelDetail}, footer: true},
+	{key: "n/N", label: "next/previous match", help: "on the Transcript tab, scroll to the next/previous occurrence of the search phrase", panels: []panelID{panelSessions, panelDetail}},
 	{key: "/", label: "narrow", help: "keep only the focused panel's rows containing what you type", footer: true},
 	{key: "s", label: "search phrase", help: "full-text search over your own prompts"},
 	{key: "x", label: "menu", help: "action menu for the focused panel", footer: true},
@@ -2395,6 +2484,172 @@ func renderItemComments(db *sqlitex.Runner, it search.Item, opts RenderOptions) 
 		}
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// conversationCache holds one session's transcript, read once and reused
+// until the selection or the search phrase changes. It also carries the
+// line offsets of the current phrase's matches in the text as last
+// rendered, which is what n and N step through: the offsets are recorded
+// by the render that produced the lines the viewport is showing, so a jump
+// can never land on a line computed against a different width.
+type conversationCache struct {
+	// key identifies what the cached turns were read for: the session id
+	// and the transcript path together, so a rebuilt index that repoints a
+	// session at a different file is not served from the old read.
+	key     string
+	turns   []transcript.Turn
+	dropped int
+	err     error
+	loaded  bool
+	// sourceKeepsTranscripts distinguishes "this agent writes no
+	// transcript at all" from "this session has no transcript recorded",
+	// which need different explanations.
+	sourceKeepsTranscripts bool
+	hits                   []int
+}
+
+// load reads the session's transcript unless the cache already holds it.
+func (c *conversationCache) load(it search.Item) {
+	path := ""
+	if it.TranscriptPath != nil {
+		path = *it.TranscriptPath
+	}
+	key := it.SessionID + "\x00" + path
+	if c.loaded && c.key == key {
+		return
+	}
+	*c = conversationCache{key: key, loaded: true}
+
+	// Not an error when there is no vocab: hermes, goose, opencode and
+	// antigravity keep their sessions in a database and write no
+	// transcript at all. The renderer says so in those words rather than
+	// reporting a failure to read a file that was never supposed to exist.
+	vocab, ok := transcript.VocabFor(it.Source)
+	c.sourceKeepsTranscripts = ok
+	if !ok || path == "" {
+		return
+	}
+	c.turns, c.dropped, c.err = transcript.Conversation(path, vocab, transcript.DefaultConversationLimits)
+}
+
+// renderItemTranscript renders the Transcript tab: the conversation itself,
+// as far back as the read budget allows, with the active search phrase
+// highlighted. This is the tab that answers "is this the session I meant"
+// without having to resume it and find out.
+func renderItemTranscript(c *conversationCache, it search.Item, phrase string, opts RenderOptions) string {
+	c.load(it)
+
+	if c.err != nil {
+		// A transcript the index has a path for but that cannot be read is
+		// worth naming: the usual cause is the source tool having cleaned
+		// it up (Claude Code's cleanupPeriodDays) since the last refresh.
+		if os.IsNotExist(c.err) {
+			return style("The transcript file is gone - the agent cleaned it up since the last refresh.", ansiDim, opts.Style)
+		}
+		return "transcript: " + c.err.Error()
+	}
+	if !c.sourceKeepsTranscripts {
+		return style("This agent keeps its sessions in a database, not a transcript file, so there is nothing to read here. Prompts still shows what you asked.", ansiDim, opts.Style)
+	}
+	if it.TranscriptPath == nil || *it.TranscriptPath == "" {
+		return style("The index has no transcript file recorded for this session. A refresh (R) may pick one up.", ansiDim, opts.Style)
+	}
+	if len(c.turns) == 0 {
+		return style("No readable turns in this transcript.", ansiDim, opts.Style)
+	}
+
+	var b strings.Builder
+	if c.dropped > 0 {
+		fmt.Fprintf(&b, "%s\n\n", style(fmt.Sprintf("... %d earlier turns not shown; this is the end of the session.", c.dropped), ansiDim, opts.Style))
+	}
+
+	// Hits are collected against the plain text as it is written, before
+	// styling adds escape sequences, so a match is counted where the
+	// reader sees it and not where an escape happens to fall.
+	c.hits = nil
+	line := strings.Count(b.String(), "\n")
+
+	for i, t := range c.turns {
+		if i > 0 {
+			b.WriteString("\n")
+			line++
+		}
+		fmt.Fprintf(&b, "%s\n", turnHeader(t, opts))
+		line++
+		for _, l := range transcriptBody(t, opts) {
+			if phrase != "" && containsFold(l, phrase) {
+				c.hits = append(c.hits, line)
+			}
+			fmt.Fprintf(&b, "  %s\n", highlightPhrase(l, phrase, opts))
+			line++
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// turnHeader is the one-line speaker label above a turn's body: who spoke,
+// and when, coloured the way the row list colours the same distinctions.
+func turnHeader(t transcript.Turn, opts RenderOptions) string {
+	label, color := "", ""
+	switch t.Kind {
+	case transcript.KindUserPrompt:
+		label, color = "you", ansiCyan
+	case transcript.KindAssistantText:
+		label, color = "agent", ansiGreen
+	case transcript.KindToolUse:
+		// "tool call" rather than a bare "tool" when the source did not
+		// name what was invoked, so an unnamed call does not read as a
+		// label that lost its text.
+		label, color = "tool call", ansiYellow
+		if len(t.Tool) > 0 {
+			label = "tool " + strings.Join(t.Tool, ", ")
+		}
+	case transcript.KindCompactionBoundary:
+		label, color = "--- compacted ---", ansiMagenta
+	}
+	head := style(label, color, opts.Style)
+	if t.At != nil {
+		head += " " + style(t.At.Format("2006-01-02 15:04"), ansiDim, opts.Style)
+	}
+	return head
+}
+
+// transcriptBody is a turn's wrapped body lines, or nothing for the turns
+// that are only an event (a tool call, a compaction boundary).
+func transcriptBody(t transcript.Turn, opts RenderOptions) []string {
+	if t.Text == "" {
+		return nil
+	}
+	lines := wrapToWidth(t.Text, opts.Width-2)
+	if t.Truncated {
+		lines = append(lines, style("... turn truncated", ansiDim, opts.Style))
+	}
+	return lines
+}
+
+// highlightPhrase marks every case-insensitive occurrence of phrase in line
+// in reverse video, so the reason a session matched a search is visible in
+// the transcript rather than only in the result row.
+func highlightPhrase(line, phrase string, opts RenderOptions) string {
+	if !opts.Style || phrase == "" {
+		return line
+	}
+	lower, lowerPhrase := strings.ToLower(line), strings.ToLower(phrase)
+	var b strings.Builder
+	for {
+		i := strings.Index(lower, lowerPhrase)
+		if i < 0 {
+			b.WriteString(line)
+			return b.String()
+		}
+		b.WriteString(line[:i])
+		b.WriteString(ansiReverse + line[i:i+len(phrase)] + ansiReset)
+		line, lower = line[i+len(phrase):], lower[i+len(phrase):]
+	}
+}
+
+func containsFold(s, sub string) bool {
+	return strings.Contains(strings.ToLower(s), strings.ToLower(sub))
 }
 
 // promptTabLimit is how many of a session's prompts the Prompts tab reads.

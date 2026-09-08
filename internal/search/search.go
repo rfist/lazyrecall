@@ -72,8 +72,13 @@ type Item struct {
 
 	DirExists    *bool // nil = never checked (no cwd known); false = missing
 	MessageCount *int64
-	Resumable    bool
-	Tags         []string
+	// TranscriptPath is the session's on-disk transcript, for the sources
+	// that keep one (claude, pi, omp). It is nil for the SQLite-backed
+	// sources, which record no transcript file at all - a reader must
+	// treat nil as "this source keeps no transcript", not as an error.
+	TranscriptPath *string
+	Resumable      bool
+	Tags           []string
 	// Archived is true when the user archived the session (change
 	// add-archive-facility). The flag lives on lineages, so it survives a
 	// full index rebuild; it is shown by `archive list` and tagged on the
@@ -107,7 +112,7 @@ func (it Item) GroupKey() (key string, isRepo bool) {
 const itemFrom = `sessions s LEFT JOIN lineages l ON l.id = s.lineage_id`
 
 var itemColumns = `s.id, s.source, s.lineage_id, l.handle, s.cwd, s.git_branch, s.git_repo_root, s.git_common_root,
-	s.started_at, s.last_activity_at, s.topic, s.name, s.last_prompt, s.end_state, s.origin, s.client, s.dir_exists, s.message_count, s.resumable,
+	s.started_at, s.last_activity_at, s.topic, s.name, s.last_prompt, s.end_state, s.origin, s.client, s.dir_exists, s.message_count, s.transcript_path, s.resumable,
 	l.archived_at IS NOT NULL AS archived`
 
 type itemRow struct {
@@ -129,6 +134,7 @@ type itemRow struct {
 	Client         *string `json:"client"`
 	DirExists      *int64  `json:"dir_exists"`
 	MessageCount   *int64  `json:"message_count"`
+	TranscriptPath *string `json:"transcript_path"`
 	Resumable      int64   `json:"resumable"`
 	Archived       int64   `json:"archived"`
 	Tags           *string `json:"tags"`
@@ -143,22 +149,23 @@ func (row itemRow) toItem() Item {
 		origin = session.OriginUnknown
 	}
 	it := Item{
-		SessionID:     row.ID,
-		Source:        row.Source,
-		LineageID:     row.LineageID,
-		CWD:           row.CWD,
-		GitBranch:     row.GitBranch,
-		GitRepoRoot:   row.GitRepoRoot,
-		GitCommonRoot: row.GitCommonRoot,
-		Topic:         row.Topic,
-		Name:          row.Name,
-		LastPrompt:    row.LastPrompt,
-		EndState:      session.EndState(row.EndState),
-		Origin:        origin,
-		Client:        row.Client,
-		MessageCount:  row.MessageCount,
-		Resumable:     row.Resumable != 0,
-		Archived:      row.Archived != 0,
+		SessionID:      row.ID,
+		Source:         row.Source,
+		LineageID:      row.LineageID,
+		CWD:            row.CWD,
+		GitBranch:      row.GitBranch,
+		GitRepoRoot:    row.GitRepoRoot,
+		GitCommonRoot:  row.GitCommonRoot,
+		Topic:          row.Topic,
+		Name:           row.Name,
+		LastPrompt:     row.LastPrompt,
+		EndState:       session.EndState(row.EndState),
+		Origin:         origin,
+		Client:         row.Client,
+		MessageCount:   row.MessageCount,
+		TranscriptPath: row.TranscriptPath,
+		Resumable:      row.Resumable != 0,
+		Archived:       row.Archived != 0,
 	}
 	if row.Handle != nil {
 		it.Handle = *row.Handle
