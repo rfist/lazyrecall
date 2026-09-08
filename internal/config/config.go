@@ -120,6 +120,31 @@ func defaultSources() map[string]Source {
 			Resume:        []string{"hermes", "--resume", "{id}"},
 			SingleInstall: true,
 		},
+		"goose": {
+			Roots: []string{"~/.local/share/goose/sessions"},
+			// --session-id "Requires --resume" (confirmed from `goose
+			// session --help` before writing this) - the two must be
+			// given together, not --resume alone (which would resume
+			// the most recent session instead of the one requested).
+			Resume:        []string{"goose", "session", "--resume", "--session-id", "{id}"},
+			SingleInstall: true,
+		},
+		"opencode": {
+			Roots: []string{"~/.local/share/opencode"},
+			// -s/--session at the top level, with no subcommand, is
+			// opencode's own default command ("start opencode tui") -
+			// confirmed from `opencode --help` before writing this.
+			Resume:        []string{"opencode", "--session", "{id}"},
+			SingleInstall: true,
+		},
+		"antigravity": {
+			Roots: []string{"~/.gemini/antigravity-cli"},
+			// --conversation "Resume a previous conversation by ID" -
+			// confirmed unambiguous from `agy --help` before writing
+			// this, unlike goose/opencode's flag combinations above.
+			Resume:        []string{"agy", "--conversation", "{id}"},
+			SingleInstall: true,
+		},
 	}
 }
 

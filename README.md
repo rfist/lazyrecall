@@ -86,8 +86,13 @@ A session held somewhere other than the agent's own terminal - a Neovim CodeComp
 | `pi` | Transcripts under `~/.pi/agent/sessions/` | niche |
 | `omp` | SQLite index at `~/.omp/agent/history.db`, transcripts under `~/.omp/agent/sessions/` | niche |
 | `hermes` | SQLite at `~/.hermes/state.db` | niche |
+| `goose` (Block's Goose) | SQLite at `~/.local/share/goose/sessions/sessions.db` | niche |
+| `opencode` | SQLite at `~/.local/share/opencode/opencode.db` | niche |
+| `antigravity` (Antigravity CLI, `agy`) | SQLite at `~/.gemini/antigravity-cli/conversation_summaries.db`; listing only, not full-text searchable - see note below | niche |
 
-Plainly: if you use Claude Code, `claude` is the one you will actually have; `pi`, `omp`, and `hermes` are niche tools most people will not have installed at all. Each source is a set of roots to scan plus an adapter; new sources are added via the `[sources]` config table (see [Configuration](#configuration)) and an adapter in the code.
+Plainly: if you use Claude Code, `claude` is the one you will actually have; the rest are niche tools most people will not have installed at all. Each source is a set of roots to scan plus an adapter; new sources are added via the `[sources]` config table (see [Configuration](#configuration)) and an adapter in the code.
+
+`goose`, `opencode`, and `antigravity` keep everything in one SQLite database rather than per-session transcript files, the same shape `hermes` already used - so they need no transcript parser, just a query. `antigravity` is the exception worth knowing about: its per-conversation detail is stored as protobuf with no available schema to decode, so its sessions show up with a topic, working directory, and end time like everything else, but `s` (full-text prompt search) will never find anything inside them - only their title/preview, which `/` (the row filter) already covers.
 
 ## Configuration
 
@@ -96,10 +101,10 @@ Configuration is optional and lives at `~/.config/lazyrecall/config.toml` (`$LAZ
 | Key | Default |
 | --- | --- |
 | `default_profile` | (none; the program applies its own rule) |
-| `sources.<agent>.roots` | `claude`: `["~/.claude-personal", "~/.claude"]`, `pi`: `["~/.pi"]`, `omp`: `["~/.omp"]`, `hermes`: `["~/.hermes"]` |
-| `sources.<agent>.resume` | `claude --resume {id}`, `pi --session {id}`, `omp --resume {id}`, `hermes --resume {id}` |
+| `sources.<agent>.roots` | `claude`: `["~/.claude-personal", "~/.claude"]`, `pi`: `["~/.pi"]`, `omp`: `["~/.omp"]`, `hermes`: `["~/.hermes"]`, `goose`: `["~/.local/share/goose/sessions"]`, `opencode`: `["~/.local/share/opencode"]`, `antigravity`: `["~/.gemini/antigravity-cli"]` |
+| `sources.<agent>.resume` | `claude --resume {id}`, `pi --session {id}`, `omp --resume {id}`, `hermes --resume {id}`, `goose session --resume --session-id {id}`, `opencode --session {id}`, `agy --conversation {id}` |
 | `sources.<agent>.env_var` | `claude`: `CLAUDE_CONFIG_DIR`; the rest: none |
-| `sources.<agent>.single_install` | `pi`, `omp`, `hermes`: `true`; `claude`: `false` |
+| `sources.<agent>.single_install` | everything but `claude`: `true` |
 | `hide.non_interactive` | `true` |
 | `hide.min_messages` | `0` |
 | `hide.paths` | `[]` |

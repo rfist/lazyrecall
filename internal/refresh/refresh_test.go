@@ -206,12 +206,17 @@ func TestMissingSourceDoesNotBlockOthers(t *testing.T) {
 			unavailableCount++
 		}
 	}
-	othersUnavailable = unavailableCount == 3
+	// Every source but pi, whatever the current count is - a fixed number
+	// here already broke once, when goose/opencode/antigravity were added
+	// (change add-goose-opencode-antigravity) and this test's "3" silently
+	// became wrong. Deriving it from sum.Sources itself means the next
+	// source added does not require remembering to touch this test too.
+	othersUnavailable = unavailableCount == len(sum.Sources)-1
 	if !piAvailable {
 		t.Errorf("expected pi to be indexed, got %+v", sum.Sources)
 	}
 	if !othersUnavailable {
-		t.Errorf("expected the other 3 sources reported unavailable, got %+v", sum.Sources)
+		t.Errorf("expected every source but pi reported unavailable, got %+v", sum.Sources)
 	}
 
 	// pi has no prompt index: tier 2 must fall back to the transcript.
