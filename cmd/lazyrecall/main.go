@@ -1,8 +1,8 @@
 // Command lazyrecall is a cross-agent index over coding-agent sessions already
 // written to disk by Claude Code, pi, omp, hermes, Goose, OpenCode, Kilo,
 // and the Antigravity CLI. It is read-only with respect to every source; the only
-// file it writes is its own per-profile database (see
-// internal/profile.DataDir).
+// file it writes is its own single index database (see
+// internal/profile.DataDir, internal/profile.DBPath).
 package main
 
 import (
@@ -24,6 +24,7 @@ import (
 	"github.com/rfist/lazyrecall/internal/resume"
 	"github.com/rfist/lazyrecall/internal/review"
 	"github.com/rfist/lazyrecall/internal/search"
+	"github.com/rfist/lazyrecall/internal/session"
 	"github.com/rfist/lazyrecall/internal/sqlitex"
 )
 
@@ -47,7 +48,6 @@ func main() {
 
 func run(args []string) error {
 	global := flag.NewFlagSet("lazyrecall", flag.ContinueOnError)
-	profileFlag := global.String("profile", "", "profile to operate under (default: the primary profile)")
 	jsonFlag := global.Bool("json", false, "machine-readable JSON output")
 	noRefresh := global.Bool("no-refresh", false, "skip the automatic refresh before answering")
 	allFlag := global.Bool("all", false, "apply no hide rule and show archived sessions")
@@ -59,7 +59,7 @@ func run(args []string) error {
 	// falls back to a plain listing when output is not a terminal, so
 	// `lazyrecall | head` keeps working.
 	if len(args) == 0 {
-		return cmdBrowse(global, profileFlag, allFlag, noRefresh, nil)
+		return cmdBrowse(global, allFlag, noRefresh, nil)
 	}
 	cmd, rest := args[0], args[1:]
 	if cmd == "-h" || cmd == "--help" || cmd == "help" {
@@ -76,27 +76,29 @@ func run(args []string) error {
 	// the same global flag set plus its own.
 	switch cmd {
 	case "list":
-		return cmdList(global, profileFlag, jsonFlag, allFlag, noRefresh, rest)
+		return cmdList(global, jsonFlag, allFlag, noRefresh, rest)
 	case "search":
-		return cmdSearch(global, profileFlag, jsonFlag, allFlag, noRefresh, rest)
+		return cmdSearch(global, jsonFlag, allFlag, noRefresh, rest)
 	case "review":
-		return cmdReview(global, profileFlag, jsonFlag, allFlag, noRefresh, rest)
+		return cmdReview(global, jsonFlag, allFlag, noRefresh, rest)
 	case "resume":
-		return cmdResume(global, profileFlag, jsonFlag, noRefresh, rest)
+		return cmdResume(global, jsonFlag, noRefresh, rest)
 	case "browse":
-		return cmdBrowse(global, profileFlag, allFlag, noRefresh, rest)
+		return cmdBrowse(global, allFlag, noRefresh, rest)
 	case "comment":
-		return cmdComment(global, profileFlag, noRefresh, rest)
+		return cmdComment(global, noRefresh, rest)
 	case "tag":
-		return cmdTag(global, profileFlag, noRefresh, rest)
+		return cmdTag(global, noRefresh, rest)
 	case "archive":
-		return cmdArchive(global, profileFlag, noRefresh, rest)
+		return cmdArchive(global, noRefresh, rest)
 	case "unarchive":
-		return cmdUnarchive(global, profileFlag, noRefresh, rest)
+		return cmdUnarchive(global, noRefresh, rest)
+	case "group":
+		return cmdGroup(global, noRefresh, rest)
 	case "refresh":
-		return cmdRefresh(global, profileFlag, rest)
-	case "profiles":
-		return cmdProfiles(*jsonFlag)
+		return cmdRefresh(global, rest)
+	case "groups":
+		return cmdGroups(global, jsonFlag, noRefresh, rest)
 	case "config":
 		return cmdConfig(global, rest)
 	default:
@@ -118,17 +120,18 @@ func printUsage() {
 
 Usage:
   lazyrecall                  open the interactive browser
-  lazyrecall list      [--agent=NAME] [--client=NAME] [--repo=PATH] [--tag=NAME] [--since=DAYS] [--all] [--json] [--profile=NAME]
-  lazyrecall search    QUERY [--agent=NAME] [--client=NAME] [--repo=PATH] [--tag=NAME] [--all] [--json] [--profile=NAME]
-  lazyrecall review    [--all] [--json] [--profile=NAME]
-  lazyrecall resume    [SESSION_ID] [--profile=NAME]
+  lazyrecall list      [--agent=NAME] [--client=NAME] [--repo=PATH] [--tag=NAME] [--group=NAME] [--since=DAYS] [--all] [--json]
+  lazyrecall search    QUERY [--agent=NAME] [--client=NAME] [--repo=PATH] [--tag=NAME] [--group=NAME] [--all] [--json]
+  lazyrecall review    [--group=NAME] [--all] [--json]
+  lazyrecall resume    [SESSION_ID]
   lazyrecall comment   add SESSION_ID TEXT... | list SESSION_ID | rm COMMENT_ID
   lazyrecall tag       add SESSION_ID TAG | rm SESSION_ID TAG | list
   lazyrecall archive   SESSION_ID | list
   lazyrecall unarchive SESSION_ID
-  lazyrecall refresh   [--full] [--profile=NAME]
-  lazyrecall browse    [QUERY] [--agent=NAME] [--client=NAME] [--repo=PATH] [--tag=NAME] [--all] [--profile=NAME]
-  lazyrecall profiles  [--json]
+  lazyrecall group     SESSION_ID NAME | SESSION_ID archive | SESSION_ID --auto
+  lazyrecall refresh   [--full]
+  lazyrecall browse    [QUERY] [--agent=NAME] [--client=NAME] [--repo=PATH] [--tag=NAME] [--group=NAME] [--all]
+  lazyrecall groups    [--json]
   lazyrecall config    path|init|show
   lazyrecall version, --version, -v
 
@@ -137,34 +140,35 @@ Resuming runs the agent directly in this terminal - nothing else needs to be
 installed.
 
 The browser - "lazyrecall" with no arguments, or "lazyrecall browse" - opens on
-the most recent sessions and stays open: narrow by profile, agent, repository,
-or tag from the side panels, read and edit comments/tags, and resume a session
-without leaving it.
+the most recent sessions from every install and stays open: narrow by agent,
+repository, tag, or group from the side panels, read and edit comments/tags,
+and resume a session without leaving it.
 
 SESSION_ID accepts either a session's short handle (e.g. "3") or its full
 composite identifier.
+
+--group narrows to one view of a session's group (see "lazyrecall groups" for
+the configured names): a configured group's name, "archive" for every
+archived session, or "unknown" for sessions no group rule or manual choice
+has claimed. With no --group, a listing shows every non-archived session
+regardless of group - the same as before groups existed.
 `)
 }
 
-// resolveProfile discovers profiles and picks the active one, printing it
-// is left to callers (spec session-index, "Active profile is visible"). A
-// config file that cannot be parsed surfaces here, before any profile work
-// happens: it is the first thing every command path shares.
-func resolveProfile(requested string) (profile.Profile, error) {
-	profiles, err := profile.Discover()
+// openDB discovers every install on this machine, refreshes them all
+// (unless skipped) into the single index, and returns a runner over it
+// (design.md decision 6: every operation refreshes first; change
+// group-sessions-in-one-index: there is one index for every install, not
+// one active profile to pick). The database program path is gone with the
+// preflight check that supplied it (change
+// replace-sqlite-subprocess-with-driver): the driver is compiled in, so
+// refresh.New receives an empty path it ignores.
+func openDB(skipRefresh bool, full bool) (*sqlitex.Runner, error) {
+	installs, err := profile.Discover()
 	if err != nil {
-		return profile.Profile{}, err
+		return nil, err
 	}
-	return profile.Resolve(profiles, requested)
-}
-
-// openDB refreshes (unless skipped) and returns a runner over the active
-// profile's database (design.md decision 6: every operation refreshes
-// first). The database program path is gone with the preflight check that
-// supplied it (change replace-sqlite-subprocess-with-driver): the driver
-// is compiled in, so refresh.New receives an empty path it ignores.
-func openDB(p profile.Profile, skipRefresh bool, full bool) (*sqlitex.Runner, error) {
-	r, err := refresh.New(p, "")
+	r, err := refresh.New(installs, "")
 	if err != nil {
 		return nil, err
 	}
@@ -233,57 +237,141 @@ type filterFlags struct {
 	client *string
 	repo   *string
 	tag    *string
+	group  *string
 	since  *int
 }
 
 func parseFilterFlags(fs *flag.FlagSet) filterFlags {
 	return filterFlags{
-		agent:  fs.String("agent", "", "filter by agent (claude, pi, omp, hermes, goose, opencode, kilo, antigravity)"),
+		agent:  fs.String("agent", "", "filter by agent (claude, pi, omp, hermes, goose, opencode, kilo, antigravity) or install/label"),
 		client: fs.String("client", "", "filter by the program the session was driven through (acp, sdk, cli)"),
 		repo:   fs.String("repo", "", "filter by repository root or working directory"),
 		tag:    fs.String("tag", "", "filter by tag"),
+		group:  fs.String("group", "", "filter by group name, 'archive', or 'unknown' (see 'lazyrecall groups')"),
 		since:  fs.Int("since", 0, "only sessions active in the last N days"),
 	}
 }
 
-func buildFilter(ff filterFlags) search.Filter {
-	agent, repo, tag, sinceDays := ff.agent, ff.repo, ff.tag, ff.since
-	f := search.Filter{Agent: *agent, Client: *ff.client, Repo: *repo, Tag: *tag}
-	if *sinceDays > 0 {
-		t := time.Now().Add(-time.Duration(*sinceDays) * 24 * time.Hour)
+// buildFilter turns the parsed filter flags into a search.Filter, resolving
+// --agent to Filter.Agent and/or Filter.Install (resolveAgentFilter) and
+// validating --group against cfg's configured groups (search.ValidateGroup)
+// - the CLI's one gate for a bad --group value, since every caller below
+// goes through this rather than setting Filter.Group directly.
+func buildFilter(cfg config.Config, ff filterFlags) (search.Filter, error) {
+	if err := search.ValidateGroup(cfg, *ff.group); err != nil {
+		return search.Filter{}, err
+	}
+	agent, install := resolveAgentFilter(cfg, *ff.agent)
+	f := search.Filter{
+		Agent:   agent,
+		Install: install,
+		Client:  *ff.client,
+		Repo:    *ff.repo,
+		Tag:     *ff.tag,
+		Group:   *ff.group,
+		Groups:  cfg.Groups,
+	}
+	if *ff.since > 0 {
+		t := time.Now().Add(-time.Duration(*ff.since) * 24 * time.Hour)
 		f.Since = &t
 	}
-	return f
+	return f, nil
 }
 
-func cmdList(global *flag.FlagSet, profileFlag *string, jsonFlag, allFlag, noRefresh *bool, args []string) error {
+// resolveAgentFilter decides what a --agent value names and returns the
+// search.Filter field to set it on (change group-sessions-in-one-index,
+// follow-up fix): Filter.Agent ("every install of this source") and
+// Filter.Install ("this one install specifically") can no longer be tried
+// interchangeably the way a single combined field once was, because an
+// install's name can equal its own source's name - one claude install is
+// literally named "claude" - which made a label over *that* install
+// (e.g. "cc") indistinguishable from "every claude session": the OR'd
+// source-match alone already covered it.
+//
+// Resolution order, first match wins:
+//  1. arg is a configured label of a discovered install -> Filter.Install
+//     (a label was written specifically to narrow to one account). This
+//     step uses Profile.ConfiguredLabel, not Profile.Label: Label falls back
+//     to the install's own name when no label is configured, and matching
+//     against that fallback was a P1 bug - with no [labels] table at all,
+//     the install named "claude" was mistaken for a label of itself, so
+//     --agent=claude resolved to Filter.Install="claude" (one install) in
+//     step 1, never reaching step 2's Filter.Agent="claude" (every claude
+//     install) - silently narrower than the README promises, and invisible
+//     in any test that always configured labels.
+//  2. arg is a configured source name -> Filter.Agent, so --agent=claude
+//     keeps meaning every claude account, exactly as before labels existed.
+//  3. arg is a discovered install's own name -> Filter.Install.
+//  4. otherwise -> Filter.Agent, unchanged: an unrecognised value behaves
+//     exactly as it always has (matching nothing).
+//
+// A discovery failure at steps 1/3 is not fatal - those steps simply
+// resolve nothing, and arg falls through toward step 4, the same fallback
+// openDB's own discovery failure would surface more loudly a moment later
+// anyway.
+func resolveAgentFilter(cfg config.Config, arg string) (agent, install string) {
+	if arg == "" {
+		return "", ""
+	}
+	installs, discErr := profile.Discover()
+	if discErr == nil {
+		for _, p := range installs {
+			if label, ok := p.ConfiguredLabel(cfg); ok && label == arg {
+				return "", p.Name
+			}
+		}
+	}
+	if _, ok := cfg.Sources[arg]; ok {
+		return arg, ""
+	}
+	if discErr == nil {
+		for _, p := range installs {
+			if p.Name == arg {
+				return "", p.Name
+			}
+		}
+	}
+	return arg, ""
+}
+
+// groupLabel is what a listing's header note and JSON envelope call the
+// scope it ran under: the group name it was filtered to, or "all" for no
+// filter - the group-sessions-in-one-index replacement for the active
+// profile name those same places used to show.
+func groupLabel(f search.Filter) string {
+	if f.Group == "" {
+		return "all"
+	}
+	return f.Group
+}
+
+func cmdList(global *flag.FlagSet, jsonFlag, allFlag, noRefresh *bool, args []string) error {
 	ff := parseFilterFlags(global)
 	if _, err := parseInterleaved(global, args); err != nil {
-		return err
-	}
-	p, err := resolveProfile(*profileFlag)
-	if err != nil {
 		return err
 	}
 	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}
-	db, err := openDB(p, *noRefresh, false)
+	f, err := buildFilter(cfg, ff)
 	if err != nil {
 		return err
 	}
-	f := buildFilter(ff)
+	db, err := openDB(*noRefresh, false)
+	if err != nil {
+		return err
+	}
 	f.Hide = cfg.Hide
 	f.ShowAll = *allFlag
 	items, hidden, err := search.ListWithHidden(db, f)
 	if err != nil {
 		return err
 	}
-	return outputItems(p, items, *jsonFlag, hidden, search.EmptyMessage(p.Name, f, ""))
+	return outputItems(items, *jsonFlag, hidden, search.EmptyMessage(f, ""), groupLabel(f), installLabelsForCLI(cfg), cfg.Groups, cfg.ArchiveColor, cfg.UnknownColor)
 }
 
-func cmdSearch(global *flag.FlagSet, profileFlag *string, jsonFlag, allFlag, noRefresh *bool, args []string) error {
+func cmdSearch(global *flag.FlagSet, jsonFlag, allFlag, noRefresh *bool, args []string) error {
 	ff := parseFilterFlags(global)
 	rest, err := parseInterleaved(global, args)
 	if err != nil {
@@ -294,69 +382,80 @@ func cmdSearch(global *flag.FlagSet, profileFlag *string, jsonFlag, allFlag, noR
 	}
 	query := strings.Join(rest, " ")
 
-	p, err := resolveProfile(*profileFlag)
-	if err != nil {
-		return err
-	}
 	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}
-	db, err := openDB(p, *noRefresh, false)
+	f, err := buildFilter(cfg, ff)
 	if err != nil {
 		return err
 	}
-	f := buildFilter(ff)
+	db, err := openDB(*noRefresh, false)
+	if err != nil {
+		return err
+	}
 	f.Hide = cfg.Hide
 	f.ShowAll = *allFlag
 	items, hidden, err := search.SearchWithHidden(db, query, f)
 	if err != nil {
 		return err
 	}
-	return outputItems(p, items, *jsonFlag, hidden, search.EmptyMessage(p.Name, f, query))
+	return outputItems(items, *jsonFlag, hidden, search.EmptyMessage(f, query), groupLabel(f), installLabelsForCLI(cfg), cfg.Groups, cfg.ArchiveColor, cfg.UnknownColor)
 }
 
-func cmdReview(global *flag.FlagSet, profileFlag *string, jsonFlag, allFlag, noRefresh *bool, args []string) error {
+func cmdReview(global *flag.FlagSet, jsonFlag, allFlag, noRefresh *bool, args []string) error {
+	groupFlag := global.String("group", "", "filter by group name, 'archive', or 'unknown' (see 'lazyrecall groups')")
 	if err := global.Parse(args); err != nil {
-		return err
-	}
-	p, err := resolveProfile(*profileFlag)
-	if err != nil {
 		return err
 	}
 	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}
-	db, err := openDB(p, *noRefresh, false)
+	if err := search.ValidateGroup(cfg, *groupFlag); err != nil {
+		return err
+	}
+	db, err := openDB(*noRefresh, false)
 	if err != nil {
 		return err
 	}
-	entries, hidden, err := review.ReportWithHidden(db, search.Filter{Hide: cfg.Hide, ShowAll: *allFlag})
+	f := search.Filter{Hide: cfg.Hide, ShowAll: *allFlag, Group: *groupFlag, Groups: cfg.Groups}
+	entries, hidden, err := review.ReportWithHidden(db, f)
 	if err != nil {
 		return err
 	}
 	if *jsonFlag {
-		return jsonEnvelope(p.Name, func() error {
-			return cli.WriteReviewJSON(os.Stdout, entries)
-		})
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		items := make([]search.Item, len(entries))
+		for i, e := range entries {
+			items[i] = e.Item
+		}
+		type envelope struct {
+			Group string `json:"group"`
+			Items []any  `json:"items"`
+		}
+		return enc.Encode(envelope{Group: groupLabel(f), Items: cli.ToJSONItems(items)})
 	}
-	printProfileHeader(p.Name, hidden)
-	cli.WriteReviewHuman(os.Stdout, entries, review.EmptyMessage(p.Name), cli.DetermineOptions(os.Stdout))
+	printHiddenNote(hidden)
+	opts := cli.DetermineOptions(os.Stdout)
+	opts.InstallLabels = installLabelsForCLI(cfg)
+	opts.GroupColors = cli.GroupColors(cfg.Groups, cfg.ArchiveColor, cfg.UnknownColor)
+	cli.WriteReviewHuman(os.Stdout, entries, review.EmptyMessage(groupLabel(f)), opts)
 	return nil
 }
 
-func cmdResume(global *flag.FlagSet, profileFlag *string, jsonFlag, noRefresh *bool, args []string) error {
+func cmdResume(global *flag.FlagSet, jsonFlag, noRefresh *bool, args []string) error {
 	rest, err := parseInterleaved(global, args)
 	if err != nil {
 		return err
 	}
 
-	p, err := resolveProfile(*profileFlag)
+	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}
-	db, err := openDB(p, *noRefresh, false)
+	db, err := openDB(*noRefresh, false)
 	if err != nil {
 		return err
 	}
@@ -368,21 +467,21 @@ func cmdResume(global *flag.FlagSet, profileFlag *string, jsonFlag, noRefresh *b
 		// design.md decision 4) - disambiguated purely by shape, so a
 		// handle that resolves to nothing is reported rather than
 		// silently falling through to act on some other session.
-		item, found, err := search.ItemForIdentifier(db, p.Name, rest[0])
+		item, found, err := search.ItemForIdentifier(db, rest[0], cfg.Groups)
 		if err != nil {
 			return err
 		}
 		if !found {
-			return fmt.Errorf("%q does not resolve to any session in profile %q", rest[0], p.Name)
+			return fmt.Errorf("%q does not resolve to any session", rest[0])
 		}
 		target = item
 	} else {
-		items, err := search.List(db, search.Filter{})
+		items, err := search.List(db, search.Filter{Groups: cfg.Groups})
 		if err != nil {
 			return err
 		}
 		if len(items) == 0 {
-			fmt.Println(search.EmptyMessage(p.Name, search.Filter{}, ""))
+			fmt.Println(search.EmptyMessage(search.Filter{}, ""))
 			return nil
 		}
 		chosen, ok, err := cli.Pick(items, os.Stdin, os.Stdout)
@@ -399,7 +498,7 @@ func cmdResume(global *flag.FlagSet, profileFlag *string, jsonFlag, noRefresh *b
 	// resume-in-current-terminal, design.md decision 1), so anything below
 	// this call only ever runs on a failure path - there is no LazyRecall left
 	// to report success from.
-	tpl, profileEnv, profileOK, profileReason := resumeSource(target.Source, profileNameFrom(target.SessionID))
+	tpl, profileEnv, profileOK, profileReason := resumeSource(target.Source, session.InstallFromID(target.SessionID))
 	out := resume.Resume(resume.Target{
 		Source: target.Source, SourceSessionID: sourceSessionIDFrom(target.SessionID),
 		CWD: target.CWD, GitRepoRoot: target.GitRepoRoot, DirExists: target.DirExists,
@@ -428,73 +527,62 @@ func sourceSessionIDFrom(compositeID string) string {
 	return compositeID
 }
 
-// profileNameFrom recovers the profile name from LazyRecall's composite id
-// ("source:profile:sourceSessionID") - the same composite sourceSessionIDFrom
-// reads, just the middle segment instead of the last. Needed because a
-// session accepted via the browser may belong to a profile other than the
-// one this command opened with (the browser switches profiles in-process),
-// so the profile a session's own agent must be started under has to be read
-// off the session itself, not assumed from the command's own --profile flag
-// (change fix-resume-session-identity, design.md decision 3).
-func profileNameFrom(compositeID string) string {
-	parts := strings.SplitN(compositeID, ":", 3)
-	if len(parts) == 3 {
-		return parts[1]
-	}
-	return ""
-}
-
 // resumeSource resolves everything a session's source needs to be resumed
 // from a single config load: the argv template the resume command is built
 // from (cfg.Sources[source].Resume, passed through as Target.Resume) and
-// the environment override for the session's own profile (profileEnvFor).
+// the environment override for the session's own install (profileEnvFor).
 // The two come from the same config file, so resolving them together keeps
 // the resume command from reading and parsing it twice. An empty template
 // means the source has no configured resume command; resume reports that
 // source as one it does not know how to resume.
-func resumeSource(source, profileName string) (tpl []string, env map[string]string, ok bool, reason string) {
+func resumeSource(source, installName string) (tpl []string, env map[string]string, ok bool, reason string) {
 	cfg, err := config.Load()
 	if err != nil {
 		return nil, nil, false, fmt.Sprintf("loading config: %v", err)
 	}
 	tpl = cfg.Sources[source].Resume
-	env, ok, reason = profileEnvFor(cfg, source, profileName)
+	env, ok, reason = profileEnvFor(cfg, source, installName)
 	return tpl, env, ok, reason
 }
 
-// profileEnvFor resolves the environment overrides needed to start
-// source's agent against the installation profileName's session belongs to
-// (design.md decision 3: apply the session's profile configuration to the
-// environment). Which env var points at the active root is configured per
-// source (internal/config: a source's EnvVar). A source with no EnvVar
-// never varies per profile on this machine - pi/omp/hermes are each
-// bundled into exactly one profile (internal/profile) - so it returns
-// ok=true with a nil env unconditionally, leaving other sources unaffected
-// (task 2.2). ok=false means the profile's configuration could not be
-// determined; the caller must not start the agent in that case (task 2.3).
-func profileEnvFor(cfg config.Config, source, profileName string) (env map[string]string, ok bool, reason string) {
+// profileEnvFor resolves the environment overrides needed to start source's
+// agent against the installation installName's session belongs to
+// (design.md decision 3: apply the session's install configuration to the
+// environment). Which env var points at the install's root is configured
+// per source (internal/config: a source's EnvVar). A source with no EnvVar
+// never varies by install on this machine - each single_install source has
+// exactly one (internal/profile.Discover) - so it returns ok=true with a
+// nil env unconditionally, leaving other sources unaffected (task 2.2).
+// ok=false means the install's configuration could not be determined; the
+// caller must not start the agent in that case (task 2.3). installName is
+// read off the session itself (session.InstallFromID), not assumed from any
+// command-line flag, because a session shown in one browsing session can
+// belong to any install once one index holds them all together (change
+// group-sessions-in-one-index, carrying forward fix-resume-session-identity,
+// design.md decision 3).
+func profileEnvFor(cfg config.Config, source, installName string) (env map[string]string, ok bool, reason string) {
 	envVar := cfg.Sources[source].EnvVar
 	if envVar == "" {
 		return nil, true, ""
 	}
 	discovered, err := profile.Discover()
 	if err != nil {
-		return nil, false, fmt.Sprintf("discovering profiles: %v", err)
+		return nil, false, fmt.Sprintf("discovering installs: %v", err)
 	}
 	for _, p := range discovered {
-		if p.Name != profileName {
+		if p.Name != installName {
 			continue
 		}
 		root := p.Roots[source]
 		if root == "" {
-			return nil, false, fmt.Sprintf("profile %q has no %s configuration root", profileName, source)
+			return nil, false, fmt.Sprintf("install %q has no %s configuration root", installName, source)
 		}
 		return map[string]string{envVar: root}, true, ""
 	}
-	return nil, false, fmt.Sprintf("no discovered profile named %q", profileName)
+	return nil, false, fmt.Sprintf("no discovered install named %q", installName)
 }
 
-func cmdComment(global *flag.FlagSet, profileFlag *string, noRefresh *bool, args []string) error {
+func cmdComment(global *flag.FlagSet, noRefresh *bool, args []string) error {
 	rest, err := parseInterleaved(global, args)
 	if err != nil {
 		return err
@@ -502,11 +590,7 @@ func cmdComment(global *flag.FlagSet, profileFlag *string, noRefresh *bool, args
 	if len(rest) == 0 {
 		return fmt.Errorf("usage: lazyrecall comment add|list|rm ...")
 	}
-	p, err := resolveProfile(*profileFlag)
-	if err != nil {
-		return err
-	}
-	db, err := openDB(p, *noRefresh, false)
+	db, err := openDB(*noRefresh, false)
 	if err != nil {
 		return err
 	}
@@ -516,7 +600,7 @@ func cmdComment(global *flag.FlagSet, profileFlag *string, noRefresh *bool, args
 		if len(rest) < 3 {
 			return fmt.Errorf("usage: lazyrecall comment add SESSION_ID TEXT...")
 		}
-		lineage, err := annotate.LineageForIdentifier(db, p.Name, rest[1])
+		lineage, err := annotate.LineageForIdentifier(db, rest[1])
 		if err != nil {
 			return err
 		}
@@ -525,7 +609,7 @@ func cmdComment(global *flag.FlagSet, profileFlag *string, noRefresh *bool, args
 		if len(rest) < 2 {
 			return fmt.Errorf("usage: lazyrecall comment list SESSION_ID")
 		}
-		lineage, err := annotate.LineageForIdentifier(db, p.Name, rest[1])
+		lineage, err := annotate.LineageForIdentifier(db, rest[1])
 		if err != nil {
 			return err
 		}
@@ -554,7 +638,7 @@ func cmdComment(global *flag.FlagSet, profileFlag *string, noRefresh *bool, args
 	}
 }
 
-func cmdTag(global *flag.FlagSet, profileFlag *string, noRefresh *bool, args []string) error {
+func cmdTag(global *flag.FlagSet, noRefresh *bool, args []string) error {
 	rest, err := parseInterleaved(global, args)
 	if err != nil {
 		return err
@@ -562,11 +646,7 @@ func cmdTag(global *flag.FlagSet, profileFlag *string, noRefresh *bool, args []s
 	if len(rest) == 0 {
 		return fmt.Errorf("usage: lazyrecall tag add|rm|list ...")
 	}
-	p, err := resolveProfile(*profileFlag)
-	if err != nil {
-		return err
-	}
-	db, err := openDB(p, *noRefresh, false)
+	db, err := openDB(*noRefresh, false)
 	if err != nil {
 		return err
 	}
@@ -576,7 +656,7 @@ func cmdTag(global *flag.FlagSet, profileFlag *string, noRefresh *bool, args []s
 		if len(rest) < 3 {
 			return fmt.Errorf("usage: lazyrecall tag add SESSION_ID TAG")
 		}
-		lineage, err := annotate.LineageForIdentifier(db, p.Name, rest[1])
+		lineage, err := annotate.LineageForIdentifier(db, rest[1])
 		if err != nil {
 			return err
 		}
@@ -585,7 +665,7 @@ func cmdTag(global *flag.FlagSet, profileFlag *string, noRefresh *bool, args []s
 		if len(rest) < 3 {
 			return fmt.Errorf("usage: lazyrecall tag rm SESSION_ID TAG")
 		}
-		lineage, err := annotate.LineageForIdentifier(db, p.Name, rest[1])
+		lineage, err := annotate.LineageForIdentifier(db, rest[1])
 		if err != nil {
 			return err
 		}
@@ -609,7 +689,7 @@ func cmdTag(global *flag.FlagSet, profileFlag *string, noRefresh *bool, args []s
 // decision the user made, recorded on the lineage (annotate.Archive) so a
 // full index rebuild cannot destroy it. `list` renders the archived
 // sessions through the normal row path rather than a bespoke format.
-func cmdArchive(global *flag.FlagSet, profileFlag *string, noRefresh *bool, args []string) error {
+func cmdArchive(global *flag.FlagSet, noRefresh *bool, args []string) error {
 	rest, err := parseInterleaved(global, args)
 	if err != nil {
 		return err
@@ -617,11 +697,11 @@ func cmdArchive(global *flag.FlagSet, profileFlag *string, noRefresh *bool, args
 	if len(rest) == 0 {
 		return fmt.Errorf("usage: lazyrecall archive SESSION_ID|list")
 	}
-	p, err := resolveProfile(*profileFlag)
+	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}
-	db, err := openDB(p, *noRefresh, false)
+	db, err := openDB(*noRefresh, false)
 	if err != nil {
 		return err
 	}
@@ -631,17 +711,17 @@ func cmdArchive(global *flag.FlagSet, profileFlag *string, noRefresh *bool, args
 		if err != nil {
 			return err
 		}
-		items, err := search.ListByLineageIDs(db, ids)
+		items, err := search.ListByLineageIDs(db, ids, cfg.Groups)
 		if err != nil {
 			return err
 		}
-		return outputItems(p, items, false, 0, "No archived sessions.")
+		return outputItems(items, false, 0, "No archived sessions.", "archive", installLabelsForCLI(cfg), cfg.Groups, cfg.ArchiveColor, cfg.UnknownColor)
 	}
 
 	// SESSION_ID accepts the short handle exactly like every other
 	// command (annotate.LineageForIdentifier), so "archive 3" names the
 	// same session "comment add 3 ..." does.
-	lineage, err := annotate.LineageForIdentifier(db, p.Name, rest[0])
+	lineage, err := annotate.LineageForIdentifier(db, rest[0])
 	if err != nil {
 		return err
 	}
@@ -650,7 +730,7 @@ func cmdArchive(global *flag.FlagSet, profileFlag *string, noRefresh *bool, args
 
 // cmdUnarchive implements `lazyrecall unarchive SESSION_ID`, returning an
 // archived session to normal listings.
-func cmdUnarchive(global *flag.FlagSet, profileFlag *string, noRefresh *bool, args []string) error {
+func cmdUnarchive(global *flag.FlagSet, noRefresh *bool, args []string) error {
 	rest, err := parseInterleaved(global, args)
 	if err != nil {
 		return err
@@ -658,31 +738,67 @@ func cmdUnarchive(global *flag.FlagSet, profileFlag *string, noRefresh *bool, ar
 	if len(rest) == 0 {
 		return fmt.Errorf("usage: lazyrecall unarchive SESSION_ID")
 	}
-	p, err := resolveProfile(*profileFlag)
+	db, err := openDB(*noRefresh, false)
 	if err != nil {
 		return err
 	}
-	db, err := openDB(p, *noRefresh, false)
-	if err != nil {
-		return err
-	}
-	lineage, err := annotate.LineageForIdentifier(db, p.Name, rest[0])
+	lineage, err := annotate.LineageForIdentifier(db, rest[0])
 	if err != nil {
 		return err
 	}
 	return annotate.Unarchive(db, lineage)
 }
 
-func cmdRefresh(global *flag.FlagSet, profileFlag *string, args []string) error {
+// cmdGroup implements `lazyrecall group SESSION_ID NAME`, `lazyrecall group
+// SESSION_ID archive`, and `lazyrecall group SESSION_ID --auto` (change
+// group-sessions-in-one-index) - the CLI surface for annotate.SetGroup,
+// which also backs the browser's `p` popup in Stage E. SESSION_ID accepts
+// the short handle exactly like every other annotation command.
+func cmdGroup(global *flag.FlagSet, noRefresh *bool, args []string) error {
+	auto := global.Bool("auto", false, "clear the manual override, returning to the automatic path-based group")
+	rest, err := parseInterleaved(global, args)
+	if err != nil {
+		return err
+	}
+	if len(rest) == 0 || (!*auto && len(rest) < 2) {
+		return fmt.Errorf("usage: lazyrecall group SESSION_ID NAME|archive|--auto")
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	db, err := openDB(*noRefresh, false)
+	if err != nil {
+		return err
+	}
+	lineage, err := annotate.LineageForIdentifier(db, rest[0])
+	if err != nil {
+		return err
+	}
+
+	choice := ""
+	label := "automatic"
+	if !*auto {
+		choice = rest[1]
+		label = choice
+	}
+	if err := annotate.SetGroup(db, cfg, lineage, choice); err != nil {
+		return err
+	}
+	fmt.Printf("lin %s -> %s\n", rest[0], label)
+	return nil
+}
+
+func cmdRefresh(global *flag.FlagSet, args []string) error {
 	full := global.Bool("full", false, "discard the index and rebuild it from scratch")
 	if err := global.Parse(args); err != nil {
 		return err
 	}
-	p, err := resolveProfile(*profileFlag)
+	installs, err := profile.Discover()
 	if err != nil {
 		return err
 	}
-	r, err := refresh.New(p, "")
+	r, err := refresh.New(installs, "")
 	if err != nil {
 		return err
 	}
@@ -690,62 +806,130 @@ func cmdRefresh(global *flag.FlagSet, profileFlag *string, args []string) error 
 	if err != nil {
 		return err
 	}
-	fmt.Printf("Profile: %s\n", p.Name)
 	for _, s := range sum.Sources {
+		label := s.Source
+		if s.Install != "" {
+			label = s.Source + " (" + s.Install + ")"
+		}
 		if s.Available {
-			fmt.Printf("  %s: %d sessions\n", s.Source, s.Sessions)
+			fmt.Printf("  %s: %d sessions\n", label, s.Sessions)
 		} else {
-			fmt.Printf("  %s: unavailable (%v)\n", s.Source, s.Err)
+			fmt.Printf("  %s: unavailable (%v)\n", label, s.Err)
 		}
 	}
 	return nil
 }
 
-// cmdProfiles prints each discovered profile by name together with the
-// sources it covers (spec session-search, "The profile listing is
-// readable"; choose-from-known-values task 4.1/4.2). The prior form printed
-// p.Sources() straight through %v, which is Go's own map syntax
-// ("claude: map[claude:/Users/...]") - not something intended to be read,
-// and not a reliable way to learn a profile's name from the command line.
-func cmdProfiles(jsonOut bool) error {
-	profiles, err := profile.Discover()
+// cmdGroups implements `lazyrecall groups` (change
+// group-sessions-in-one-index), replacing the old `profiles` command now
+// that a session's group and the install that produced it are two separate
+// questions: each configured group in config order with its paths and
+// non-archived session count, then the archive and unknown counts, then an
+// installs section naming each discovered install by its display label so
+// "which account" is still answerable without a group of its own. --json
+// carries the same data as a minimal object; counts and layout polish is
+// Phase 2 (see the plan).
+func cmdGroups(global *flag.FlagSet, jsonFlag, noRefresh *bool, args []string) error {
+	if err := global.Parse(args); err != nil {
+		return err
+	}
+	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}
-	if jsonOut {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(profiles)
+	db, err := openDB(*noRefresh, false)
+	if err != nil {
+		return err
 	}
-	if len(profiles) == 0 {
-		fmt.Println("No session sources found on this machine.")
-		return nil
+	counts, err := search.Counts(db, cfg.Hide, cfg.Groups)
+	if err != nil {
+		return err
 	}
-	for i, p := range profiles {
-		if i > 0 {
-			fmt.Println()
-		}
-		fmt.Println(p.Name)
-		sources := p.Sources()
-		names := make([]string, 0, len(sources))
-		for name := range sources {
-			names = append(names, name)
-		}
-		sort.Strings(names) // deterministic - map iteration order is not
-		for _, name := range names {
-			fmt.Printf("  %s: %s\n", name, sources[name])
-		}
+	installs, err := profile.Discover()
+	if err != nil {
+		return err
 	}
+
+	if *jsonFlag {
+		return writeGroupsJSON(cfg, counts, installs)
+	}
+	writeGroupsHuman(cfg, counts, installs)
 	return nil
 }
 
-// discoverProfilesForBrowser feeds the browser's profile-switch panel,
-// which takes a plain slice with no error slot: a discovery failure here is
-// best-effort (the panel simply offers nothing), while every command path
-// surfaces the same failure through resolveProfile.
-func discoverProfilesForBrowser() []profile.Profile {
-	profiles, _ := profile.Discover()
-	return profiles
+func writeGroupsHuman(cfg config.Config, counts search.GroupCounts, installs []profile.Profile) {
+	for _, g := range cfg.Groups {
+		fmt.Printf("%s (%s): %d\n", g.Name, strings.Join(g.Paths, ", "), counts.ByGroup[g.Name])
+	}
+	fmt.Printf("archive %d\n", counts.Archive)
+	if counts.Unknown > 0 {
+		fmt.Printf("unknown %d\n", counts.Unknown)
+	}
+	if len(installs) == 0 {
+		return
+	}
+	fmt.Println()
+	fmt.Println("installs:")
+	for _, p := range installs {
+		fmt.Printf("  %s: %s (%s, %s)\n", p.Label(cfg), p.Name, p.Source(), p.Root())
+	}
+}
+
+func writeGroupsJSON(cfg config.Config, counts search.GroupCounts, installs []profile.Profile) error {
+	type groupOut struct {
+		Name  string   `json:"name"`
+		Paths []string `json:"paths"`
+		Count int      `json:"count"`
+	}
+	type installOut struct {
+		Label   string `json:"label"`
+		Install string `json:"install"`
+		Source  string `json:"source"`
+		Root    string `json:"root"`
+	}
+	groups := make([]groupOut, 0, len(cfg.Groups))
+	for _, g := range cfg.Groups {
+		groups = append(groups, groupOut{Name: g.Name, Paths: g.Paths, Count: counts.ByGroup[g.Name]})
+	}
+	outInstalls := make([]installOut, 0, len(installs))
+	for _, p := range installs {
+		outInstalls = append(outInstalls, installOut{Label: p.Label(cfg), Install: p.Name, Source: p.Source(), Root: p.Root()})
+	}
+	out := struct {
+		Groups   []groupOut   `json:"groups"`
+		Archive  int          `json:"archive"`
+		Unknown  int          `json:"unknown"`
+		Installs []installOut `json:"installs"`
+	}{Groups: groups, Archive: counts.Archive, Unknown: counts.Unknown, Installs: outInstalls}
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(out)
+}
+
+// discoverInstallsForBrowser feeds the browser's Transcript tab, which
+// needs to resolve a database-backed session's own install (session.
+// InstallFromID) rather than any single "active profile" - a notion that no
+// longer exists once one browsing session covers every install's data
+// together (change group-sessions-in-one-index). It takes a plain slice
+// with no error slot: a discovery failure here is best-effort (the
+// Transcript tab simply can't resolve the install), while every command
+// path surfaces the same failure through openDB.
+func discoverInstallsForBrowser() []profile.Profile {
+	installs, _ := profile.Discover()
+	return installs
+}
+
+// installLabelsForCLI computes the install-name -> display-label map every
+// row renderer needs for its badge (cli.InstallLabels) - the CLI's own text
+// output (list/search/review/archive list/browse's non-terminal fallback)
+// and the interactive browser both go through the same map, built once per
+// command rather than once per row. A discovery failure here is not fatal:
+// the caller already surfaces the same failure more loudly through openDB,
+// and a listing with no label map simply falls back to showing bare source
+// names, exactly as it always has.
+func installLabelsForCLI(cfg config.Config) map[string]string {
+	installs, _ := profile.Discover()
+	return cli.InstallLabels(installs, cfg)
 }
 
 // ---------------------------------------------------------------------
@@ -800,10 +984,6 @@ func cmdConfig(global *flag.FlagSet, args []string) error {
 		if err != nil {
 			return err
 		}
-		// Provenance is about the effective config, so the env layer is
-		// applied before printing (a LAZYRECALL_PROFILE set in the shell
-		// should show as the env it actually came from).
-		cfg.ApplyEnv()
 		return showConfig(cfg)
 	default:
 		return fmt.Errorf("unknown config subcommand %q", rest[0])
@@ -815,11 +995,12 @@ func cmdConfig(global *flag.FlagSet, args []string) error {
 // at once with each value attributed to the layer that set it.
 func showConfig(cfg config.Config) error {
 	values := map[string]any{
-		"default_profile":      cfg.DefaultProfile,
 		"hide.non_interactive": cfg.Hide.NonInteractive,
 		"hide.min_messages":    cfg.Hide.MinMessages,
 		"hide.paths":           cfg.Hide.Paths,
 		"browse.show_archived": cfg.Browse.ShowArchived,
+		"browse.default_group": cfg.Browse.DefaultGroup,
+		"labels":               cfg.Labels,
 	}
 	names := make([]string, 0, len(cfg.Sources))
 	for name := range cfg.Sources {
@@ -830,6 +1011,26 @@ func showConfig(cfg config.Config) error {
 		values["sources."+name+".roots"] = cfg.Sources[name].Roots
 		values["sources."+name+".resume"] = cfg.Sources[name].Resume
 		values["sources."+name+".env_var"] = cfg.Sources[name].EnvVar
+	}
+	// Groups have no default entry to fall back on - only a config file
+	// puts one there - so with none configured, no "groups.*" key appears
+	// at all, rather than printing an empty placeholder.
+	for _, g := range cfg.Groups {
+		values["groups."+g.Name+".paths"] = g.Paths
+		values["groups."+g.Name+".color"] = g.Color
+	}
+	// ArchiveColor and UnknownColor follow the same rule as a group's own
+	// color: no default, so only a table actually declared in the file
+	// gives one of these keys an entry at all - checked via Origins, like
+	// cfg.Groups above is implicitly, rather than by the color being
+	// non-empty, since `[groups.archive]` with no color key is still
+	// file-owned and still worth showing as "" (change
+	// archive-unknown-colors).
+	if _, ok := cfg.Origins["groups.archive.color"]; ok {
+		values["groups.archive.color"] = cfg.ArchiveColor
+	}
+	if _, ok := cfg.Origins["groups.unknown.color"]; ok {
+		values["groups.unknown.color"] = cfg.UnknownColor
 	}
 
 	keys := make([]string, 0, len(values))
@@ -854,9 +1055,6 @@ func showConfig(cfg config.Config) error {
 const defaultConfigFile = `# LazyRecall configuration (lazyrecall config).
 # Every setting here is optional: with no config file, LazyRecall runs on
 # exactly these defaults. Uncomment a line to change it.
-
-# The profile used when neither --profile nor LAZYRECALL_PROFILE is set.
-# default_profile = "claude-personal"
 
 # [sources.claude]
 # roots = ["~/.claude-personal", "~/.claude"]
@@ -891,6 +1089,16 @@ const defaultConfigFile = `# LazyRecall configuration (lazyrecall config).
 # roots = ["~/.gemini/antigravity-cli"]
 # resume = ["agy", "--conversation", "{id}"]
 
+# Labels give an install a short display name and a matching --agent value,
+# without deciding its group (see [groups.*] below) - keyed by config root,
+# a top-level table on purpose: a [sources.X] table above replaces that
+# source's whole configuration, roots included, so labels cannot live there
+# without risking silently dropping an agent from discovery the moment its
+# labels are configured.
+# [labels]
+# "~/.claude" = "cc"
+# "~/.claude-personal" = "ccp"
+
 # [hide]
 # non_interactive = true
 # min_messages = 0
@@ -901,61 +1109,77 @@ const defaultConfigFile = `# LazyRecall configuration (lazyrecall config).
 # stopped mid-turn - so a threshold that hides short sessions also hides
 # real problems from the review listing.
 
+# Groups sort sessions by working directory, at query time - editing this
+# section regroups every session immediately, with no refresh needed. A
+# session under none of these paths is Unknown; one under more than one is
+# claimed by whichever path is the longest match. With no [groups.*] tables
+# at all, LazyRecall looks exactly as it does with this file absent.
+# A group's color is optional and applies to its name in the Groups panel
+# and to the handle of every session filed under it (browse and the list
+# command alike): an ANSI name (black, red, green, yellow, blue, magenta, cyan,
+# white), a bright-prefixed variant of one (e.g. bright-blue), or a 24-bit
+# hex triplet like #3355ff. Case-insensitive; with none set, a group's rows
+# keep today's default styling.
+# [groups.work]
+# paths = ["~/code", "~/work"]
+# color = "blue"
+
+# [groups.personal]
+# paths = ["~/dotfiles", "~/personal"]
+# color = "#22aa88"
+
+# "archive" and "unknown" are reserved names - they cannot be real groups -
+# but [groups.archive] and [groups.unknown] may still set a color for the
+# two built-in views: every archived session, and every session no group
+# rule or manual choice has claimed. Only color is allowed here; a session
+# handle with no color from any of these rules is white.
+# [groups.archive]
+# color = "red"
+
+# [groups.unknown]
+# color = "white"
+
 # [browse]
 # show_archived = false
+# default_group = ""
 `
 
-func outputItems(p profile.Profile, items []search.Item, jsonOut bool, hidden int, emptyMessage string) error {
+// outputItems writes a listing either as JSON - an envelope naming the
+// group it was filtered to (change group-sessions-in-one-index: restores
+// the shape `{"profile": ..., "items": [...]}` had before Stage B dropped
+// it for a bare array, renamed to "group" now that there is no more single
+// active profile) - or as the human-readable listing, preceded by the
+// hidden-count note.
+func outputItems(items []search.Item, jsonOut bool, hidden int, emptyMessage string, group string, labels map[string]string, groups []config.Group, archiveColor, unknownColor string) error {
 	if jsonOut {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
-		w := &jsonProfileWriter{enc: enc, profile: p.Name}
-		return w.writeItems(items)
+		type envelope struct {
+			Group string `json:"group"`
+			Items []any  `json:"items"`
+		}
+		return enc.Encode(envelope{Group: group, Items: cli.ToJSONItems(items)})
 	}
-	printProfileHeader(p.Name, hidden)
-	cli.WriteItemsHuman(os.Stdout, items, emptyMessage, cli.DetermineOptions(os.Stdout))
+	printHiddenNote(hidden)
+	opts := cli.DetermineOptions(os.Stdout)
+	opts.InstallLabels = labels
+	// GroupColors is computed once here, not per row - the same discipline
+	// InstallLabels already follows (see cli.RenderOptions.GroupColors).
+	opts.GroupColors = cli.GroupColors(groups, archiveColor, unknownColor)
+	cli.WriteItemsHuman(os.Stdout, items, emptyMessage, opts)
 	return nil
 }
 
-// printProfileHeader prints the "Profile:" header every human-readable
-// command starts with. When hide rules suppressed something, the header
-// says how much is missing and how to see it, so hiding is never silent;
-// the note never appears in --all mode, where nothing is suppressed.
-func printProfileHeader(name string, hidden int) {
+// printHiddenNote is what is left of the old "Profile: NAME" header once
+// there is no longer a single active profile to name (change
+// group-sessions-in-one-index): just the part that was never about the
+// profile - how many sessions the standing hide rules suppressed, so hiding
+// is never silent. Nothing is printed when nothing was hidden, and the note
+// never appears in --all mode, where nothing is suppressed.
+func printHiddenNote(hidden int) {
 	if hidden > 0 {
-		fmt.Printf("Profile: %s   %d hidden (--all to show)\n", name, hidden)
-		return
+		fmt.Printf("%d hidden (--all to show)\n", hidden)
 	}
-	fmt.Printf("Profile: %s\n", name)
-}
-
-// jsonProfileWriter wraps the item list with the active profile, so
-// machine-readable output also identifies which profile it was produced
-// under (spec session-index, "Active profile is visible").
-type jsonProfileWriter struct {
-	enc     *json.Encoder
-	profile string
-}
-
-func (w *jsonProfileWriter) writeItems(items []search.Item) error {
-	type out struct {
-		Profile string `json:"profile"`
-		Items   []any  `json:"items"`
-	}
-	return w.enc.Encode(out{Profile: w.profile, Items: cli.ToJSONItems(items)})
-}
-
-// jsonEnvelope wraps a JSON-array writer with the active profile, so
-// review's machine-readable output also identifies which profile it ran
-// under (spec session-index, "Active profile is visible"), without
-// review's own array-writer needing to know about the envelope.
-func jsonEnvelope(profileName string, writeArray func() error) error {
-	fmt.Printf(`{"profile": %q, "entries": `, profileName)
-	if err := writeArray(); err != nil {
-		return err
-	}
-	fmt.Println("}")
-	return nil
 }
 
 // ---------------------------------------------------------------------
@@ -971,31 +1195,46 @@ func jsonEnvelope(profileName string, writeArray func() error) error {
 // rather than an installation gap (design.md decision 7): the system
 // reports that browsing requires a terminal and prints the equivalent
 // non-interactive listing.
-func cmdBrowse(global *flag.FlagSet, profileFlag *string, allFlag, noRefresh *bool, args []string) error {
+func cmdBrowse(global *flag.FlagSet, allFlag, noRefresh *bool, args []string) error {
 	ff := parseFilterFlags(global)
-	agent, repoF, tag := ff.agent, ff.repo, ff.tag
+	repoF, tag := ff.repo, ff.tag
 	positionals, err := parseInterleaved(global, args)
 	if err != nil {
 		return err
 	}
 	query := strings.Join(positionals, " ")
 
-	p, err := resolveProfile(*profileFlag)
-	if err != nil {
-		return err
-	}
 	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}
+	if err := search.ValidateGroup(cfg, *ff.group); err != nil {
+		return err
+	}
+	// "if not given, use cfg.Browse.DefaultGroup" (change
+	// group-sessions-in-one-index): --group and the config default share the
+	// same empty-string zero value, so an unset flag falls through to the
+	// configured default exactly as an explicit --group="" would - the only
+	// value that distinction could matter for is already All either way.
+	group := *ff.group
+	if group == "" {
+		group = cfg.Browse.DefaultGroup
+	}
+	agentResolved, installResolved := resolveAgentFilter(cfg, *ff.agent)
+	// Computed once per command, from the same install discovery openDB and
+	// resolveAgentFilter each already perform, and handed to both branches
+	// below (cli.InstallLabels): the interactive browser's rows and the
+	// non-interactive fallback listing must show the same badges (change
+	// group-sessions-in-one-index).
+	labels := installLabelsForCLI(cfg)
 
 	if !cli.IsTerminal(os.Stdout) {
 		fmt.Fprintln(os.Stderr, "browsing requires a terminal; showing a non-interactive listing instead.")
-		db, err := openDB(p, *noRefresh, false)
+		db, err := openDB(*noRefresh, false)
 		if err != nil {
 			return err
 		}
-		f := search.Filter{Agent: *agent, Client: *ff.client, Repo: *repoF, Tag: *tag, Hide: cfg.Hide, ShowAll: *allFlag}
+		f := search.Filter{Agent: agentResolved, Install: installResolved, Client: *ff.client, Repo: *repoF, Tag: *tag, Hide: cfg.Hide, ShowAll: *allFlag, Group: group, Groups: cfg.Groups}
 		var items []search.Item
 		var hidden int
 		if query != "" {
@@ -1006,32 +1245,36 @@ func cmdBrowse(global *flag.FlagSet, profileFlag *string, allFlag, noRefresh *bo
 		if err != nil {
 			return err
 		}
-		return outputItems(p, items, false, hidden, search.EmptyMessage(p.Name, f, query))
+		return outputItems(items, false, hidden, search.EmptyMessage(f, query), groupLabel(f), labels, cfg.Groups, cfg.ArchiveColor, cfg.UnknownColor)
 	}
 
-	db, err := openDB(p, *noRefresh, false)
+	db, err := openDB(*noRefresh, false)
 	if err != nil {
 		return err
 	}
 
 	selected, ok, err := cli.RunBrowser(cli.BrowserOptions{
-		DB:          db,
-		ProfileName: p.Name,
-		Repo:        *repoF,
-		Agent:       *agent,
-		Tag:         *tag,
-		Client:      *ff.client,
-		Query:       query,
-		Style:       os.Getenv("NO_COLOR") == "",
+		DB:      db,
+		Repo:    *repoF,
+		Agent:   agentResolved,
+		Install: installResolved,
+		Tag:     *tag,
+		Client:  *ff.client,
+		Query:   query,
+		Style:   os.Getenv("NO_COLOR") == "",
 		// The browser opens under the same hide rules the non-interactive
 		// commands use, and starts showing everything when the user asked
 		// for it either on this command line or in the config file - the
 		// browse.show_archived preference, and --all here, are the same
 		// "show me everything" choice.
-		ShowAll:  *allFlag || cfg.Browse.ShowArchived,
-		Hide:     cfg.Hide,
-		Resolve:  resolveProfile,
-		Profiles: discoverProfilesForBrowser,
+		ShowAll:       *allFlag || cfg.Browse.ShowArchived,
+		Hide:          cfg.Hide,
+		Group:         group,
+		Groups:        cfg.Groups,
+		ArchiveColor:  cfg.ArchiveColor,
+		UnknownColor:  cfg.UnknownColor,
+		Installs:      discoverInstallsForBrowser,
+		InstallLabels: labels,
 	})
 	if err != nil {
 		return err
@@ -1040,12 +1283,12 @@ func cmdBrowse(global *flag.FlagSet, profileFlag *string, allFlag, noRefresh *bo
 		return nil
 	}
 
-	// The accepted session may belong to a different profile than the one
-	// this function opened with - the browser switches profiles in-process
-	// (spec session-search, "Switching profile replaces the view") - so
-	// resume against the item the browser returned as it was selected; the
-	// item carries its profile's data. This is the same resume path the
-	// non-interactive `lazyrecall resume` uses.
+	// The selected session may belong to any install - the browser lists
+	// every install's sessions together now that one index holds them all
+	// (change group-sessions-in-one-index) - so resume against the install
+	// named in the session's own composite id, not any single "active"
+	// one. This is the same resume path the non-interactive `lazyrecall
+	// resume` uses.
 	//
 	// cli.RunBrowser has already returned by this point, which is exactly
 	// what makes the terminal-restoration ordering correct (change
@@ -1054,7 +1297,7 @@ func cmdBrowse(global *flag.FlagSet, profileFlag *string, allFlag, noRefresh *bo
 	// p.Run() returning, so that has already happened before Resume can
 	// replace this process - there is no later point at which it could
 	// still be undone.
-	tpl, profileEnv, profileOK, profileReason := resumeSource(selected.Source, profileNameFrom(selected.SessionID))
+	tpl, profileEnv, profileOK, profileReason := resumeSource(selected.Source, session.InstallFromID(selected.SessionID))
 	out := resume.Resume(resume.Target{
 		Source: selected.Source, SourceSessionID: sourceSessionIDFrom(selected.SessionID),
 		CWD: selected.CWD, GitRepoRoot: selected.GitRepoRoot, DirExists: selected.DirExists,

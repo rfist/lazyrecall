@@ -38,45 +38,51 @@ CGO_ENABLED=0 go build -o lazyrecall ./cmd/lazyrecall
 
 ```
 lazyrecall                  open the interactive browser
-lazyrecall list      [--agent=NAME] [--client=NAME] [--repo=PATH] [--tag=NAME] [--since=DAYS] [--json] [--profile=NAME]
-lazyrecall search    QUERY [--agent=NAME] [--client=NAME] [--repo=PATH] [--tag=NAME] [--json] [--profile=NAME]
-lazyrecall review    [--json] [--profile=NAME]
-lazyrecall resume    [SESSION_ID] [--profile=NAME]
+lazyrecall list      [--agent=NAME] [--client=NAME] [--repo=PATH] [--tag=NAME] [--group=NAME] [--since=DAYS] [--all] [--json]
+lazyrecall search    QUERY [--agent=NAME] [--client=NAME] [--repo=PATH] [--tag=NAME] [--group=NAME] [--all] [--json]
+lazyrecall review    [--group=NAME] [--all] [--json]
+lazyrecall resume    [SESSION_ID]
 lazyrecall comment   add SESSION_ID TEXT... | list SESSION_ID | rm COMMENT_ID
 lazyrecall tag       add SESSION_ID TAG | rm SESSION_ID TAG | list
 lazyrecall archive   SESSION_ID | list
 lazyrecall unarchive SESSION_ID
-lazyrecall refresh   [--full] [--profile=NAME]
-lazyrecall browse    [QUERY] [--agent=NAME] [--client=NAME] [--repo=PATH] [--tag=NAME] [--profile=NAME]
-lazyrecall profiles  [--json]
+lazyrecall group     SESSION_ID NAME | SESSION_ID archive | SESSION_ID --auto
+lazyrecall refresh   [--full]
+lazyrecall browse    [QUERY] [--agent=NAME] [--client=NAME] [--repo=PATH] [--tag=NAME] [--group=NAME] [--all]
+lazyrecall groups    [--json]
 lazyrecall config    path|init|show
 lazyrecall version, --version, -v
 ```
 
 A session held somewhere other than the agent's own terminal - a Neovim CodeCompanion chat, say, which reaches Claude Code over ACP - is listed as `[claude·acp]` and selected by `--client=acp`.
 
+`--group` narrows to one view of a session's group (see [Groups](#groups) below, and `lazyrecall groups` for the configured names on this machine): a configured group's name, `archive` for every archived session, or `unknown` for sessions no group rule or manual choice has claimed. With no `--group`, a listing shows every non-archived session regardless of group - the same as before groups existed, and the same as it looks with no `[groups.*]` configured at all.
+
 ## Key bindings
 
 | Key | Action |
 | --- | --- |
-| `1`-`4`, `0` | Jump to panel (`0` is Sessions) |
+| `1`-`4`, `0` | Jump to panel (`1`-`4` are Groups, Agents, Repos, Tags; `0` is Sessions) |
 | `H` / `J` / `K` / `L` | Move focus to the panel in that screen direction |
 | `tab` / `shift-tab` | Focus the next / previous panel |
 | `j`/`k`, `↑`/`↓` | Move within the focused panel |
 | `Ctrl-D` / `Ctrl-U` | Move by half a panel |
 | `g` / `G` | First / last row |
-| `enter` | Resume the selected session (Sessions); filter by the selected value (Agents, Repos, Tags); switch to the selected profile (Profiles) |
+| `enter` | Resume the selected session (Sessions); filter by the selected value (Groups, Agents, Repos, Tags) |
 | `esc` | Clear what this panel is filtering by |
 | `[` / `]` | Previous / next tab in the detail pane (Detail, Prompts, Transcript, Comments) |
 | `n` / `N` | On the Transcript tab, scroll to the next / previous occurrence of the search phrase |
 | `d` | Take the tag under the cursor off the selected session (Tags panel) |
 | `/` | Keep only the focused panel's rows containing what you type |
 | `s` | Full-text search over your own prompts |
-| `x` | Action menu for the focused panel |
-| `X` | Clear all filters |
+| `x` | Action menu for the focused panel (`j`/`k` or `↑`/`↓` move, `enter` applies, `esc` closes, `/` narrows by typing) |
+| `p` | File the selected session into a group, archive it, or return it to automatic (same `j`/`k`, `enter`, `esc`, `/` as the action menu) |
+| `X` | Clear all filters, including the selected group (back to All) |
 | `R` | Refresh the index |
 | `m` / `M` | Add / remove a tag on the selected session (`d` in the Tags panel is usually easier) |
 | `c` / `C` | Add / remove a comment on the selected session |
+| `a` | Archive / unarchive the selected session |
+| `.` | Toggle showing sessions the hide rules and the archive flag suppress |
 | `?` | Show this list |
 | `q`, `Ctrl-C` | Quit |
 
@@ -84,7 +90,7 @@ A session held somewhere other than the agent's own terminal - a Neovim CodeComp
 
 The right-hand pane has four tabs, reached with `[` and `]`.
 
-**Detail** is the session's metadata: its identifier and handle, the agent and the client it was driven through, working directory and branch, end state, last activity, name, topic and tags.
+**Detail** is the session's metadata: its identifier and handle, the agent and the client it was driven through, the install it ran under, working directory and branch, end state, last activity, name, topic, group, and tags. The install line names the account, e.g. `install: ccp (~/.claude-personal)`. The group line appears only when groups are configured (see [Groups](#groups) below) and says why the session landed where it did: `group: work (set manually)`, `group: work (path ~/code)`, or `group: unknown`.
 
 **Prompts** is what you actually typed in that session, which is usually the only part of it you remember.
 
@@ -117,25 +123,101 @@ Configuration is optional and lives at `~/.config/lazyrecall/config.toml` (`$LAZ
 
 | Key | Default |
 | --- | --- |
-| `default_profile` | (none; the program applies its own rule) |
 | `sources.<agent>.roots` | `claude`: `["~/.claude-personal", "~/.claude"]`, `pi`: `["~/.pi"]`, `omp`: `["~/.omp"]`, `hermes`: `["~/.hermes"]`, `goose`: `["~/.local/share/goose/sessions"]`, `opencode`: `["~/.local/share/opencode"]`, `kilo`: `["~/.local/share/kilo"]`, `antigravity`: `["~/.gemini/antigravity-cli"]` |
 | `sources.<agent>.resume` | `claude --resume {id}`, `pi --session {id}`, `omp --resume {id}`, `hermes --resume {id}`, `goose session --resume --session-id {id}`, `opencode --session {id}`, `kilo --session {id}`, `agy --conversation {id}` |
 | `sources.<agent>.env_var` | `claude`: `CLAUDE_CONFIG_DIR`; the rest: none |
 | `sources.<agent>.single_install` | everything but `claude`: `true` |
+| `labels` | (none; an install's label falls back to its own name) |
+| `groups.<name>.paths` | (none configured; see [Groups](#groups) below) |
+| `groups.<name>.color` | (none configured; see [Groups](#groups) below) |
+| `groups.archive.color` | (none configured; see [Groups](#groups) below) |
+| `groups.unknown.color` | (none configured; see [Groups](#groups) below) |
 | `hide.non_interactive` | `true` |
 | `hide.min_messages` | `0` |
 | `hide.paths` | `[]` |
 | `browse.show_archived` | `false` |
+| `browse.default_group` | `""` (All); also accepts `all`, `archive`, `unknown`, or a configured group's name - anything else is a config error naming the file and the bad value |
 
-`resume` is an argv template in which `{id}` is replaced with the session id; `env_var` names the environment variable set to the profile's root when resuming; `single_install` marks a source that has exactly one installation per machine and so cannot be split work/personal.
+`resume` is an argv template in which `{id}` is replaced with the session id; `env_var` names the environment variable set to the install's root when resuming; `single_install` marks a source that can only ever have one install, which is then named after the source itself (`omp`, `pi`, ...), while a source that can have several installs (`claude`) names each one after its root directory (`claude`, `claude-personal`).
 
 `lazyrecall config init` writes a commented-out copy of these defaults, and `lazyrecall config show` prints the effective config with each value's provenance (default, file, env, or flag).
 
-Environment variables: `LAZYRECALL_CONFIG` (config file path), `LAZYRECALL_HOME` (data directory, default `~/.lazyrecall`), and `LAZYRECALL_PROFILE` (default profile).
+Environment variables: `LAZYRECALL_CONFIG` (config file path) and `LAZYRECALL_HOME` (data directory, default `~/.lazyrecall`).
 
-## Profiles
+## Groups
 
-Profiles isolate configuration roots from each other: each discovered root (for example a work and a personal Claude install) becomes its own profile with its own database. Work and personal data never mix in one listing.
+lazyrecall keeps one local index, `~/.lazyrecall/index.db`, over every install it discovers - there is no more one database per profile. Every session still belongs to exactly one **install** (the config root that produced it - `~/.claude`, `~/.claude-personal`, `~/.omp`, and so on), and which install ran a session stays visible and filterable, but it no longer decides where that session's data lives or which sessions you see together.
+
+Instead, a session belongs to a **group**, a view computed each time you query, the same way the existing hide rules are: editing the config regroups every session instantly, with no refresh needed. A session's group is decided in this order:
+
+1. a manual override you set on the session (`p` in the browser, or `lazyrecall group SESSION NAME`) - this sticks even across an index rebuild, and moves with a session when it continues under a new identifier
+2. otherwise, the configured group whose path is the longest prefix of the session's working directory
+3. otherwise, **Unknown**
+
+**Archive** is unchanged: archiving a session (`a`, or `lazyrecall archive`) hides it from every group's listing until you ask to see everything, and it remembers which group to return to if you unarchive it.
+
+`browse.default_group` sets which group the browser opens on when `--group` is not given on the command line. It is validated the same way `--group` is: `""` or `all` (both mean All), `archive`, `unknown`, or a name declared under `[groups.*]` in the same file - anything else fails to load with a config error naming the file and the offending value, rather than silently opening on an empty view.
+
+The Groups panel's counts are filter-aware, the same way the Agents/Repos/Tags panels already are: they reflect whatever agent, repo, tag, or text (`/` or `s`) filter is currently applied, not the whole index, and a group with no matching sessions under the current filter is not shown at all - unless it is the group you have selected, which always stays visible (at its true, possibly zero, count) so you can see and clear it.
+
+With no `[groups.*]` configured at all, lazyrecall looks almost exactly as it always has: no Groups panel beyond All (plus Archive when something is archived), no group line in the detail pane. The one difference is the handle's color: it is white by default now, rather than the plain cyan every handle used before groups had colors of their own.
+
+Labels are the replacement for what profiles used to do: giving an account a short, filterable name without deciding anything about grouping. Configure them in a top-level `[labels]` table, keyed by config root:
+
+```toml
+[groups.work]
+paths = ["~/code", "~/work"]
+color = "blue"
+
+[groups.personal]
+paths = ["~/dotfiles", "~/personal"]
+color = "#22aa88"
+
+[labels]
+"~/.claude" = "cc"
+"~/.claude-personal" = "ccp"
+```
+
+With that config, a work-account Claude session that happens to run under `~/personal/scratch` still shows up under the `personal` group (and can be moved with `p` if that's wrong), while `--agent=cc` or `--agent=ccp` narrows to one account regardless of which group its sessions are filed under. `--agent=claude` still means every Claude account, as it always has; a label only adds a way to name one of them.
+
+`--agent` (and the browser's `--agent` seed) resolves a value in this order, first match wins: a name actually configured in `[labels]` narrows to that one install; otherwise a configured source name (`claude`, `pi`, ...) narrows to every install of that source; otherwise a discovered install's own name narrows to that one install; otherwise the value matches nothing. This holds with or without `[labels]` configured - in particular, `--agent=claude` always means every Claude install, even when one of your installs happens to be named exactly `claude` (the multi-install default when its root is `~/.claude`) and no labels are set up at all.
+
+A group's `color` is optional. It accepts an ANSI color name (`black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`), a `bright-`-prefixed variant of one of those (e.g. `bright-blue`), or a 24-bit hex triplet like `#3355ff` - case-insensitive either way. It is drawn on the group's own name in the Groups panel, and on the handle (`#904`) of every session filed under it, in the browser and in `lazyrecall list`'s plain-text output alike. A session's handle is white by default; a session with no group at all uses this white default too, unless `unknown`'s own color (below) applies.
+
+Archive and Unknown - the two built-in views alongside a session's real group - can be colored the same way, even though `archive` and `unknown` stay reserved and can never be a real group's name: a `[groups.archive]` or `[groups.unknown]` table may set `color` and nothing else (`paths` there is a config error, since neither is a place a session is ever filed by working directory). Archived colors the handle of every archived session and the Archive row's own label in the Groups panel; unknown does the same for a session with no group and for the Unknown row. When a session is both archived and would otherwise carry a group's color, archive wins; a session that does have a configured group but that group has no color of its own stays white rather than picking up the unknown color, since it isn't actually groupless.
+
+```toml
+[groups.archive]
+color = "red"
+
+[groups.unknown]
+color = "white"
+```
+
+`[labels]` has to be its own top-level table, not nested under `[sources.claude]`: a `[sources.X]` table in the file replaces that source's whole configuration, roots included, so writing labels there would silently drop every claude root from discovery the moment you configured one.
+
+### Strict isolation
+
+If you need a hard guarantee that two sets of sessions can never appear together, even by mistake, run lazyrecall twice with entirely separate config and data - but each config file has to actually narrow which sources it reads, since a `[sources.X]` table replaces that source's defaults, not just adds to them, and any source a config does not narrow or switch off is discovered and read by both indexes. A work config, for example:
+
+```toml
+[sources.claude]
+roots = ["~/.claude"]
+resume = ["claude", "--resume", "{id}"]
+env_var = "CLAUDE_CONFIG_DIR"
+
+[sources.omp]
+roots = []
+```
+
+restricts discovery to the `~/.claude` install and switches `omp` off entirely (an empty `roots` list is how a source is turned off); do the same for every other source you don't want this config to see. A personal config mirrors it, with `roots = ["~/.claude-personal"]` under `[sources.claude]` and whichever other sources it should read left in. Then point each invocation at its own config file and its own data directory:
+
+```sh
+LAZYRECALL_CONFIG=~/.config/lazyrecall-work/config.toml LAZYRECALL_HOME=~/.lazyrecall-work lazyrecall
+LAZYRECALL_CONFIG=~/.config/lazyrecall-personal/config.toml LAZYRECALL_HOME=~/.lazyrecall-personal lazyrecall
+```
+
+Each pair of environment variables gives that invocation its own `index.db`, so nothing either one indexes is visible to the other - but only for the sources each config file actually narrowed or switched off.
 
 ## License
 

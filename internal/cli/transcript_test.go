@@ -33,9 +33,9 @@ func writeFixtureTranscript(t *testing.T) string {
 	return p
 }
 
-// noProfile stands in for the profile resolver the database-backed sources
+// noProfile stands in for the install resolver the database-backed sources
 // need. These tests all use claude, which reads a file and never asks.
-func noProfile() (profile.Profile, error) {
+func noProfile(search.Item) (profile.Profile, error) {
 	return profile.Profile{}, errors.New("no profile in this test")
 }
 
@@ -81,7 +81,7 @@ INSERT INTO messages (session_id, role, content, timestamp) VALUES
   ('s_a', 'assistant', 'and answered from it', 1001);`); err != nil {
 		t.Fatal(err)
 	}
-	prof := func() (profile.Profile, error) {
+	prof := func(search.Item) (profile.Profile, error) {
 		return profile.Profile{Name: "p", Roots: map[string]string{"hermes": root}}, nil
 	}
 
@@ -94,6 +94,64 @@ INSERT INTO messages (session_id, role, content, timestamp) VALUES
 	}
 	if c.source != sourceKeepsDatabase {
 		t.Errorf("cache source = %v, want sourceKeepsDatabase", c.source)
+	}
+}
+
+// TestTranscriptTabUsesTheSessionsOwnInstall covers the fix at the heart of
+// change group-sessions-in-one-index's Transcript tab: a hermes session
+// belonging to install Y must be read from install Y's own state.db, not
+// from any single "active profile" - a notion that no longer exists once
+// one browsing session lists every install's sessions together. Both
+// installs are given a session sharing the same source_session_id ("h1"),
+// so a wrong lookup would silently read the wrong install's content instead
+// of erroring in a way this test could catch some other way.
+func TestTranscriptTabUsesTheSessionsOwnInstall(t *testing.T) {
+	seedHermesDB := func(root, marker string) {
+		r := &sqlitex.Runner{DBPath: filepath.Join(root, "state.db")}
+		ddl := `
+CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, created_at REAL, updated_at REAL);
+CREATE TABLE messages (
+	id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, role TEXT NOT NULL,
+	content TEXT, tool_call_id TEXT, tool_calls TEXT, tool_name TEXT,
+	timestamp REAL NOT NULL, finish_reason TEXT
+);
+INSERT INTO sessions (id, title) VALUES ('h1', 't');
+`
+		if err := r.Exec(ddl); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.Exec(fmt.Sprintf(
+			"INSERT INTO messages (session_id, role, content, timestamp) VALUES ('h1', 'user', %q, 1000);",
+			marker,
+		)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	rootX := t.TempDir()
+	rootY := t.TempDir()
+	seedHermesDB(rootX, "installX's own content")
+	seedHermesDB(rootY, "installY's own content")
+
+	db := browseTestDB(t)
+	seedBrowseSession(t, db, "lx", "hermes:installX:h1", "installX", 1, map[string]any{
+		"source": "hermes", "source_session_id": "h1", "topic": "from installX",
+	})
+
+	installs := func() []profile.Profile {
+		return []profile.Profile{
+			{Name: "installX", Roots: map[string]string{"hermes": rootX}},
+			{Name: "installY", Roots: map[string]string{"hermes": rootY}},
+		}
+	}
+	m := newTestBrowser(db, "installX", BrowserOptions{Installs: installs})
+	m.tab = tabTranscript
+	got := m.detailContent(RenderOptions{Width: 60})
+	if !strings.Contains(got, "installX's own content") {
+		t.Errorf("transcript did not read from the session's own install:\n%s", got)
+	}
+	if strings.Contains(got, "installY's own content") {
+		t.Errorf("transcript leaked installY's content:\n%s", got)
 	}
 }
 
@@ -166,6 +224,49 @@ func TestTranscriptTabRecordsMatchLinesForTheSearchPhrase(t *testing.T) {
 	}
 }
 
+// TestTranscriptTabHighlightsEachWordIndependently is the regression test
+// for review fix #5 (change group-sessions-in-one-index): search matches
+// each typed word as an independent prefix term
+// (sqlitex.FTS5PrefixTerms), so a multi-word query can match a session with
+// its words scattered across the transcript rather than adjacent. The old
+// highlightPhrase/containsFold looked for the whole typed phrase as one
+// contiguous substring, found it nowhere in this fixture (its two words
+// never sit next to each other), and so recorded zero hits and highlighted
+// nothing - even though "failing" and "step" each appear on their own line.
+func TestTranscriptTabHighlightsEachWordIndependently(t *testing.T) {
+	c := &conversationCache{}
+	out := renderItemTranscript(c, transcriptItem(writeFixtureTranscript(t)), "failing step", noProfile, RenderOptions{Width: 60, Style: true})
+
+	// "failing" is on the first line only; "step" ends both the second and
+	// fifth lines (see fixtureTranscript) - three lines total, none of them
+	// containing "failing step" as one contiguous run.
+	if len(c.hits) != 3 {
+		t.Fatalf("hits = %v, want 3 (one line matching \"failing\", two matching \"step\")", c.hits)
+	}
+	if !strings.Contains(out, ansiReverse+"failing"+ansiReset) {
+		t.Errorf("expected %q to be highlighted, got:\n%s", "failing", out)
+	}
+	if !strings.Contains(out, ansiReverse+"step"+ansiReset) {
+		t.Errorf("expected %q to be highlighted, got:\n%s", "step", out)
+	}
+}
+
+// TestTranscriptTabHighlightingUnchangedForASingleWord covers "A
+// single-word query behaves exactly as before": containsAnyFold and
+// highlightWords, given a one-element words slice, must find and highlight
+// exactly what the old whole-phrase substring match did.
+func TestTranscriptTabHighlightingUnchangedForASingleWord(t *testing.T) {
+	c := &conversationCache{}
+	out := renderItemTranscript(c, transcriptItem(writeFixtureTranscript(t)), "migration", noProfile, RenderOptions{Width: 60, Style: true})
+
+	if len(c.hits) != 3 {
+		t.Fatalf("hits = %v, want 3, one per line containing \"migration\"", c.hits)
+	}
+	if got := strings.Count(out, ansiReverse+"migration"+ansiReset); got != 3 {
+		t.Errorf("highlighted %q %d times, want 3", "migration", got)
+	}
+}
+
 // The pane is rebuilt on every frame, so the read has to be cached or every
 // keystroke re-reads the file. Deleting the transcript after the first
 // render is how a test can see that the second one did not go to disk.
@@ -234,8 +335,7 @@ func transcriptBrowser(t *testing.T, query string) *browseModel {
 		"transcript_path": writeScrollableTranscript(t),
 	})
 	m := newTestBrowser(db, "claude-personal", BrowserOptions{
-		Resolve:  testResolve("claude-personal"),
-		Profiles: testProfiles("claude-personal", "claude-work"),
+		Installs: testInstalls("claude-personal", "claude-work"),
 	})
 	m.tab = tabTranscript
 	m.textFilter = query

@@ -45,11 +45,18 @@ import (
 
 // BrowserOptions carries the initial state for one browsing session.
 type BrowserOptions struct {
-	DB          *sqlitex.Runner // the active profile's database, already refreshed
-	ProfileName string
-	Repo        string // initial filter values (from command-line flags)
-	Agent       string
-	Tag         string
+	DB    *sqlitex.Runner // the single index, already refreshed
+	Repo  string          // initial filter values (from command-line flags)
+	Agent string
+	// Install is the Agents panel's initial selection when --agent resolved
+	// to one specific install rather than a whole source
+	// (cmd/lazyrecall.resolveAgentFilter): a configured label, or a
+	// discovered install's own name. Agent and Install are never both set -
+	// resolveAgentFilter decides which of the two a --agent value means -
+	// and the panel accepts whichever one is, since it matches a session
+	// against it.Install or it.Source interchangeably (see matchesFacets).
+	Install string
+	Tag     string
 	// Client narrows every listing to one client for the whole session
 	// (change show-editor-clients). Unlike agent/repo/tag it has no panel
 	// of its own - it is a qualifier on the agent, not a dimension worth a
@@ -69,44 +76,55 @@ type BrowserOptions struct {
 	// two notions of "noise".
 	Hide config.Hide
 
-	// Resolve resolves a profile name for the browser's in-process refresh
-	// and profile-switch actions. Defaults to the same resolution the
-	// command line uses; injectable so tests can run against synthetic
-	// profiles without touching this machine's real config roots.
-	Resolve func(name string) (profile.Profile, error)
+	// Group is the browser's initial group filter (change
+	// group-sessions-in-one-index): the caller resolves it from --group or
+	// cfg.Browse.DefaultGroup before constructing BrowserOptions, the same
+	// way --agent/--repo/--tag seed their panels' selections above. The
+	// Groups panel and the `p` popup change it once the browser is running.
+	Group string
+	// Groups is the configured groups (config.Config.Groups) a session's
+	// effective group is computed against - needed for every query the
+	// browser runs, not only when Group narrows to one of them, because
+	// every row's Group column depends on it.
+	Groups []config.Group
+	// ArchiveColor and UnknownColor are the configured colors for the
+	// built-in Archive and Unknown views (config.Config.ArchiveColor,
+	// UnknownColor; change archive-unknown-colors) - the raw config values
+	// ("yellow", "#3355ff", ...), not yet turned into escape sequences;
+	// newBrowseModel does that once via GroupColors, the same way Groups'
+	// colors are.
+	ArchiveColor string
+	UnknownColor string
 
-	// Profiles lists every profile that can be switched to (change
-	// choose-from-known-values, task 2.1: "supply profile candidates from
-	// profile resolution"). Defaults to profile.Discover(); injectable for
-	// the same reason as Resolve - tests must never depend on this
-	// machine's real config roots.
-	Profiles func() []profile.Profile
+	// Installs lists every install this browser can resolve a session
+	// against. There is no more profile switching (change
+	// group-sessions-in-one-index: one browsing session now covers every
+	// install's data at once), but the Transcript tab still needs to find a
+	// database-backed session's own install root (session.InstallFromID),
+	// and the in-process refresh action needs the same list to refresh
+	// every install into the shared index. Defaults to profile.Discover();
+	// injectable so tests never depend on this machine's real config roots.
+	Installs func() []profile.Profile
+
+	// InstallLabels is the install-name -> display-label map every row's
+	// badge and the Agents panel show (cli.InstallLabels, computed once by
+	// the caller from profile.Discover() and the config's [labels] table -
+	// never recomputed per row). Injectable, like Installs above, so tests
+	// never depend on this machine's real config; nil is a valid "no labels
+	// known" value and every row falls back to showing its bare source.
+	InstallLabels map[string]string
 }
 
-// resolve uses the injected resolver, defaulting to the standard profile
-// resolution when none was provided.
-func (o BrowserOptions) resolve(name string) (profile.Profile, error) {
-	if o.Resolve != nil {
-		return o.Resolve(name)
+// discoverInstalls uses the injected lister, defaulting to the standard
+// install discovery when none was provided. The lister type has no error
+// slot (this is best-effort UI plumbing, not a command path), so a
+// discovery failure yields an empty list.
+func (o BrowserOptions) discoverInstalls() []profile.Profile {
+	if o.Installs != nil {
+		return o.Installs()
 	}
-	profiles, err := profile.Discover()
-	if err != nil {
-		return profile.Profile{}, err
-	}
-	return profile.Resolve(profiles, name)
-}
-
-// discoverProfiles uses the injected lister, defaulting to the standard
-// profile discovery when none was provided. The lister type has no error
-// slot (the browser's profile-switch panel wants a plain slice), so a
-// discovery failure yields an empty list; command paths surface the same
-// failure through the resolver instead.
-func (o BrowserOptions) discoverProfiles() []profile.Profile {
-	if o.Profiles != nil {
-		return o.Profiles()
-	}
-	profiles, _ := profile.Discover()
-	return profiles
+	installs, _ := profile.Discover()
+	return installs
 }
 
 // RunBrowser runs the in-process browser to completion and returns the
@@ -154,7 +172,7 @@ func RunBrowser(opts BrowserOptions) (search.Item, bool, error) {
 type panelID int
 
 const (
-	panelProfiles panelID = iota
+	panelGroups panelID = iota
 	panelAgents
 	panelRepos
 	panelTags
@@ -189,8 +207,8 @@ func (p panelID) jumpKey() (int, bool) {
 
 func (p panelID) title() string {
 	switch p {
-	case panelProfiles:
-		return "Profiles"
+	case panelGroups:
+		return "Groups"
 	case panelAgents:
 		return "Agents"
 	case panelRepos:
@@ -203,20 +221,19 @@ func (p panelID) title() string {
 	return "Detail"
 }
 
-// isFacet reports whether p is one of the three panels that filter the
-// session list by a value. Profiles looks the same but does not filter -
-// it replaces the whole view - and Sessions/Detail are not filters at all.
+// isFacet reports whether p is one of the four panels that filter the
+// session list by a value (change group-sessions-in-one-index: Groups was
+// "Profiles", which looked the same but replaced the whole view instead of
+// filtering it - now it genuinely narrows by Filter.Group like the other
+// three). Sessions/Detail are not filters at all.
 func (p panelID) isFacet() bool {
-	return p == panelAgents || p == panelRepos || p == panelTags
+	return p == panelGroups || p == panelAgents || p == panelRepos || p == panelTags
 }
 
 // isLeftColumn reports whether p is one of the four panels stacked in the
-// left column - Profiles, Agents, Repos, Tags. Unlike isFacet it includes
-// Profiles: this is a question about where a panel sits on screen, not
-// about what it does, and Profiles sits in that column even though
-// selecting a row there replaces the view rather than filtering it.
+// left column - Groups, Agents, Repos, Tags.
 func (p panelID) isLeftColumn() bool {
-	return p == panelProfiles || p == panelAgents || p == panelRepos || p == panelTags
+	return p == panelGroups || p == panelAgents || p == panelRepos || p == panelTags
 }
 
 // detailTab is which page of the right-hand pane is showing.
@@ -289,7 +306,7 @@ func (m inputMode) prompt() string {
 	case modeRemoveComment:
 		return "comment id to remove: "
 	case modeMenu:
-		return "action (type to narrow): "
+		return "menu (j/k move, enter select, esc close, / to narrow): "
 	}
 	return ""
 }
@@ -301,11 +318,10 @@ func (m inputMode) prompt() string {
 // browseModel is the running state of the browser. Everything here lives in
 // the process; nothing is written to disk for coordination.
 type browseModel struct {
-	db          *sqlitex.Runner
-	profileName string
-	style       bool
-	width       int
-	height      int
+	db     *sqlitex.Runner
+	style  bool
+	width  int
+	height int
 
 	focus panelID
 
@@ -315,6 +331,35 @@ type browseModel struct {
 	// non-interactive commands build.
 	showAll bool
 	hide    config.Hide
+	// group/groups carry the browser's group filter (change
+	// group-sessions-in-one-index): group is the current choice, changed by
+	// Enter in the Groups panel or by the `p` popup; groups is the
+	// configured list every query needs to compute each row's effective
+	// group (BrowserOptions.Groups).
+	group  string
+	groups []config.Group
+	// groupItems is the superset the Groups panel counts its rows from
+	// (search.ListForFacets/SearchForFacets, refreshed by loadAll): every
+	// session regardless of which group is selected and regardless of
+	// archive state, so Archive and every configured group can be counted
+	// no matter which view is currently showing (P1 fix, review finding #4
+	// - the Groups panel used to source its counts from the whole index via
+	// search.Counts, ignoring the Agents/Repos/Tags/text selections already
+	// narrowing every other panel). groupRows narrows it by every other
+	// active facet and buckets the result by (archived, effective group) on
+	// every rebuild, exactly the way countBy/narrow already do for
+	// Agents/Repos/Tags over m.all - it is recomputed on every keystroke of
+	// a facet filter, not cached, for the same reason those are not.
+	groupItems []search.Item
+	// groupColors maps a configured group's name to its ANSI foreground code,
+	// plus the literal keys "archive" and "unknown" for the two built-in
+	// views' colors (change per-group-colors, archive-unknown-colors),
+	// computed once by newBrowseModel from opts.Groups, opts.ArchiveColor
+	// and opts.UnknownColor via cli.GroupColors - never re-parsed per row or
+	// per panel redraw. Used by facetPanel (a group's own name, and the
+	// Archive/Unknown row labels) and by sessionsPanel's RenderOptions (each
+	// row's handle).
+	groupColors map[string]string
 	// client is the standing --client narrowing, applied to every query
 	// this browser runs (see BrowserOptions.Client).
 	client string
@@ -323,17 +368,39 @@ type browseModel struct {
 	// silent, the same contract the command-line header keeps.
 	hidden int
 
-	// all is the profile's whole result set for the current search phrase,
+	// all is the whole index's result set for the current search phrase,
 	// queried once and sliced in process (see facet.go for why). It is
-	// re-queried only when the corpus itself can have changed: a profile
-	// switch, an index refresh, a new search phrase, or an annotation edit.
+	// re-queried only when the corpus itself can have changed: an index
+	// refresh, a new search phrase, or an annotation edit.
 	all   []search.Item
 	query string // the full-text search phrase, "" for none
 
-	profiles_ facet // the Profiles panel: same shape, but Enter switches rather than filters
-	agents    facet
-	repos     facet
-	tags      facet
+	// groups_ is the Groups panel (change group-sessions-in-one-index; it
+	// was "Profiles", a single inert "All" row with no action of its own).
+	// With no groups configured it still holds exactly one row, "All" - the
+	// slot and its layout code are unchanged, so a config with no groups
+	// looks exactly as the browser always did.
+	groups_ facet
+	agents  facet
+	repos   facet
+	tags    facet
+	// agentSource is a source-level seed for the Agents panel - set only
+	// from BrowserOptions.Agent (a bare source name like "claude", spanning
+	// every install of it) and never by a panel interaction, which always
+	// targets one specific install via agents.Sel instead (change
+	// group-sessions-in-one-index, fixing a leak found against real data:
+	// see matchesFacets). Any explicit Agents action - Enter, Esc, "clear
+	// all filters" - clears this alongside agents.Sel, so a later install
+	// selection is never silently ANDed with a source seed left over from
+	// how the browser was opened.
+	agentSource string
+	// installLabels maps an install name to its display label
+	// (cli.InstallLabels, computed once by the caller from
+	// profile.Discover() and the config's [labels] table) - what a session
+	// row's badge shows instead of the bare source, and what the Agents
+	// panel shows instead of a raw install name (see BrowserOptions.
+	// InstallLabels).
+	installLabels map[string]string
 
 	// textFilter narrows the loaded session rows in process as the user
 	// types (spec session-search, "Narrowing the loaded rows by typing").
@@ -357,15 +424,33 @@ type browseModel struct {
 	mode       inputMode
 	input      textinput.Model
 	inputLabel string
-	resolve    func(name string) (profile.Profile, error)
-	profiles   func() []profile.Profile
+	// installs lists every discovered install, for the Transcript tab's
+	// per-session lookup (installFor) and the refresh action - see
+	// BrowserOptions.Installs.
+	installs func() []profile.Profile
 
 	// Action-menu state. The menu is a list of concrete actions for the
 	// focused panel, narrowable by typing - the same interaction the old
 	// value-selection prompt had, now pointed at verbs instead of values.
+	// menuTitle is drawn in the popup's border - `x` sets it from the
+	// focused panel's own title, but `p`'s group popup (change
+	// group-sessions-in-one-index) is not about the focused panel at all,
+	// so it needs a title of its own rather than borrowing one that would
+	// say the wrong thing whenever `p` is pressed somewhere other than
+	// Sessions.
 	menuAll      []menuAction
 	menuFiltered []menuAction
 	menuCursor   int
+	menuTitle    string
+	// menuNarrowing is whether the menu is in its "/" quick-filter
+	// sub-state (change menu-jk-navigation): false is the default, where
+	// j/k and the arrow keys move menuCursor and typed letters do nothing;
+	// true is the old typing-narrows behaviour, entered by "/" and left by
+	// Esc (which also clears the filter but leaves the menu open - a second
+	// Esc is what actually closes it). Reset to false by openMenu and
+	// openGroupMenu, so a menu never opens already narrowing from a
+	// previous session.
+	menuNarrowing bool
 
 	help   bool // the full action list is showing
 	notice string
@@ -381,26 +466,37 @@ func (m browseModel) Init() tea.Cmd { return nil }
 
 func newBrowseModel(opts BrowserOptions) browseModel {
 	m := browseModel{
-		db:          opts.DB,
-		profileName: opts.ProfileName,
-		style:       opts.Style,
-		showAll:     opts.ShowAll,
-		hide:        opts.Hide,
-		resolve:     opts.resolve,
-		profiles:    opts.discoverProfiles,
-		width:       DefaultWidth,
-		height:      24,
-		focus:       panelSessions,
-		query:       opts.Query,
-		client:      opts.Client,
-		input:       textinput.New(),
+		db:            opts.DB,
+		style:         opts.Style,
+		showAll:       opts.ShowAll,
+		hide:          opts.Hide,
+		group:         opts.Group,
+		groups:        opts.Groups,
+		groupColors:   GroupColors(opts.Groups, opts.ArchiveColor, opts.UnknownColor),
+		installs:      opts.discoverInstalls,
+		installLabels: opts.InstallLabels,
+		width:         DefaultWidth,
+		height:        24,
+		focus:         panelSessions,
+		query:         opts.Query,
+		client:        opts.Client,
+		input:         textinput.New(),
 	}
 	// Command-line filters open as the corresponding panels' selections, so
 	// `lazyrecall browse --agent=pi` and walking to "pi" in the Agents panel
-	// land in exactly the same state.
-	m.agents.Sel = opts.Agent
+	// land in exactly the same state. The Agents panel facets by install
+	// (change group-sessions-in-one-index), so a seed that resolved to one
+	// specific install (a label, or an install's own name) seeds agents.Sel
+	// exactly like a panel row would; a seed that resolved to a bare source
+	// (spanning every install of it, e.g. plain `--agent=claude`) seeds the
+	// separate agentSource field instead - resolveAgentFilter only ever
+	// returns one of the two non-empty, so exactly one of these takes
+	// effect.
+	m.agents.Sel = opts.Install
+	m.agentSource = opts.Agent
 	m.repos.Sel = opts.Repo
 	m.tags.Sel = opts.Tag
+	m.groups_.Sel = opts.Group
 	m.input.CharLimit = 1000
 	detail := viewport.New(m.width, 12)
 	m.detail = &detail
@@ -414,11 +510,6 @@ func newBrowseModel(opts BrowserOptions) browseModel {
 // ---------------------------------------------------------------------
 
 type refreshDoneMsg struct{ err error }
-type dbSwitchedMsg struct {
-	name string
-	db   *sqlitex.Runner
-	err  error
-}
 
 // ---------------------------------------------------------------------
 // Queries and derivation
@@ -431,7 +522,7 @@ type dbSwitchedMsg struct {
 // non-interactive commands build, and the WithHidden variant reports how
 // many sessions they suppressed, which the Sessions border then shows.
 func (m *browseModel) loadAll() {
-	f := search.Filter{Client: m.client, Hide: m.hide, ShowAll: m.showAll}
+	f := search.Filter{Client: m.client, Hide: m.hide, ShowAll: m.showAll, Group: m.group, Groups: m.groups}
 	var (
 		rows   []search.Item
 		hidden int
@@ -448,6 +539,31 @@ func (m *browseModel) loadAll() {
 	}
 	m.all = rows
 	m.hidden = hidden
+
+	// groupItems is a separate query, not a walk over m.all: m.all is itself
+	// scoped to the selected group and (unless showAll or the archive view
+	// is selected) excludes archived sessions - exactly what the Groups
+	// panel's own superset must not be, since Archive and every other group
+	// need to stay countable regardless of which one is currently selected
+	// (ListForFacets/SearchForFacets' doc comments). It is refreshed here,
+	// alongside the corpus itself, on every reload (R, a group change, an
+	// archive toggle, a search phrase) - and never recomputed by rebuild,
+	// which runs on every keystroke of a facet filter and must stay a pure
+	// in-process walk, the same discipline m.all already follows.
+	gf := f
+	gf.Group = ""
+	var gitems []search.Item
+	var gerr error
+	if m.query != "" {
+		gitems, gerr = search.SearchForFacets(m.db, m.query, gf)
+	} else {
+		gitems, gerr = search.ListForFacets(m.db, gf)
+	}
+	if gerr != nil {
+		m.notice = "browse: " + gerr.Error()
+	} else {
+		m.groupItems = gitems
+	}
 	m.rebuild()
 }
 
@@ -474,15 +590,21 @@ func (m *browseModel) loadAll() {
 // it applies to all four by construction rather than by four call sites
 // remembering to.
 func (m *browseModel) rebuild() {
-	corpus := func(agent, repo, tag string) []search.Item {
-		return m.applyTextFilter(narrow(m.all, agent, repo, tag))
+	corpus := func(install, source, repo, tag string) []search.Item {
+		return m.applyTextFilter(narrow(m.all, install, source, repo, tag))
 	}
-	m.agents.setRows(countBy(corpus("", m.repos.Sel, m.tags.Sel), "all agents", agentKey, nil))
-	m.repos.setRows(countBy(corpus(m.agents.Sel, "", m.tags.Sel), "all repos", repoKey, abbreviateHome))
-	m.tags.setRows(countBy(corpus(m.agents.Sel, m.repos.Sel, ""), "all tags", tagKeys, func(s string) string { return "#" + s }))
-	m.profiles_.setRows(m.profileRows())
+	// Agents' own rows exclude the whole agent dimension, install and
+	// source together - not just agents.Sel - so switching away from a
+	// source-level seed (agentSource) stays exactly as easy as switching
+	// away from a specific install: the panel always shows what every
+	// option would give, never only what is left after its own current
+	// filter.
+	m.agents.setRows(countBy(corpus("", "", m.repos.Sel, m.tags.Sel), "all agents", installKey, m.installLabel))
+	m.repos.setRows(countBy(corpus(m.agents.Sel, m.agentSource, "", m.tags.Sel), "all repos", repoKey, abbreviateHome))
+	m.tags.setRows(countBy(corpus(m.agents.Sel, m.agentSource, m.repos.Sel, ""), "all tags", tagKeys, func(s string) string { return "#" + s }))
+	m.groups_.setRows(m.groupRows())
 
-	m.visible = corpus(m.agents.Sel, m.repos.Sel, m.tags.Sel)
+	m.visible = corpus(m.agents.Sel, m.agentSource, m.repos.Sel, m.tags.Sel)
 	if m.cursor >= len(m.visible) {
 		m.cursor = len(m.visible) - 1
 	}
@@ -494,26 +616,101 @@ func (m *browseModel) rebuild() {
 	}
 }
 
-// profileRows lists every profile on the machine, active one first. There
-// are no counts: a count would mean opening every other profile's database,
-// and profiles are isolated from each other by design - reading one to
-// annotate another's panel is exactly the mixing that isolation exists to
-// prevent.
-func (m browseModel) profileRows() []facetRow {
-	var out []facetRow
-	for _, p := range m.profiles() {
-		if p.Name == "" {
+// groupCountsFromItems narrows m.groupItems by every OTHER active facet -
+// Agents/Repos/Tags plus the "/" text filter, the same corpus() would apply
+// for any other panel (rebuild) - and buckets the result by archive state
+// and effective group. The group selection itself is deliberately excluded
+// from the narrowing: a Groups panel row has to say what selecting it would
+// give, which is meaningless if the count is already restricted to
+// whichever group is currently selected (the same reason Agents' own rows
+// exclude the Agent dimension - see rebuild's comment on corpus).
+func (m browseModel) groupCountsFromItems() (all, archive, unknown int, byGroup map[string]int) {
+	items := m.applyTextFilter(narrow(m.groupItems, m.agents.Sel, m.agentSource, m.repos.Sel, m.tags.Sel))
+	byGroup = map[string]int{}
+	for _, it := range items {
+		if it.Archived {
+			archive++
 			continue
 		}
-		out = append(out, facetRow{Value: p.Name, Label: p.Name})
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if (out[i].Value == m.profileName) != (out[j].Value == m.profileName) {
-			return out[i].Value == m.profileName
+		all++
+		if it.Group == "" {
+			unknown++
+		} else {
+			byGroup[it.Group]++
 		}
-		return out[i].Value < out[j].Value
-	})
-	return out
+	}
+	return
+}
+
+// groupRows builds the Groups panel's rows from m.groupItems, narrowed by
+// every other active facet exactly the way the Agents/Repos/Tags panels
+// narrow theirs (change group-sessions-in-one-index, P1 fix #4: this used
+// to come from a separate whole-index query - search.Counts - that ignored
+// those selections entirely, advertising a group as if it had sessions
+// under the current filter when it did not).
+//
+// Zero-count rows follow the same convention countBy already applies to
+// Agents/Repos/Tags (a value with no items under the current narrowing
+// simply is not offered), with two exceptions particular to this panel: All
+// is always shown even at zero (it is the anchor every other row is
+// relative to, exactly like the "all" row of any other facet), and the
+// currently selected row is never hidden even at zero - clearing a
+// selection that narrowed its own row out of existence must stay reachable
+// from the panel that applied it. Zero config keeps its existing shape
+// otherwise: All, plus Archive only when it (now filter-aware) is nonzero
+// or selected; Unknown stays hidden in the zero-groups case even when
+// nonzero, since with no groups configured every non-archived session lands
+// in Unknown and a row for it would only duplicate All.
+func (m browseModel) groupRows() []facetRow {
+	all, archive, unknown, byGroup := m.groupCountsFromItems()
+
+	rows := []facetRow{{Value: "", Label: "All", Count: all}}
+	if len(m.groups) == 0 {
+		if archive > 0 || m.group == "archive" {
+			rows = append(rows, facetRow{Value: "archive", Label: "Archive", Count: archive})
+		}
+		return rows
+	}
+	for _, g := range m.groups {
+		n := byGroup[g.Name]
+		if n > 0 || m.group == g.Name {
+			rows = append(rows, facetRow{Value: g.Name, Label: g.Name, Count: n})
+		}
+	}
+	if archive > 0 || m.group == "archive" {
+		rows = append(rows, facetRow{Value: "archive", Label: "Archive", Count: archive})
+	}
+	if unknown > 0 || m.group == "unknown" {
+		rows = append(rows, facetRow{Value: "unknown", Label: "Unknown", Count: unknown})
+	}
+	return rows
+}
+
+// installLabel is the Agents panel's label function (see countBy): the
+// display label m.installLabels has cached for an install name, falling
+// back to the install name itself when none is configured - the same
+// fallback profile.Profile.Label applies, kept in step with it here because
+// the panel has no config.Config of its own, only the precomputed map.
+func (m browseModel) installLabel(name string) string {
+	if label, ok := m.installLabels[name]; ok && label != "" {
+		return label
+	}
+	return name
+}
+
+// setGroupFilter changes which group the browser is showing: the Groups
+// panel's Enter and Esc, and (indirectly, via loadAll's own reload) every
+// place that files a session into a different group. Unlike the Agents/
+// Repos/Tags facets, a group change cannot be answered by narrowing m.all in
+// process - Filter.Group changes which rows the query itself returns (the
+// "archive" and "unknown" views in particular are not expressible as a walk
+// over a corpus that already excludes archived sessions) - so this reloads
+// rather than rebuilds.
+func (m *browseModel) setGroupFilter(name string) {
+	m.group = name
+	m.groups_.Sel = name
+	m.cursor, m.listTop = 0, 0
+	m.loadAll()
 }
 
 // matchText is the per-row haystack the text filter matches against: the
@@ -549,8 +746,8 @@ func (m browseModel) profileRows() []facetRow {
 // That is the honest meaning of "match what is displayed" - the row really
 // is narrower at 80 columns than at 200 - not an oversight to be smoothed
 // over by matching some width-independent superset of it.
-func matchText(it search.Item, width int) string {
-	slots := rowSlots(it)
+func matchText(it search.Item, width int, labels map[string]string) string {
+	slots := rowSlots(it, labels)
 	fitRowToWidth(slots, width)
 	return strings.Join(slots, " ")
 }
@@ -639,7 +836,7 @@ func (m browseModel) applyTextFilter(rows []search.Item) []search.Item {
 	needle := strings.ToLower(m.textFilter)
 	out := make([]search.Item, 0, len(rows))
 	for _, it := range rows {
-		if strings.Contains(strings.ToLower(matchText(it, m.sessionRowWidthFor(it, baseWidth))), needle) {
+		if strings.Contains(strings.ToLower(matchText(it, m.sessionRowWidthFor(it, baseWidth), m.installLabels)), needle) {
 			out = append(out, it)
 		}
 	}
@@ -657,8 +854,8 @@ func (m *browseModel) current() *search.Item {
 // hold no row list of their own.
 func (m *browseModel) facetFor(p panelID) *facet {
 	switch p {
-	case panelProfiles:
-		return &m.profiles_
+	case panelGroups:
+		return &m.groups_
 	case panelAgents:
 		return &m.agents
 	case panelRepos:
@@ -733,23 +930,6 @@ func (m *browseModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.notice = "index refreshed."
 		}
-		m.loadAll()
-		return m, nil
-
-	case dbSwitchedMsg:
-		if msg.err != nil {
-			m.notice = "profile: " + msg.err.Error()
-			return m, nil
-		}
-		m.db = msg.db
-		m.profileName = msg.name
-		// A profile is a different corpus, so nothing selected under the
-		// old one carries over: its agents, repos, and tags are not this
-		// profile's, and keeping them would silently show an empty list.
-		m.agents.Sel, m.repos.Sel, m.tags.Sel = "", "", ""
-		m.textFilter = ""
-		m.cursor, m.listTop = 0, 0
-		m.notice = "profile: " + msg.name
 		m.loadAll()
 		return m, nil
 
@@ -848,6 +1028,8 @@ func (m *browseModel) handleBrowseKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.help = true
 	case "x":
 		return m.openMenu()
+	case "p":
+		return m.openGroupMenu()
 	case "/":
 		return m.startInput(modeFilter)
 	case "s":
@@ -914,8 +1096,8 @@ func (m *browseModel) panelDrawnWithFocus(p, focus panelID) bool {
 	candidate.focus = focus
 	g := candidate.geometry()
 	switch p {
-	case panelProfiles:
-		return g.profilesH > 0
+	case panelGroups:
+		return g.groupsH > 0
 	case panelAgents:
 		return g.agentsH > 0
 	case panelRepos:
@@ -971,11 +1153,11 @@ const (
 
 // moveFocusSpatial moves focus by screen geometry rather than by cycling -
 // moveFocus (Tab) does the cyclic version. It never wraps: reaching an edge
-// is the point of the feature, so K on Profiles, J on Tags, and L on
+// is the point of the feature, so K on Groups, J on Tags, and L on
 // Sessions or Detail simply do nothing, the same way move() does nothing
 // past the first or last row of a list.
 //
-// H always resolves to Profiles specifically, never to whichever left panel
+// H always resolves to Groups specifically, never to whichever left panel
 // last had focus or looks vertically nearest to Sessions' or Detail's
 // cursor. That "nearest panel" rule would be one small variety of clever
 // per keypress; one fixed destination is what a user can predict from
@@ -993,7 +1175,7 @@ func (m *browseModel) moveFocusSpatial(dir direction) {
 	switch dir {
 	case dirLeft:
 		if m.focus == panelSessions || m.focus == panelDetail {
-			candidates = []panelID{panelProfiles}
+			candidates = []panelID{panelGroups}
 		}
 	case dirRight:
 		if m.focus.isLeftColumn() {
@@ -1019,10 +1201,10 @@ func (m *browseModel) moveFocusSpatial(dir direction) {
 // Tags on screen, but the table says they are in a different column.
 func (m browseModel) visualColumn(p panelID) []panelID {
 	if !m.geometry().sidebar {
-		return []panelID{panelProfiles, panelAgents, panelRepos, panelTags, panelSessions, panelDetail}
+		return []panelID{panelGroups, panelAgents, panelRepos, panelTags, panelSessions, panelDetail}
 	}
 	if p.isLeftColumn() {
-		return []panelID{panelProfiles, panelAgents, panelRepos, panelTags}
+		return []panelID{panelGroups, panelAgents, panelRepos, panelTags}
 	}
 	return []panelID{panelSessions, panelDetail}
 }
@@ -1129,17 +1311,27 @@ func (m *browseModel) activate() (tea.Model, tea.Cmd) {
 			m.selectedOK = true
 			return m, tea.Quit
 		}
-	case panelProfiles:
-		row := m.profiles_.index()
-		if row == nil || row.Value == "" {
+	case panelGroups:
+		row := m.groups_.index()
+		if row == nil {
 			return m, nil
 		}
-		if row.Value == m.profileName {
-			m.notice = row.Value + " is already the active profile."
+		m.setGroupFilter(row.Value) // the "all" row carries "", which is "no filter"
+	case panelAgents:
+		row := m.agents.index()
+		if row == nil {
 			return m, nil
 		}
-		return m, m.switchProfileCmd(row.Value)
-	case panelAgents, panelRepos, panelTags:
+		m.agents.Sel = row.Value // the "all" row carries "", which is "no filter"
+		// An explicit install choice replaces any source-level seed the
+		// browser opened with - otherwise the two would AND together, and
+		// a seed from a different source than the chosen install (e.g.
+		// --agent=pi, then picking the omp install from the panel) would
+		// match nothing at all (change group-sessions-in-one-index).
+		m.agentSource = ""
+		m.cursor, m.listTop = 0, 0
+		m.rebuild()
+	case panelRepos, panelTags:
 		f := m.facetFor(m.focus)
 		row := f.index()
 		if row == nil {
@@ -1160,7 +1352,20 @@ func (m *browseModel) clearFocused() {
 	case panelSessions:
 		m.textFilter = ""
 		m.rebuild()
-	case panelAgents, panelRepos, panelTags:
+	case panelGroups:
+		if m.group == "" {
+			return
+		}
+		m.setGroupFilter("")
+	case panelAgents:
+		if m.agents.Sel == "" && m.agentSource == "" {
+			return
+		}
+		m.agents.Sel = ""
+		m.agentSource = ""
+		m.cursor, m.listTop = 0, 0
+		m.rebuild()
+	case panelRepos, panelTags:
 		f := m.facetFor(m.focus)
 		if f.Sel == "" {
 			return
@@ -1171,12 +1376,24 @@ func (m *browseModel) clearFocused() {
 	}
 }
 
+// clearAllFilters is X: every facet at once, including the group (P1 fix,
+// group-sessions-in-one-index review) - the group was left out of the
+// original list here, the same omission a new facet needs to remember not
+// to repeat. A group change can't be answered by a rebuild the way
+// Agent/Repo/Tag can (setGroupFilter's own doc comment: "archive" and
+// "unknown" are not expressible as a walk over a corpus already loaded for
+// a different group), so clearing it needs the same reload the search
+// phrase already triggers here - one reload covers both when either is set.
 func (m *browseModel) clearAllFilters() {
 	m.agents.Sel, m.repos.Sel, m.tags.Sel = "", "", ""
+	m.agentSource = ""
 	m.textFilter = ""
 	m.cursor, m.listTop = 0, 0
-	if m.query != "" {
-		m.query = ""
+	needsReload := m.query != "" || m.group != ""
+	m.query = ""
+	m.group = ""
+	m.groups_.Sel = ""
+	if needsReload {
 		m.loadAll()
 		return
 	}
@@ -1400,7 +1617,15 @@ func (m *browseModel) startInput(mode inputMode) (tea.Model, tea.Cmd) {
 }
 
 func (m *browseModel) updateInputMode(msg tea.Msg) (tea.Model, tea.Cmd) {
-	if key, ok := msg.(tea.KeyMsg); ok {
+	key, ok := msg.(tea.KeyMsg)
+	if ok && m.mode == modeMenu {
+		// The menu (x and p) has its own key handling - j/k navigate by
+		// default rather than narrowing - kept in updateMenuMode instead of
+		// interleaved with every other prompt's text-input handling below
+		// (change menu-jk-navigation).
+		return m.updateMenuMode(key)
+	}
+	if ok {
 		switch key.Type {
 		case tea.KeyEsc, tea.KeyCtrlC:
 			m.mode = modeNone
@@ -1408,33 +1633,84 @@ func (m *browseModel) updateInputMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.notice = ""
 			return m, nil
 		case tea.KeyEnter:
-			if m.mode == modeMenu {
-				return m, m.runMenuSelection()
-			}
 			return m, m.submitInput(strings.TrimSpace(m.input.Value()))
-		case tea.KeyUp:
-			if m.mode == modeMenu {
-				m.menuCursor = clampIndex(m.menuCursor-1, len(m.menuFiltered))
-				return m, nil
-			}
-		case tea.KeyDown:
-			if m.mode == modeMenu {
-				m.menuCursor = clampIndex(m.menuCursor+1, len(m.menuFiltered))
-				return m, nil
-			}
 		}
 	}
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
-	switch m.mode {
-	case modeMenu:
-		m.refilterMenu()
-	case modeFilter:
+	if m.mode == modeFilter {
 		// The narrowing filter applies as it is typed, which is what makes
 		// it feel like filtering rather than like filling in a form.
 		m.applyFilterText(m.input.Value())
 	}
 	return m, cmd
+}
+
+// updateMenuMode handles keys while a menu (x or p) is open (change
+// menu-jk-navigation). By default j/k and the arrow keys move the
+// highlighted entry (menuCursor) and typed letters do nothing else - the
+// menu is a short, fully visible list, so stealing every letter to narrow
+// by typing cost more (j/k, the browser's own move keys, stopped working
+// the moment a menu opened) than it bought. Pressing "/" switches into
+// menuNarrowing, where typing behaves as the whole menu used to: characters
+// filter menuAll into menuFiltered as they're typed (refilterMenu),
+// backspace edits, Enter applies the highlighted entry, and Esc leaves
+// narrowing - clearing the filter but keeping the menu open, matching the
+// rest of the browser's "Esc cancels this one step" contract - rather than
+// closing the menu outright; a second Esc does that.
+func (m *browseModel) updateMenuMode(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.menuNarrowing {
+		switch key.Type {
+		case tea.KeyEsc:
+			m.menuNarrowing = false
+			m.input.SetValue("")
+			m.input.Blur()
+			m.refilterMenu()
+			return m, nil
+		case tea.KeyCtrlC:
+			m.mode = modeNone
+			m.menuNarrowing = false
+			m.input.Blur()
+			m.notice = ""
+			return m, nil
+		case tea.KeyEnter:
+			return m, m.runMenuSelection()
+		}
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(key)
+		m.refilterMenu()
+		return m, cmd
+	}
+
+	switch key.Type {
+	case tea.KeyEsc, tea.KeyCtrlC:
+		m.mode = modeNone
+		m.input.Blur()
+		m.notice = ""
+		return m, nil
+	case tea.KeyEnter:
+		return m, m.runMenuSelection()
+	case tea.KeyUp:
+		m.menuCursor = clampIndex(m.menuCursor-1, len(m.menuFiltered))
+		return m, nil
+	case tea.KeyDown:
+		m.menuCursor = clampIndex(m.menuCursor+1, len(m.menuFiltered))
+		return m, nil
+	case tea.KeyRunes:
+		switch string(key.Runes) {
+		case "j":
+			m.menuCursor = clampIndex(m.menuCursor+1, len(m.menuFiltered))
+		case "k":
+			m.menuCursor = clampIndex(m.menuCursor-1, len(m.menuFiltered))
+		case "/":
+			m.menuNarrowing = true
+			m.input.SetValue("")
+			return m, m.input.Focus()
+		}
+		// Any other rune - a letter that used to narrow - does nothing:
+		// see the doc comment above.
+	}
+	return m, nil
 }
 
 // applyFilterText routes / to whatever the focused panel narrows by: the
@@ -1542,13 +1818,14 @@ func (m *browseModel) menuFor(p panelID) []menuAction {
 			menuAction{"remove a comment", func(m *browseModel) tea.Cmd { _, c := m.startInput(modeRemoveComment); return c }},
 			menuAction{"filter these sessions", func(m *browseModel) tea.Cmd { _, c := m.startInput(modeFilter); return c }},
 		)
-	case panelProfiles:
-		out = append(out, menuAction{"switch to this profile", func(m *browseModel) tea.Cmd {
-			mod, cmd := m.activate()
-			*m = *mod.(*browseModel)
-			return cmd
-		}})
-	case panelAgents, panelRepos, panelTags:
+		// The same group entries the `p` popup offers (change
+		// group-sessions-in-one-index), so filing a session into a group is
+		// discoverable from `x` too, not only from a key a user has to
+		// already know exists.
+		if it := m.current(); it != nil {
+			out = append(out, m.groupMenuActions(*it)...)
+		}
+	case panelGroups, panelAgents, panelRepos, panelTags:
 		out = append(out,
 			menuAction{"filter by this " + strings.TrimSuffix(strings.ToLower(p.title()), "s"), func(m *browseModel) tea.Cmd {
 				mod, cmd := m.activate()
@@ -1572,7 +1849,155 @@ func (m *browseModel) openMenu() (tea.Model, tea.Cmd) {
 	m.menuAll = m.menuFor(m.focus)
 	m.menuFiltered = m.menuAll
 	m.menuCursor = 0
-	return m.startInput(modeMenu)
+	m.menuTitle = m.focus.title() + " actions"
+	m.menuNarrowing = false
+	mod, cmd := m.startInput(modeMenu)
+	// The input widget stays blurred until "/" starts narrowing - see
+	// updateMenuMode - so no cursor blinks next to instructions that, by
+	// default, typing does not act on.
+	m.input.Blur()
+	return mod, cmd
+}
+
+// groupMenuActions is the set of group choices for one session: each
+// configured group, Archive, and Automatic - the same entries whether they
+// are reached from the Sessions `x` menu or from `p`'s dedicated popup
+// (change group-sessions-in-one-index), so the two surfaces can never offer
+// different choices for the same key concept. With no groups configured the
+// loop over m.groups contributes nothing, which is exactly "the popup
+// offers only Archive and Automatic" from the zero-config requirement - no
+// separate branch needed.
+//
+// The currently-applied choice is marked in the label itself (markLabel),
+// not only by where the cursor starts: a marker baked into the text survives
+// typing to narrow the menu, where the cursor position does not mean
+// anything in particular any more.
+func (m *browseModel) groupMenuActions(it search.Item) []menuAction {
+	// Precedence matches annotate.SetGroup's own model: a manual override
+	// (group_name) is independent of the archive flag and can coexist with
+	// it (the plain `archive` command sets archived_at without touching
+	// group_name), so GroupManual is checked first - a session filed under
+	// "work" and separately archived still shows "work" as its current
+	// choice, not Archive.
+	current := ""
+	switch {
+	case it.GroupManual:
+		current = it.Group
+	case it.Archived:
+		current = "archive"
+	}
+
+	auto := search.PathGroup(m.groups, cwdOf(it))
+	autoLabel := "unknown"
+	if auto != "" {
+		autoLabel = auto
+	}
+
+	out := make([]menuAction, 0, len(m.groups)+2)
+	for _, g := range m.groups {
+		name := g.Name
+		out = append(out, menuAction{
+			label: markLabel(name, current == name),
+			run:   func(m *browseModel) tea.Cmd { return m.setSessionGroup(it, name) },
+		})
+	}
+	out = append(out,
+		menuAction{
+			label: markLabel("Archive", current == "archive"),
+			run:   func(m *browseModel) tea.Cmd { return m.setSessionGroup(it, "archive") },
+		},
+		menuAction{
+			label: markLabel(fmt.Sprintf("Automatic (%s)", autoLabel), current == ""),
+			run:   func(m *browseModel) tea.Cmd { return m.setSessionGroup(it, "") },
+		},
+	)
+	return out
+}
+
+// markLabel prefixes an entry's label with the same "applied" mark the
+// facet panels use (●), so the currently-applied choice is visible in the
+// popup regardless of where the cursor happens to start (see
+// groupMenuActions).
+func markLabel(label string, current bool) string {
+	if current {
+		return "● " + label
+	}
+	return "  " + label
+}
+
+// cwdOf is search.PathGroup's nil-safe accessor for it.CWD: a session with
+// no recorded working directory has no path rule to match, the same "" ==
+// Unknown PathGroup itself treats an empty cwd as.
+func cwdOf(it search.Item) string {
+	if it.CWD == nil {
+		return ""
+	}
+	return *it.CWD
+}
+
+// setSessionGroup applies one group choice to it's lineage via
+// annotate.SetGroup - the same function the CLI's `group` command calls, so
+// the popup and the command line can never disagree about what a choice
+// does - then reloads (a group change alters which query rows come back,
+// not just how they're grouped in process) and leaves a notice naming what
+// happened, including what Automatic actually resolved to, since "group:
+// automatic" alone would not say whether that means work or unknown.
+func (m *browseModel) setSessionGroup(it search.Item, choice string) tea.Cmd {
+	if err := annotate.SetGroup(m.db, config.Config{Groups: m.groups}, it.LineageID, choice); err != nil {
+		m.notice = "group: " + err.Error()
+		return nil
+	}
+	switch choice {
+	case "":
+		auto := search.PathGroup(m.groups, cwdOf(it))
+		if auto == "" {
+			auto = "unknown"
+		}
+		m.notice = fmt.Sprintf("group: automatic (%s)", auto)
+	case "archive":
+		m.notice = "group: archive"
+	default:
+		m.notice = "group: " + choice
+	}
+	m.detailOf = ""
+	m.loadAll()
+	return nil
+}
+
+// currentGroupMenuIndex finds the entry groupMenuActions marked as applied
+// (markLabel), so openGroupMenu can start the cursor there - a popup opened
+// to change a choice should not make the reader hunt for where they
+// currently stand.
+func currentGroupMenuIndex(actions []menuAction) int {
+	for i, a := range actions {
+		if strings.HasPrefix(a.label, "● ") {
+			return i
+		}
+	}
+	return 0
+}
+
+// openGroupMenu is `p`: the same modeMenu machinery `x` uses (navigate with
+// j/k or the arrow keys, Enter applies, Esc cancels with no change, "/"
+// narrows by substring - see updateMenuMode), pointed at one session's group
+// choices instead of the focused panel's actions. It acts on the selected
+// session regardless of which panel has focus, the same way `a` (archive)
+// and `.` (show all) do, since "which session" is a property of the
+// Sessions list, not of where the cursor happens to be parked.
+func (m *browseModel) openGroupMenu() (tea.Model, tea.Cmd) {
+	it := m.current()
+	if it == nil {
+		m.notice = "No session selected, so there is nothing to file into a group."
+		return m, nil
+	}
+	m.menuAll = m.groupMenuActions(*it)
+	m.menuFiltered = m.menuAll
+	m.menuCursor = currentGroupMenuIndex(m.menuAll)
+	m.menuTitle = "Session group"
+	m.menuNarrowing = false
+	mod, cmd := m.startInput(modeMenu)
+	m.input.Blur()
+	return mod, cmd
 }
 
 func (m *browseModel) refilterMenu() {
@@ -1614,37 +2039,15 @@ func (m *browseModel) runMenuSelection() tea.Cmd {
 // Commands
 // ---------------------------------------------------------------------
 
-// switchProfileCmd resolves name to a profile and opens that profile's own
-// database (one file per profile - sessions from two profiles can never
-// share a result set), reporting the new connection back into the model.
-// The new profile's index is refreshed only by the explicit refresh
-// action, exactly like the initial profile (design.md decision 5: refresh
-// once on open, never per interaction).
-func (m browseModel) switchProfileCmd(name string) tea.Cmd {
-	return func() tea.Msg {
-		p, err := m.resolve(name)
-		if err != nil {
-			return dbSwitchedMsg{err: err}
-		}
-		r, err := refresh.New(p, "")
-		if err != nil {
-			return dbSwitchedMsg{err: err}
-		}
-		return dbSwitchedMsg{name: p.Name, db: r.DB}
-	}
-}
-
 // refreshCmd is the explicit index refresh action (spec session-search,
 // "Implement an explicit index refresh without leaving the browser"): it
-// re-runs the refresh pass for the active profile and reports back into
-// the model, which then reloads its rows.
+// re-runs the refresh pass over every discovered install into the single
+// index (change group-sessions-in-one-index - there is no more "the active
+// profile" to refresh alone) and reports back into the model, which then
+// reloads its rows.
 func (m browseModel) refreshCmd() tea.Cmd {
 	return func() tea.Msg {
-		p, err := m.resolve(m.profileName)
-		if err != nil {
-			return refreshDoneMsg{err: err}
-		}
-		r, err := refresh.New(p, "")
+		r, err := refresh.New(m.installs(), "")
 		if err != nil {
 			return refreshDoneMsg{err: err}
 		}
@@ -1679,7 +2082,7 @@ type geometry struct {
 	leftWidth     int
 	rightWidth    int
 	bodyHeight    int
-	profilesH     int
+	groupsH       int
 	agentsH       int
 	reposH        int
 	tagsH         int
@@ -1753,7 +2156,7 @@ func (g *geometry) wideHeights(m browseModel) {
 	}
 
 	// Accordion only when the column cannot afford four panels at once.
-	// Profiles and Agents are short, known-length lists and need only what
+	// Groups and Agents are short, known-length lists and need only what
 	// they hold; if what is left over still gives Repos and Tags a usable
 	// window each, every panel shows content and nothing collapses. That is
 	// the sizing this browser had before the accordion, and it is the right
@@ -1761,20 +2164,29 @@ func (g *geometry) wideHeights(m browseModel) {
 	// four, and collapsing three of them there hides dimensions the user
 	// could otherwise read at a glance without pressing anything.
 	//
+	// Groups' own cap (maxGroupsRows) is generous rather than tight like
+	// Agents' - a group is something a user configured by hand in a file,
+	// so the row count is bounded by how many [groups.*] tables they wrote
+	// (All, each one, Archive, Unknown), not by how many sessions or
+	// installs exist. A tight cap here is what let Unknown scroll out of
+	// view below a Tags panel that had empty lines to spare (bug found
+	// against real data: 2 groups + Archive + Unknown is 5 rows, and the
+	// old cap of 4 always hid one of them even with room to give it).
+	//
 	// The accordion below is for the case that sizing could not handle -
 	// the old "rest < 8" branch, which dropped Tags outright. Collapsing a
 	// panel to a header line is strictly better than deleting it, but it is
 	// a concession to a short column, not an improvement on a roomy one.
-	if room := g.bodyHeight - boxHeight(len(m.profiles_.rows), 1, 4) - boxHeight(len(m.agents.rows), 1, 5); room >= 8 {
-		g.profilesH = boxHeight(len(m.profiles_.rows), 1, 4)
+	if room := g.bodyHeight - boxHeight(len(m.groups_.rows), 1, maxGroupsRows) - boxHeight(len(m.agents.rows), 1, 5); room >= 8 {
+		g.groupsH = boxHeight(len(m.groups_.rows), 1, maxGroupsRows)
 		g.agentsH = boxHeight(len(m.agents.rows), 1, 5)
 		g.reposH = room * 3 / 5
 		g.tagsH = room - g.reposH
 	} else if g.bodyHeight >= 4 {
-		g.profilesH, g.agentsH, g.reposH, g.tagsH = 1, 1, 1, 1
+		g.groupsH, g.agentsH, g.reposH, g.tagsH = 1, 1, 1, 1
 		switch expanded {
-		case panelProfiles:
-			g.profilesH = g.bodyHeight - 3
+		case panelGroups:
+			g.groupsH = g.bodyHeight - 3
 		case panelAgents:
 			g.agentsH = g.bodyHeight - 3
 		case panelRepos:
@@ -1784,17 +2196,17 @@ func (g *geometry) wideHeights(m browseModel) {
 		}
 	} else {
 		heights := [numPanels]int{
-			panelProfiles: 1, panelAgents: 1, panelRepos: 1, panelTags: 1,
+			panelGroups: 1, panelAgents: 1, panelRepos: 1, panelTags: 1,
 		}
 		used := 4
-		for _, p := range [...]panelID{panelTags, panelRepos, panelAgents, panelProfiles} {
+		for _, p := range [...]panelID{panelTags, panelRepos, panelAgents, panelGroups} {
 			if used <= g.bodyHeight || (p == expanded && focus.isLeftColumn()) {
 				continue
 			}
 			heights[p]--
 			used--
 		}
-		g.profilesH = heights[panelProfiles]
+		g.groupsH = heights[panelGroups]
 		g.agentsH = heights[panelAgents]
 		g.reposH = heights[panelRepos]
 		g.tagsH = heights[panelTags]
@@ -1838,7 +2250,7 @@ func (g *geometry) wideHeights(m browseModel) {
 //
 // Rows start with Sessions' three-line floor and one header for every other
 // panel. When the frame cannot fund all eight rows, it takes them back from
-// the end of the draw order - Detail, Tags, Repos, Agents, Profiles, then
+// the end of the draw order - Detail, Tags, Repos, Agents, Groups, then
 // Sessions' surplus - while never taking the focused panel's last line.
 // That order is not cosmetic: losing the panel the user just chose while an
 // unfocused Detail header remains is worse than losing the header, and it
@@ -1853,13 +2265,13 @@ func (g *geometry) narrowHeights(focus panelID) {
 		return
 	}
 
-	// Draw order is Profiles, Agents, Repos, Tags, Sessions, Detail - the
+	// Draw order is Groups, Agents, Repos, Tags, Sessions, Detail - the
 	// digit order with Sessions' 0 last, which is also where lazygit puts
 	// its own [0] panel. Detail collapses like the rest: it is content for
 	// the selected row, so it earns its rows only when it is what the user
 	// is reading.
 	heights := [numPanels]int{
-		panelProfiles: 1,
+		panelGroups:   1,
 		panelAgents:   1,
 		panelRepos:    1,
 		panelTags:     1,
@@ -1867,7 +2279,7 @@ func (g *geometry) narrowHeights(focus panelID) {
 		panelDetail:   1,
 	}
 	used := 8
-	for _, p := range [...]panelID{panelDetail, panelTags, panelRepos, panelAgents, panelProfiles, panelSessions} {
+	for _, p := range [...]panelID{panelDetail, panelTags, panelRepos, panelAgents, panelGroups, panelSessions} {
 		if p == focus {
 			continue
 		}
@@ -1900,13 +2312,20 @@ func (g *geometry) narrowHeights(focus panelID) {
 	}
 	heights[panelSessions] += remaining
 
-	g.profilesH = heights[panelProfiles]
+	g.groupsH = heights[panelGroups]
 	g.agentsH = heights[panelAgents]
 	g.reposH = heights[panelRepos]
 	g.tagsH = heights[panelTags]
 	g.sessionsH = heights[panelSessions]
 	g.detailH = heights[panelDetail]
 }
+
+// maxGroupsRows is the roomy layout's row cap for the Groups panel: All,
+// every configured group, Archive, and Unknown. It is generous rather than
+// tight (contrast Agents' cap of 5) because that count is bounded by how
+// many [groups.*] tables a user wrote in their config file, not by how much
+// data is indexed - see wideHeights.
+const maxGroupsRows = 12
 
 // boxHeight is the outer height a panel needs to show n rows, clamped to
 // between min and max content rows. Used by the roomy left-column sizing,
@@ -1933,8 +2352,8 @@ func maxInt(a, b int) int {
 func (m browseModel) facetInnerHeight(p panelID) int {
 	g := m.geometry()
 	switch p {
-	case panelProfiles:
-		return maxInt(g.profilesH-2, 0)
+	case panelGroups:
+		return maxInt(g.groupsH-2, 0)
 	case panelAgents:
 		return maxInt(g.agentsH-2, 0)
 	case panelRepos:
@@ -1971,7 +2390,7 @@ func (m browseModel) View() string {
 	var body string
 	if g.sidebar {
 		left := stackPanels(
-			m.facetPanel(panelProfiles, &m.profiles_, g.leftWidth, g.profilesH, ""),
+			m.facetPanel(panelGroups, &m.groups_, g.leftWidth, g.groupsH, m.group),
 			m.facetPanel(panelAgents, &m.agents, g.leftWidth, g.agentsH, m.agents.Sel),
 			m.facetPanel(panelRepos, &m.repos, g.leftWidth, g.reposH, m.repos.Sel),
 			m.facetPanel(panelTags, &m.tags, g.leftWidth, g.tagsH, m.tags.Sel),
@@ -1985,7 +2404,7 @@ func (m browseModel) View() string {
 		// digit order (1 2 3 4 then 0) and puts the list next to the
 		// detail that describes its selected row.
 		body = stackPanels(
-			m.facetPanel(panelProfiles, &m.profiles_, g.rightWidth, g.profilesH, ""),
+			m.facetPanel(panelGroups, &m.groups_, g.rightWidth, g.groupsH, m.group),
 			m.facetPanel(panelAgents, &m.agents, g.rightWidth, g.agentsH, m.agents.Sel),
 			m.facetPanel(panelRepos, &m.repos, g.rightWidth, g.reposH, m.repos.Sel),
 			m.facetPanel(panelTags, &m.tags, g.rightWidth, g.tagsH, m.tags.Sel),
@@ -2006,10 +2425,24 @@ func (m browseModel) View() string {
 	b.WriteString(body)
 	b.WriteString("\n")
 	if m.mode != modeNone {
-		fmt.Fprintf(&b, "%s%s\n", m.inputLabel, m.input.View())
+		fmt.Fprintf(&b, "%s%s\n", m.currentInputLabel(), m.input.View())
 	}
 	b.WriteString(m.footer())
 	return b.String()
+}
+
+// currentInputLabel is what is drawn ahead of the input widget on the input
+// bar. It is m.inputLabel (set once by startInput from mode.prompt())
+// except for the menu's own narrowing sub-state (change
+// menu-jk-navigation), which needs a label that flips between "here's how
+// to drive the menu" and "type to narrow" as menuNarrowing itself flips,
+// something mode.prompt() cannot see since it only knows the inputMode, not
+// the menu's internal state.
+func (m browseModel) currentInputLabel() string {
+	if m.mode == modeMenu && m.menuNarrowing {
+		return "narrow (esc clears, esc again closes): "
+	}
+	return m.inputLabel
 }
 
 // menuPopupWidth is the popup's width: wide enough for the longest action
@@ -2025,7 +2458,7 @@ func (m browseModel) menuPopup() string {
 	width := minInt(menuPopupWidth, maxInt(m.width-4, 12))
 	rows := minInt(maxInt(len(m.menuFiltered), 1), maxInt(m.height-6, 3))
 	box := panelBox{
-		Title:   m.focus.title() + " actions",
+		Title:   m.menuTitle,
 		Width:   width,
 		Height:  rows + 2,
 		Focused: true,
@@ -2078,13 +2511,7 @@ func (m browseModel) facetPanel(id panelID, f *facet, width, height int, sel str
 		// collapsed header, which would be the panels' point turned against
 		// them.
 		box.Collapsed = true
-		if id == panelProfiles {
-			// Profiles filters nothing; its analogue of an applied value is
-			// the active profile, exactly what its ● row marks when open.
-			box.Value = sanitizeSingleLine(m.profileName)
-		} else {
-			box.Value = sanitizeSingleLine(sel)
-		}
+		box.Value = sanitizeSingleLine(sel)
 		return box
 	}
 	// Every panel says where the cursor is and how many rows it has. The
@@ -2124,38 +2551,55 @@ func (m browseModel) facetPanel(id panelID, f *facet, width, height int, sel str
 		// takes whatever is left. Both are sanitized: a repo path or a tag
 		// is free text from a session, and a control character in it would
 		// otherwise break the box open.
-		count := ""
-		if id != panelProfiles {
-			count = strconv.Itoa(r.Count)
-		}
-		labelWidth := inner - facetDecorationWidth - len(count)
-		if count != "" {
-			labelWidth--
-		}
+		count := strconv.Itoa(r.Count)
+		labelWidth := inner - facetDecorationWidth - len(count) - 1
 		if labelWidth < 1 {
 			labelWidth = 1
 		}
 		label := truncateToWidth(sanitizeSingleLine(r.Label), labelWidth)
 
-		// An applied value, and the active profile, are marked in the text
-		// itself rather than by colour alone, so the state survives
-		// NO_COLOR (spec session-search, "Styling disabled by the
-		// environment").
+		// The Groups panel draws a configured group's own name in its
+		// configured color (change per-group-colors), and the Archive and
+		// Unknown rows (r.Value "archive"/"unknown") in their own configured
+		// colors the same way (change archive-unknown-colors) - m.groupColors
+		// holds both under those literal keys (see GroupColors), so this one
+		// lookup serves all three with no extra branch. All (r.Value "") is
+		// never a key in m.groupColors and so always falls through to no
+		// color, keeping its own styling. Every other panel (Agents, Repos,
+		// Tags) is restricted to id == panelGroups so a tag or repo that
+		// happens to share a group's name is never colored by accident.
+		groupColor := ""
+		if id == panelGroups {
+			groupColor = m.groupColors[r.Value]
+		}
+
+		// An applied value is marked in the text itself rather than by
+		// colour alone, so the state survives NO_COLOR (spec
+		// session-search, "Styling disabled by the environment"). Every
+		// panel but Groups never marks its own "all" row (r.Value == "")
+		// even while nothing is applied - moving through it previews
+		// nothing (facet.Sel is set only by Enter), so an unmarked "all"
+		// row is what "nothing is filtering yet" looks like. Groups is the
+		// exception: All is a real, commonly-active view of its own, not
+		// merely "no filter", so it is marked exactly like any other group
+		// once it is the one actually showing (change
+		// group-sessions-in-one-index).
+		applied := r.Value == sel && (id == panelGroups || r.Value != "")
 		appliedMark := " "
-		if (id == panelProfiles && r.Value == m.profileName) ||
-			(id != panelProfiles && r.Value != "" && r.Value == sel) {
+		switch {
+		case applied:
 			appliedMark = "●"
-			label = style(label, ansiBold, m.style)
+			label = style(label, groupColor+ansiBold, m.style)
+		case groupColor != "":
+			label = style(label, groupColor, m.style)
 		}
 
 		line := cursorMark + appliedMark + " " + label
-		if count != "" {
-			pad := inner - visibleWidth(line) - len(count)
-			if pad < 1 {
-				pad = 1
-			}
-			line += strings.Repeat(" ", pad) + style(count, ansiDim, m.style)
+		pad := inner - visibleWidth(line) - len(count)
+		if pad < 1 {
+			pad = 1
 		}
+		line += strings.Repeat(" ", pad) + style(count, ansiDim, m.style)
 		if i == f.cursor && m.focus == id && m.style {
 			line = highlightLine(padToWidth(line, inner))
 		}
@@ -2219,7 +2663,7 @@ func (m browseModel) sessionsPanel(g geometry) panelBox {
 		// this particular row to the same text, including the eleven
 		// columns an archive marker takes away, instead of agreeing only
 		// for ordinary rows.
-		rowOpts := RenderOptions{Width: m.sessionRowWidthFor(it, baseRowWidth), Style: m.style}
+		rowOpts := RenderOptions{Width: m.sessionRowWidthFor(it, baseRowWidth), Style: m.style, InstallLabels: m.installLabels, GroupColors: m.groupColors}
 
 		line := RenderRow(it, rowOpts) + marker
 		if i == m.cursor {
@@ -2336,20 +2780,47 @@ func (m browseModel) detailContent(opts RenderOptions) string {
 	case tabPrompts:
 		return renderItemPrompts(m.db, *it, opts)
 	case tabTranscript:
-		return renderItemTranscript(m.convo, *it, m.transcriptPhrase(), m.currentProfile, opts)
+		return renderItemTranscript(m.convo, *it, m.transcriptPhrase(), m.installFor, opts)
 	case tabComments:
 		return renderItemComments(m.db, *it, opts)
 	}
-	return renderItemDetail(m.db, *it, opts)
+	return renderItemDetail(m.db, *it, m.groups, m.installInfo, opts)
 }
 
-// currentProfile resolves the profile being browsed, which is what a
-// database-backed source's conversation reader needs: the roots that say
-// where that agent's database is. It is passed to the renderer as a
-// function rather than a value so the resolution happens only for the
-// sources that need it - the file-backed ones already have a path.
-func (m browseModel) currentProfile() (profile.Profile, error) {
-	return m.resolve(m.profileName)
+// installInfo resolves it's install to what the Detail tab's "install:"
+// line shows: the display label (m.installLabels, never recomputed here)
+// and the install's own config root, found the same way installFor finds
+// it for the Transcript tab - by the install name embedded in the
+// session's own composite id, not by "the profile being browsed" (change
+// group-sessions-in-one-index). ok is false when no discovered install
+// matches, in which case the line still shows the label (or the raw
+// install name) without a root.
+func (m browseModel) installInfo(it search.Item) (label, root string, ok bool) {
+	label = m.installLabel(it.Install)
+	p, err := m.installFor(it)
+	if err != nil {
+		return label, "", false
+	}
+	return label, p.Root(), true
+}
+
+// installFor resolves the discovered install that produced it, by the
+// install name embedded in its own composite session id
+// (session.InstallFromID) - not "the profile being browsed", now that one
+// browsing session covers every install's data together (change
+// group-sessions-in-one-index). This is what a database-backed source's
+// conversation reader needs: the roots that say where that install's own
+// database is. It is passed to the renderer as a function of the item
+// rather than a value so the resolution happens only for the sources that
+// need it - the file-backed ones already have a path.
+func (m browseModel) installFor(it search.Item) (profile.Profile, error) {
+	name := session.InstallFromID(it.SessionID)
+	for _, p := range m.installs() {
+		if p.Name == name {
+			return p, nil
+		}
+	}
+	return profile.Profile{}, fmt.Errorf("no discovered install named %q", name)
 }
 
 // transcriptPhrase is what the Transcript tab highlights and what n and N
@@ -2516,14 +2987,14 @@ var browseActions = []browseAction{
 	{key: "Ctrl-D/U", label: "move by half a panel"},
 	{key: "g/G", label: "first/last row"},
 	{key: "enter", label: "resume", help: "resume the selected session", panels: []panelID{panelSessions}, footer: true},
-	{key: "enter", label: "filter", help: "filter the sessions by the selected value", panels: []panelID{panelAgents, panelRepos, panelTags}, footer: true},
-	{key: "enter", label: "switch", help: "switch to the selected profile", panels: []panelID{panelProfiles}, footer: true},
-	{key: "esc", label: "clear filter", help: "clear what this panel is filtering by", panels: []panelID{panelSessions, panelAgents, panelRepos, panelTags}, footer: true},
+	{key: "enter", label: "filter", help: "filter the sessions by the selected value", panels: []panelID{panelGroups, panelAgents, panelRepos, panelTags}, footer: true},
+	{key: "esc", label: "clear filter", help: "clear what this panel is filtering by", panels: []panelID{panelSessions, panelGroups, panelAgents, panelRepos, panelTags}, footer: true},
 	{key: "[/]", label: "tab", help: "previous/next tab in the detail pane", panels: []panelID{panelSessions, panelDetail}, footer: true},
 	{key: "n/N", label: "next/previous match", help: "on the Transcript tab, scroll to the next/previous occurrence of the search phrase", panels: []panelID{panelSessions, panelDetail}},
 	{key: "/", label: "narrow", help: "keep only the focused panel's rows containing what you type", footer: true},
 	{key: "s", label: "search phrase", help: "full-text search over your own prompts"},
-	{key: "x", label: "menu", help: "action menu for the focused panel", footer: true},
+	{key: "x", label: "menu", help: "action menu for the focused panel - j/k or ↑/↓ move, enter applies, esc closes, / narrows by typing", footer: true},
+	{key: "p", label: "group", help: "file the selected session into a group, archive it, or return it to automatic - same j/k, enter, esc, / as the action menu", footer: true},
 	{key: "X", label: "clear all filters"},
 	{key: "R", label: "refresh the index"},
 	{key: "m/M", label: "add/remove a tag", help: "add/remove a tag on the selected session"},
@@ -2541,7 +3012,7 @@ func (m browseModel) helpView() string {
 	for _, a := range browseActions {
 		fmt.Fprintf(&b, "  %-14s %s%s\n", a.key, a.helpText(), a.scope())
 	}
-	b.WriteString("\nPanels: 1 Profiles  2 Agents  3 Repos  4 Tags  0 Sessions  (tab reaches the detail pane)\n")
+	b.WriteString("\nPanels: 1 Groups  2 Agents  3 Repos  4 Tags  0 Sessions  (tab reaches the detail pane)\n")
 	b.WriteString("\n")
 	b.WriteString(style("any key: close this help", ansiDim, m.style))
 	return b.String()
@@ -2563,13 +3034,29 @@ func (m browseModel) helpView() string {
 // Comments moved to their own tab (change lazy-style-browser); db is kept
 // in the signature because every tab is dispatched through one function
 // and a caller should not have to know which tab needs the database.
-func renderItemDetail(db *sqlitex.Runner, it search.Item, opts RenderOptions) string {
+func renderItemDetail(db *sqlitex.Runner, it search.Item, groups []config.Group, installInfo func(search.Item) (label, root string, ok bool), opts RenderOptions) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "id:     %s\n", it.SessionID)
 	if it.Handle > 0 {
 		fmt.Fprintf(&b, "handle: #%d\n", it.Handle)
 	}
 	fmt.Fprintf(&b, "agent:  %s\n", style(it.Source, ansiDim, opts.Style))
+	// Which account produced this session - the install's display label,
+	// and its config root so "which ~/.claude* is this" is answerable
+	// without leaving the browser (change group-sessions-in-one-index).
+	// Shown even when installInfo cannot resolve a root (ok=false): the
+	// label (or, absent one, the raw install name) still says which
+	// account, just not where its root is on disk.
+	if it.Install != "" {
+		label, root, ok := installInfo(it)
+		if label == "" {
+			label = it.Install
+		}
+		if ok && root != "" {
+			label += " (" + abbreviateHome(root) + ")"
+		}
+		fmt.Fprintf(&b, "install: %s\n", style(label, ansiDim, opts.Style))
+	}
 	// The row folds the client into the agent slot to save width, and
 	// leaves out the unremarkable terminal case entirely; here it gets its
 	// own line either way, showing the source's raw value alongside the
@@ -2619,6 +3106,26 @@ func renderItemDetail(db *sqlitex.Runner, it search.Item, opts RenderOptions) st
 	}
 	if topic != "" {
 		fmt.Fprintf(&b, "topic:  %s\n", style(topic, ansiItalic, opts.Style))
+	}
+	// No group line at all with no groups configured (change
+	// group-sessions-in-one-index, "Zero-config and public users": the
+	// browser must look exactly as it did before groups existed). With
+	// groups configured, say *why* a session landed where it did - set
+	// manually, a path rule (naming the specific path that matched, from
+	// search.PathGroupPath), or Unknown when neither claims it.
+	if len(groups) > 0 {
+		group := "unknown"
+		switch {
+		case it.GroupManual:
+			group = it.Group + " (set manually)"
+		case it.Group != "":
+			if _, path := search.PathGroupPath(groups, cwdOf(it)); path != "" {
+				group = fmt.Sprintf("%s (path %s)", it.Group, abbreviateHome(path))
+			} else {
+				group = it.Group
+			}
+		}
+		fmt.Fprintf(&b, "group:  %s\n", style(group, ansiDim, opts.Style))
 	}
 
 	fmt.Fprint(&b, "\ntags:   ")
@@ -2702,7 +3209,7 @@ const (
 // database the adapter already queries, so the adapter reads it back. Only
 // antigravity has neither, because its per-conversation detail is protobuf
 // with no available schema.
-func (c *conversationCache) load(it search.Item, prof func() (profile.Profile, error)) {
+func (c *conversationCache) load(it search.Item, installFor func(search.Item) (profile.Profile, error)) {
 	path := ""
 	if it.TranscriptPath != nil {
 		path = *it.TranscriptPath
@@ -2727,7 +3234,12 @@ func (c *conversationCache) load(it search.Item, prof func() (profile.Profile, e
 		return
 	}
 	c.source = sourceKeepsDatabase
-	p, err := prof()
+	// The session's own install, not "the active profile" - one browsing
+	// session now covers every install's data together (change
+	// group-sessions-in-one-index), so a hermes/goose/opencode/kilo session
+	// from install X must be read using X's root even when it is not the
+	// install the browser happens to be showing anything else from.
+	p, err := installFor(it)
 	if err != nil {
 		c.err = err
 		return
@@ -2739,8 +3251,8 @@ func (c *conversationCache) load(it search.Item, prof func() (profile.Profile, e
 // as far back as the read budget allows, with the active search phrase
 // highlighted. This is the tab that answers "is this the session I meant"
 // without having to resume it and find out.
-func renderItemTranscript(c *conversationCache, it search.Item, phrase string, prof func() (profile.Profile, error), opts RenderOptions) string {
-	c.load(it, prof)
+func renderItemTranscript(c *conversationCache, it search.Item, phrase string, installFor func(search.Item) (profile.Profile, error), opts RenderOptions) string {
+	c.load(it, installFor)
 
 	if c.err != nil {
 		// A transcript the index has a path for but that cannot be read is
@@ -2769,7 +3281,18 @@ func renderItemTranscript(c *conversationCache, it search.Item, phrase string, p
 	// Hits are collected against the plain text as it is written, before
 	// styling adds escape sequences, so a match is counted where the
 	// reader sees it and not where an escape happens to fall.
+	//
+	// words splits phrase on whitespace once, up front: search now matches
+	// independent per-word prefix terms (sqlitex.FTS5PrefixTerms), so a line
+	// counts as a hit - and gets highlighted - if it contains ANY of the
+	// typed words, not only the whole phrase as one contiguous substring.
+	// Without this a multi-word query could match a session in the index
+	// (its words present anywhere, any order) while highlighting nothing at
+	// all in a transcript where those words never appear adjacent. A
+	// single-word query is exactly one entry in words, so this is a
+	// superset of the old behaviour, not a change to it.
 	c.hits = nil
+	words := strings.Fields(phrase)
 	line := strings.Count(b.String(), "\n")
 
 	for i, t := range c.turns {
@@ -2780,10 +3303,10 @@ func renderItemTranscript(c *conversationCache, it search.Item, phrase string, p
 		fmt.Fprintf(&b, "%s\n", turnHeader(t, opts))
 		line++
 		for _, l := range transcriptBody(t, opts) {
-			if phrase != "" && containsFold(l, phrase) {
+			if containsAnyFold(l, words) {
 				c.hits = append(c.hits, line)
 			}
-			fmt.Fprintf(&b, "  %s\n", highlightPhrase(l, phrase, opts))
+			fmt.Fprintf(&b, "  %s\n", highlightWords(l, words, opts))
 			line++
 		}
 	}
@@ -2830,29 +3353,86 @@ func transcriptBody(t transcript.Turn, opts RenderOptions) []string {
 	return lines
 }
 
-// highlightPhrase marks every case-insensitive occurrence of phrase in line
-// in reverse video, so the reason a session matched a search is visible in
-// the transcript rather than only in the result row.
-func highlightPhrase(line, phrase string, opts RenderOptions) string {
-	if !opts.Style || phrase == "" {
+// highlightWords marks every case-insensitive occurrence of any of words in
+// line in reverse video, so the reason a session matched a search is
+// visible in the transcript rather than only in the result row. Search
+// matches each typed word as an independent prefix term (change
+// group-sessions-in-one-index, review fix #5: sqlitex.FTS5PrefixTerms), so
+// highlighting looks for each word separately rather than the whole typed
+// phrase as one contiguous substring - the old behaviour, kept intact for a
+// single-word query (words has exactly one entry then, so this reduces to
+// exactly the old loop) but wrong for a multi-word one: "fix retry" can
+// match a document with "fix" and "retry" nowhere near each other, and the
+// old contiguous-substring search would then highlight nothing at all.
+//
+// Matches from different words can overlap (both "sketch" and "bar" occur
+// inside "sketchybar") or sit back to back; spans are collected first and
+// merged before rendering, so an overlapping pair prints as one highlighted
+// run instead of two escape sequences fighting over the same characters.
+func highlightWords(line string, words []string, opts RenderOptions) string {
+	if !opts.Style || len(words) == 0 {
 		return line
 	}
-	lower, lowerPhrase := strings.ToLower(line), strings.ToLower(phrase)
-	var b strings.Builder
-	for {
-		i := strings.Index(lower, lowerPhrase)
-		if i < 0 {
-			b.WriteString(line)
-			return b.String()
+	lower := strings.ToLower(line)
+	type span struct{ start, end int }
+	var spans []span
+	for _, w := range words {
+		if w == "" {
+			continue
 		}
-		b.WriteString(line[:i])
-		b.WriteString(ansiReverse + line[i:i+len(phrase)] + ansiReset)
-		line, lower = line[i+len(phrase):], lower[i+len(phrase):]
+		lw := strings.ToLower(w)
+		for i := 0; i < len(lower); {
+			idx := strings.Index(lower[i:], lw)
+			if idx < 0 {
+				break
+			}
+			start := i + idx
+			end := start + len(lw)
+			spans = append(spans, span{start, end})
+			i = end
+		}
 	}
+	if len(spans) == 0 {
+		return line
+	}
+	sort.Slice(spans, func(i, j int) bool { return spans[i].start < spans[j].start })
+	merged := spans[:1]
+	for _, s := range spans[1:] {
+		last := &merged[len(merged)-1]
+		if s.start <= last.end {
+			if s.end > last.end {
+				last.end = s.end
+			}
+			continue
+		}
+		merged = append(merged, s)
+	}
+
+	var b strings.Builder
+	prev := 0
+	for _, s := range merged {
+		b.WriteString(line[prev:s.start])
+		b.WriteString(ansiReverse + line[s.start:s.end] + ansiReset)
+		prev = s.end
+	}
+	b.WriteString(line[prev:])
+	return b.String()
 }
 
-func containsFold(s, sub string) bool {
-	return strings.Contains(strings.ToLower(s), strings.ToLower(sub))
+// containsAnyFold reports whether s contains any of words, case-insensitive
+// - the highlighting-consistent replacement for a single containsFold(s,
+// phrase) check (see highlightWords).
+func containsAnyFold(s string, words []string) bool {
+	lower := strings.ToLower(s)
+	for _, w := range words {
+		if w == "" {
+			continue
+		}
+		if strings.Contains(lower, strings.ToLower(w)) {
+			return true
+		}
+	}
+	return false
 }
 
 // promptTabLimit is how many of a session's prompts the Prompts tab reads.

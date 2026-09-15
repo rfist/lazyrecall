@@ -62,7 +62,61 @@ import (
 // rebuilds the index, and the next refresh repopulates it, this time by
 // folding the flag forward across passes instead of re-deriving
 // interactivity from a stale conclusion.
-var CurrentVersion = 7
+//
+// v8 adds two columns for change group-sessions-in-one-index, which
+// replaces one database per profile with a single index that every
+// session's group is computed against at query time (design.md decision 1
+// in openspec/changes/archive/2026-08-19-add-cross-agent-session-index -
+// reversed because its premise, that the Claude account decides work vs
+// personal, does not hold for a machine where most sources are single-
+// install and land everything in one account):
+//
+//   - lineages.group_name is the manual per-session override - a user
+//     correcting the path-based guess from a popup. It is an annotation,
+//     not index data: like archived_at, it is the user's own decision, it
+//     must survive a rebuild, and it must move with a continuation the way
+//     a lineage's other annotations do. NULL means "no override, use the
+//     path rule." This is a forward migration on the durable lineages
+//     table, following the exact mechanism archived_at used at v4 - ALTER
+//     TABLE, no backfill, because NULL is already the correct value for
+//     every lineage that predates the column.
+//   - sessions.install is index data: which config root (~/.claude,
+//     ~/.claude-personal, ~/.omp, ...) produced the session. It answers
+//     "which account" so that stays visible and filterable even though,
+//     unlike before this change, it no longer decides the session's group
+//     (config.Source.Labels supplies the display label). It is read back
+//     out of the sources on refresh like origin and client, so - also like
+//     them - it needs no annotation migration: the version bump discards
+//     and rebuilds the index and the next refresh repopulates it. The
+//     single-index refresher (internal/refresh) populates it on every pass,
+//     from the install each session was discovered under.
+//
+// v8 also replaces idx_lineages_handle_profile, which enforced a handle
+// unique per (profile, handle), with idx_lineages_handle unique on handle
+// alone. Handles used to be scoped to a profile because a profile was a
+// separate database; with one index for every profile, the same handle
+// number could otherwise be issued twice in the same listing. Every
+// existing database holds a single profile's lineages, so collapsing the
+// two profile-scoped counters into one global one cannot collide - the
+// migration only needs to swap which index exists, not renumber anything.
+//
+// v9 adds sessions.git_resolved, the flag that lets a refresh trust a
+// session's already-recorded git_repo_root/git_common_root instead of
+// re-running git plumbing against its CWD (perf fix for the
+// group-sessions-in-one-index regression, devdocs/fyi.md). Those two
+// columns alone cannot tell "never asked" from "asked and this directory
+// really isn't a git repository" - both read back as NULL - so a session
+// whose CWD is a plain, non-repo directory used to cost one git
+// subprocess call per session on every single refresh, forever, with no
+// way to cache the negative result. git_resolved records the attempt
+// itself, separately from its outcome, so that case can finally be
+// cached across passes the same way a real repo root already was. Like
+// origin, client, and install before it, this is index data folded
+// forward out of a source-derived value (the CWD) rather than anything
+// the user decided, so it needs no annotation migration - the version
+// bump discards and rebuilds the index, and the next refresh repopulates
+// it.
+var CurrentVersion = 9
 
 // indexDDL creates the tables that are pure cache over the sources: safe to
 // drop and rebuild whenever CurrentVersion changes.
@@ -86,12 +140,14 @@ CREATE TABLE IF NOT EXISTS sessions (
 	origin            TEXT,
 	human_prompt      INTEGER NOT NULL DEFAULT 0,
 	client            TEXT,
+	install           TEXT,
 	compaction_count  INTEGER,
 	compaction_json   TEXT,
 	transcript_path   TEXT,
 	message_count     INTEGER,
 	resumable         INTEGER NOT NULL DEFAULT 1,
-	dir_exists        INTEGER
+	dir_exists        INTEGER,
+	git_resolved      INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_lineage ON sessions(lineage_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_last_activity ON sessions(last_activity_at DESC);
@@ -128,9 +184,10 @@ CREATE TABLE IF NOT EXISTS lineages (
 	profile     TEXT NOT NULL,
 	orphaned    INTEGER NOT NULL DEFAULT 0,
 	handle      INTEGER,
-	archived_at INTEGER
+	archived_at INTEGER,
+	group_name  TEXT
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_lineages_handle_profile ON lineages(profile, handle);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_lineages_handle ON lineages(handle);
 
 CREATE TABLE IF NOT EXISTS comments (
 	id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -205,6 +262,22 @@ WHERE id IN (SELECT lineage_id FROM ordered);
 	// be wiped by the next refresh --full.
 	4: `
 ALTER TABLE lineages ADD COLUMN archived_at INTEGER;
+`,
+	// v8 (change group-sessions-in-one-index): adds the manual group
+	// override to the durable lineages table, exactly like archived_at did
+	// at v4 - ALTER TABLE, no backfill needed since NULL ("no override, use
+	// the path rule") is already the right value for every lineage that
+	// predates the column. It also drops the old per-profile handle
+	// uniqueness index in favor of one unique on handle alone: with every
+	// profile about to share one index, keeping the old index around would
+	// let two profiles' lineages collide on the same handle number in the
+	// same listing. This cannot conflict on any existing database, because
+	// every database that reaches this migration holds exactly one
+	// profile's lineages - the very thing decision 1 is being reversed for.
+	8: `
+ALTER TABLE lineages ADD COLUMN group_name TEXT;
+DROP INDEX IF EXISTS idx_lineages_handle_profile;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_lineages_handle ON lineages(handle);
 `,
 }
 

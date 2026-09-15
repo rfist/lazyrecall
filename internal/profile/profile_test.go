@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+
+	"github.com/rfist/lazyrecall/internal/config"
 )
 
 // withEnv sets env vars for the duration of the test and restores them
@@ -48,129 +50,83 @@ func mkClaudeRoot(t *testing.T, dir string) {
 	}
 }
 
-func TestDiscoverTwoClaudeInstallsAreSeparateProfiles(t *testing.T) {
+// baseSingleInstallEnv points every single_install source at a directory
+// that does not exist, so a test asserting about claude alone is not also
+// exercising whatever pi/omp/hermes happen to be configured on the machine
+// running the suite.
+func baseSingleInstallEnv(home string) map[string]string {
+	return map[string]string{
+		"LAZYRECALL_PI_HOME":     filepath.Join(home, "nope-pi"),
+		"LAZYRECALL_OMP_HOME":    filepath.Join(home, "nope-omp"),
+		"LAZYRECALL_HERMES_HOME": filepath.Join(home, "nope-hermes"),
+	}
+}
+
+// TestDiscoverTwoClaudeRootsAndTwoSingleInstallSources covers the core
+// contract (change group-sessions-in-one-index): four config roots on the
+// machine (two claude, one pi, one omp) must discover as four installs, each
+// with exactly one entry in Roots, and a single-install source's install is
+// named after the source, never after its root's basename.
+func TestDiscoverTwoClaudeRootsAndTwoSingleInstallSources(t *testing.T) {
 	home := t.TempDir()
 	work := filepath.Join(home, ".claude")
 	personal := filepath.Join(home, ".claude-personal")
 	mkClaudeRoot(t, work)
 	mkClaudeRoot(t, personal)
+	piHome := filepath.Join(home, "pi-home")
+	ompHome := filepath.Join(home, "omp-home")
+	if err := os.MkdirAll(piHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(ompHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
 
 	withEnv(t, map[string]string{
 		"HOME":                          home,
 		"LAZYRECALL_CONFIG":             "",
 		"LAZYRECALL_CLAUDE_CONFIG_DIRS": work + ":" + personal,
-		"LAZYRECALL_PI_HOME":            "",
-		"LAZYRECALL_OMP_HOME":           "",
-		"LAZYRECALL_HERMES_HOME":        "",
+		"LAZYRECALL_PI_HOME":            piHome,
+		"LAZYRECALL_OMP_HOME":           ompHome,
+		"LAZYRECALL_HERMES_HOME":        filepath.Join(home, "nope-hermes"),
 	})
 
 	profiles, err := Discover()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(profiles) != 2 {
-		t.Fatalf("expected 2 profiles, got %d: %+v", len(profiles), profiles)
+	if len(profiles) != 4 {
+		t.Fatalf("expected 4 installs, got %d: %+v", len(profiles), profiles)
 	}
 
-	names := map[string]Profile{}
+	byName := map[string]Profile{}
 	for _, p := range profiles {
-		names[p.Name] = p
+		if len(p.Roots) != 1 {
+			t.Errorf("install %q has %d roots, want exactly 1: %+v", p.Name, len(p.Roots), p.Roots)
+		}
+		byName[p.Name] = p
 	}
-	if _, ok := names["claude"]; !ok {
-		t.Errorf("expected a 'claude' profile, got %v", names)
+	for _, want := range []string{"claude", "claude-personal", "pi", "omp"} {
+		if _, ok := byName[want]; !ok {
+			t.Errorf("expected an install named %q, got %v", want, byName)
+		}
 	}
-	if _, ok := names["claude-personal"]; !ok {
-		t.Errorf("expected a 'claude-personal' profile, got %v", names)
+	if byName["claude"].Roots["claude"] == byName["claude-personal"].Roots["claude"] {
+		t.Error("the two claude installs must not share a config root")
 	}
-	if names["claude"].Roots["claude"] == names["claude-personal"].Roots["claude"] {
-		t.Errorf("the two profiles must not share a config root")
+	if byName["pi"].Roots["pi"] != piHome {
+		t.Errorf("pi install root = %q, want %q", byName["pi"].Roots["pi"], piHome)
 	}
-}
-
-// TestResolveTwoClaudeRootsWithoutADefaultReturnsTheFirst is the
-// regression test for the release-blocking bug: a machine with two Claude
-// config roots and none of pi/omp/hermes used to be a hard error
-// ("multiple profiles found and none is the default") with no way out from
-// inside the tool. With no env, no config file, and nothing to make one
-// profile the default, Resolve must still pick a profile.
-func TestResolveTwoClaudeRootsWithoutADefaultReturnsTheFirst(t *testing.T) {
-	home := t.TempDir()
-	a := filepath.Join(home, ".claude")
-	b := filepath.Join(home, ".claude-personal")
-	mkClaudeRoot(t, a)
-	mkClaudeRoot(t, b)
-	withEnv(t, map[string]string{
-		"HOME":               home,
-		"LAZYRECALL_CONFIG":  "",
-		"LAZYRECALL_PROFILE": "",
-	})
-	profiles, err := Discover()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(profiles) != 2 {
-		t.Fatalf("expected 2 profiles, got %d: %+v", len(profiles), profiles)
-	}
-	p, err := Resolve(profiles, "")
-	if err != nil {
-		t.Fatalf("Resolve must succeed with two Claude roots and no default: %v", err)
-	}
-	// The list is sorted by name, so the first profile is "claude".
-	if p.Name != "claude" {
-		t.Errorf("got %q, want claude", p.Name)
+	if byName["omp"].Roots["omp"] != ompHome {
+		t.Errorf("omp install root = %q, want %q", byName["omp"].Roots["omp"], ompHome)
 	}
 }
 
-func TestResolveHonorsExplicitRequest(t *testing.T) {
-	home := t.TempDir()
-	a := filepath.Join(home, ".claude-alpha")
-	b := filepath.Join(home, ".claude-beta")
-	mkClaudeRoot(t, a)
-	mkClaudeRoot(t, b)
-	withEnv(t, map[string]string{
-		"HOME":                          home,
-		"LAZYRECALL_CONFIG":             "",
-		"LAZYRECALL_CLAUDE_CONFIG_DIRS": a + ":" + b,
-		"LAZYRECALL_PI_HOME":            "",
-		"LAZYRECALL_OMP_HOME":           "",
-		"LAZYRECALL_HERMES_HOME":        "",
-	})
-	profiles, err := Discover()
-	if err != nil {
-		t.Fatal(err)
-	}
-	p, err := Resolve(profiles, "claude-beta")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if p.Name != "claude-beta" {
-		t.Errorf("got %q", p.Name)
-	}
-}
-
-// TestResolveRequestedProfileThatDoesNotExistStillErrors pins down the one
-// case that must not silently fall through to the first-profile step: a
-// name the user asked for explicitly (the --profile flag) that matches no
-// discovered profile.
-func TestResolveRequestedProfileThatDoesNotExistStillErrors(t *testing.T) {
-	home := t.TempDir()
-	mkClaudeRoot(t, filepath.Join(home, ".claude"))
-	mkClaudeRoot(t, filepath.Join(home, ".claude-personal"))
-	withEnv(t, map[string]string{
-		"HOME":               home,
-		"LAZYRECALL_CONFIG":  "",
-		"LAZYRECALL_PROFILE": "",
-	})
-	profiles, err := Discover()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Resolve(profiles, "ghost"); err == nil {
-		t.Fatal("expected an error for a requested profile that does not exist")
-	}
-}
-
-func TestSingleInstanceSourcesNeverDuplicateAcrossProfiles(t *testing.T) {
+// TestSingleInstallSourceNeverDuplicatesAcrossInstalls covers the case the
+// old primary-profile bundling used to guard: a single_install source with
+// only one existing root must produce exactly one install, not one per
+// other install on the machine.
+func TestSingleInstallSourceNeverDuplicatesAcrossInstalls(t *testing.T) {
 	home := t.TempDir()
 	work := filepath.Join(home, ".claude")
 	personal := filepath.Join(home, ".claude-personal")
@@ -199,8 +155,37 @@ func TestSingleInstanceSourcesNeverDuplicateAcrossProfiles(t *testing.T) {
 		}
 	}
 	if withPi != 1 {
-		t.Fatalf("expected pi to be bundled into exactly one profile, got %d", withPi)
+		t.Fatalf("expected pi to produce exactly one install, got %d", withPi)
 	}
+}
+
+// TestDiscoverSingleClaudeRootWithNothingSet covers the common fresh-machine
+// case: a temp HOME with only a synthetic ~/.claude (a projects/ dir is
+// enough for it to count as a real root) must discover exactly one install.
+func TestDiscoverSingleClaudeRootWithNothingSet(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".claude", "projects"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	withEnv(t, withHomeAnd(home, baseSingleInstallEnv(home)))
+	profiles, err := Discover()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(profiles) != 1 {
+		t.Fatalf("expected exactly 1 install, got %d: %+v", len(profiles), profiles)
+	}
+	if profiles[0].Name != "claude" {
+		t.Errorf("got %q, want claude", profiles[0].Name)
+	}
+}
+
+func withHomeAnd(home string, extra map[string]string) map[string]string {
+	out := map[string]string{"HOME": home, "LAZYRECALL_CONFIG": ""}
+	for k, v := range extra {
+		out[k] = v
+	}
+	return out
 }
 
 // writeConfigFile writes a config file into the temp HOME's expected
@@ -217,158 +202,39 @@ func writeConfigFile(t *testing.T, home, content string) {
 	}
 }
 
-// TestResolveConfigDefaultProfileBeatsBuiltinRule covers the new third
-// resolution step: the config file's default_profile must win over the
-// built-in primary rule (which would otherwise pick claude-personal here,
-// because it is the profile bundling pi).
-func TestResolveConfigDefaultProfileBeatsBuiltinRule(t *testing.T) {
+// TestTwoInstallsColliddingOnNameIsAnError covers the deliberate hard-error
+// path: two single_install sources configured under the same source name
+// would otherwise silently orphan one of them's handles/comments/tags.
+func TestTwoInstallsCollidingOnNameIsAnError(t *testing.T) {
 	home := t.TempDir()
-	mkClaudeRoot(t, filepath.Join(home, ".claude"))
-	mkClaudeRoot(t, filepath.Join(home, ".claude-personal"))
-	if err := os.MkdirAll(filepath.Join(home, ".pi"), 0o755); err != nil {
+	rootA := filepath.Join(home, "a")
+	rootB := filepath.Join(home, "b")
+	if err := os.MkdirAll(rootA, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeConfigFile(t, home, "default_profile = \"claude\"\n")
+	if err := os.MkdirAll(rootB, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A single_install source configured with two roots that both exist:
+	// both would be named "pi", which must fail rather than silently drop
+	// one.
+	writeConfigFile(t, home, "[sources.pi]\nroots = [\""+rootA+"\", \""+rootB+"\"]\nsingle_install = true\n")
 	withEnv(t, map[string]string{
-		"HOME":               home,
-		"LAZYRECALL_CONFIG":  "",
-		"LAZYRECALL_PROFILE": "",
+		"HOME":                          home,
+		"LAZYRECALL_CLAUDE_CONFIG_DIRS": "",
+		"LAZYRECALL_PI_HOME":            "",
+		"LAZYRECALL_OMP_HOME":           filepath.Join(home, "nope-omp"),
+		"LAZYRECALL_HERMES_HOME":        filepath.Join(home, "nope-hermes"),
 	})
-	profiles, err := Discover()
-	if err != nil {
-		t.Fatal(err)
-	}
-	p, err := Resolve(profiles, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if p.Name != "claude" {
-		t.Errorf("got %q, want claude (the config file's default_profile)", p.Name)
+	if _, err := Discover(); err == nil {
+		t.Fatal("expected an error when two installs would collide on the same name")
 	}
 }
 
-// TestResolveEnvProfileBeatsConfigDefaultProfile covers the second
-// resolution step: LAZYRECALL_PROFILE wins over the config file's
-// default_profile, never the other way around.
-func TestResolveEnvProfileBeatsConfigDefaultProfile(t *testing.T) {
-	home := t.TempDir()
-	mkClaudeRoot(t, filepath.Join(home, ".claude"))
-	mkClaudeRoot(t, filepath.Join(home, ".claude-personal"))
-	if err := os.MkdirAll(filepath.Join(home, ".pi"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	writeConfigFile(t, home, "default_profile = \"claude\"\n")
-	withEnv(t, map[string]string{
-		"HOME":               home,
-		"LAZYRECALL_CONFIG":  "",
-		"LAZYRECALL_PROFILE": "claude-personal",
-	})
-	profiles, err := Discover()
-	if err != nil {
-		t.Fatal(err)
-	}
-	p, err := Resolve(profiles, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if p.Name != "claude-personal" {
-		t.Errorf("got %q, want claude-personal (the LAZYRECALL_PROFILE value)", p.Name)
-	}
-}
-
-// TestDiscoverSingleClaudeRootResolvesWithNothingSet covers the common
-// fresh-machine case: a temp HOME with only a synthetic ~/.claude (a
-// projects/ dir is enough for it to count as a real root) must discover
-// exactly one profile and resolve it with nothing set.
-func TestDiscoverSingleClaudeRootResolvesWithNothingSet(t *testing.T) {
-	home := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(home, ".claude", "projects"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	withEnv(t, map[string]string{
-		"HOME":               home,
-		"LAZYRECALL_CONFIG":  "",
-		"LAZYRECALL_PROFILE": "",
-	})
-	profiles, err := Discover()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(profiles) != 1 {
-		t.Fatalf("expected exactly 1 profile, got %d: %+v", len(profiles), profiles)
-	}
-	if profiles[0].Name != "claude" {
-		t.Errorf("got %q, want claude", profiles[0].Name)
-	}
-	p, err := Resolve(profiles, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if p.Name != "claude" {
-		t.Errorf("got %q, want claude", p.Name)
-	}
-}
-
-func TestDBPathIsOnePerProfile(t *testing.T) {
-	home := t.TempDir()
-	withEnv(t, map[string]string{"HOME": home, "LAZYRECALL_HOME": ""})
-	p1 := Profile{Name: "claude"}
-	p2 := Profile{Name: "claude-personal"}
-	if DBPath(p1) == DBPath(p2) {
-		t.Fatal("distinct profiles must resolve to distinct database files")
-	}
-}
-
-// The data directory's name changed with the rename, and the pre-rename
-// environment variable stays honoured so an environment that still sets it
-// cannot silently start indexing into a second, empty database (change
-// rename-to-lazyrecall).
-func TestDataDirResolutionOrder(t *testing.T) {
-	home := t.TempDir()
-
-	withEnv(t, map[string]string{"HOME": home, "LAZYRECALL_HOME": "", "RECALL_HOME": ""})
-	if got, want := DataDir(), filepath.Join(home, ".lazyrecall"); got != want {
-		t.Errorf("default DataDir() = %q, want %q", got, want)
-	}
-
-	withEnv(t, map[string]string{"HOME": home, "LAZYRECALL_HOME": "", "RECALL_HOME": "/legacy"})
-	if got := DataDir(); got != "/legacy" {
-		t.Errorf("with only RECALL_HOME set, DataDir() = %q, want /legacy", got)
-	}
-
-	withEnv(t, map[string]string{"HOME": home, "LAZYRECALL_HOME": "/current", "RECALL_HOME": "/legacy"})
-	if got := DataDir(); got != "/current" {
-		t.Errorf("LAZYRECALL_HOME must win over RECALL_HOME, got %q", got)
-	}
-
-	withEnv(t, map[string]string{"HOME": home})
-	if got, want := LegacyDataDir(), filepath.Join(home, ".recall"); got != want {
-		t.Errorf("LegacyDataDir() = %q, want %q", got, want)
-	}
-}
-
-func TestEnvProfilePrefersTheCurrentVariable(t *testing.T) {
-	withEnv(t, map[string]string{"LAZYRECALL_PROFILE": "", "RECALL_PROFILE": "old"})
-	if got := envProfile(); got != "old" {
-		t.Errorf("with only RECALL_PROFILE set, envProfile() = %q, want old", got)
-	}
-	withEnv(t, map[string]string{"LAZYRECALL_PROFILE": "new", "RECALL_PROFILE": "old"})
-	if got := envProfile(); got != "new" {
-		t.Errorf("LAZYRECALL_PROFILE must win, got %q", got)
-	}
-}
-
-// A profile's name is its database filename (DBPath), so a name that depends
-// on how the roots were *written down* rather than on what is actually on the
-// machine would silently move a user to a different, empty database - losing
-// every short handle, comment, and tag, which are the only data LazyRecall
-// originates and cannot rebuild from any source.
-//
-// This is a regression test for exactly that: discovery is run twice against
-// one synthetic machine, once with no config file and once with a config that
-// names the single root explicitly, and the profile names must be identical.
-// Before single_install became an explicit config field, the second form
-// produced a profile called "default" instead of "claude".
+// TestProfileNameDoesNotDependOnHowRootsWereConfigured is the regression
+// test for the same defect DBPath's old per-profile scheme guarded against:
+// an install's name must depend only on what is actually on the machine,
+// never on how the roots happened to be written down in the config file.
 func TestProfileNameDoesNotDependOnHowRootsWereConfigured(t *testing.T) {
 	home := t.TempDir()
 	claudeRoot := filepath.Join(home, ".claude")
@@ -389,12 +255,12 @@ func TestProfileNameDoesNotDependOnHowRootsWereConfigured(t *testing.T) {
 		return out
 	}
 
-	base := map[string]string{
-		"HOME": home, "LAZYRECALL_CONFIG": "", "LAZYRECALL_CLAUDE_CONFIG_DIRS": "",
-		"LAZYRECALL_PI_HOME":     filepath.Join(home, "nope-pi"),
-		"LAZYRECALL_OMP_HOME":    filepath.Join(home, "nope-omp"),
-		"LAZYRECALL_HERMES_HOME": filepath.Join(home, "nope-hermes"),
-	}
+	base := withHomeAnd(home, map[string]string{
+		"LAZYRECALL_CLAUDE_CONFIG_DIRS": "",
+		"LAZYRECALL_PI_HOME":            filepath.Join(home, "nope-pi"),
+		"LAZYRECALL_OMP_HOME":           filepath.Join(home, "nope-omp"),
+		"LAZYRECALL_HERMES_HOME":        filepath.Join(home, "nope-hermes"),
+	})
 	withEnv(t, base)
 	fromDefaults := names()
 
@@ -412,10 +278,85 @@ func TestProfileNameDoesNotDependOnHowRootsWereConfigured(t *testing.T) {
 	fromExplicitConfig := names()
 
 	if !reflect.DeepEqual(fromDefaults, fromExplicitConfig) {
-		t.Errorf("profile names differ by how the roots were configured: defaults gave %v, an explicit single-root config gave %v",
+		t.Errorf("install names differ by how the roots were configured: defaults gave %v, an explicit single-root config gave %v",
 			fromDefaults, fromExplicitConfig)
 	}
 	if len(fromDefaults) != 1 || fromDefaults[0] != "claude" {
-		t.Errorf("expected exactly the profile \"claude\", got %v", fromDefaults)
+		t.Errorf("expected exactly the install \"claude\", got %v", fromDefaults)
+	}
+}
+
+func TestDBPathIsOneFileForEveryInstall(t *testing.T) {
+	home := t.TempDir()
+	withEnv(t, map[string]string{"HOME": home, "LAZYRECALL_HOME": ""})
+	want := filepath.Join(home, ".lazyrecall", "index.db")
+	if got := DBPath(); got != want {
+		t.Errorf("DBPath() = %q, want %q", got, want)
+	}
+}
+
+// The pre-rename RECALL_HOME fallback was removed (this project has one
+// user, so no backward-compatibility code); RECALL_HOME alone must now be
+// ignored and DataDir() must stay on the default.
+func TestDataDirResolutionOrder(t *testing.T) {
+	home := t.TempDir()
+
+	withEnv(t, map[string]string{"HOME": home, "LAZYRECALL_HOME": "", "RECALL_HOME": ""})
+	if got, want := DataDir(), filepath.Join(home, ".lazyrecall"); got != want {
+		t.Errorf("default DataDir() = %q, want %q", got, want)
+	}
+
+	withEnv(t, map[string]string{"HOME": home, "LAZYRECALL_HOME": "", "RECALL_HOME": "/legacy"})
+	if got, want := DataDir(), filepath.Join(home, ".lazyrecall"); got != want {
+		t.Errorf("with only RECALL_HOME set, DataDir() = %q, want %q (RECALL_HOME must be ignored)", got, want)
+	}
+
+	withEnv(t, map[string]string{"HOME": home, "LAZYRECALL_HOME": "/current", "RECALL_HOME": "/legacy"})
+	if got := DataDir(); got != "/current" {
+		t.Errorf("LAZYRECALL_HOME must be honoured, got %q", got)
+	}
+}
+
+// TestLabelResolvesConfiguredNameElseFallsBackToInstallName covers
+// Profile.Label: a root with a configured label uses it, matched after
+// filepath.Clean on both sides so a trailing slash in the config does not
+// silently fail to match; a root with none falls back to the install name.
+func TestLabelResolvesConfiguredNameElseFallsBackToInstallName(t *testing.T) {
+	cfg := config.Config{
+		Labels: map[string]string{"/home/u/.claude-personal/": "ccp"},
+	}
+	labeled := Profile{Name: "claude-personal", Roots: map[string]string{"claude": "/home/u/.claude-personal"}}
+	if got := labeled.Label(cfg); got != "ccp" {
+		t.Errorf("Label() = %q, want the configured label ccp", got)
+	}
+
+	unlabeled := Profile{Name: "claude", Roots: map[string]string{"claude": "/home/u/.claude"}}
+	if got := unlabeled.Label(cfg); got != "claude" {
+		t.Errorf("Label() = %q, want the install name as a fallback", got)
+	}
+}
+
+// TestConfiguredLabelDoesNotFallBackToInstallName covers the P1 bug
+// resolveAgentFilter's fix depends on: with no [labels] table at all, an
+// install named the same as its own source (e.g. "claude") must not read as
+// having a configured label of itself just because Profile.Label falls back
+// to the install name - ConfiguredLabel is the strict form that reports
+// "no" instead of the fallback, which is what lets a caller tell "this arg
+// is a real configured label" apart from "this arg happens to equal the
+// install's own name".
+func TestConfiguredLabelDoesNotFallBackToInstallName(t *testing.T) {
+	unlabeled := Profile{Name: "claude", Roots: map[string]string{"claude": "/home/u/.claude"}}
+	if label, ok := unlabeled.ConfiguredLabel(config.Config{}); ok || label != "" {
+		t.Errorf("ConfiguredLabel() = (%q, %v) with no [labels] configured, want (\"\", false)", label, ok)
+	}
+
+	cfg := config.Config{Labels: map[string]string{"/home/u/.claude-personal/": "ccp"}}
+	if label, ok := unlabeled.ConfiguredLabel(cfg); ok || label != "" {
+		t.Errorf("ConfiguredLabel() = (%q, %v) for a root with no label of its own, want (\"\", false)", label, ok)
+	}
+
+	labeled := Profile{Name: "claude-personal", Roots: map[string]string{"claude": "/home/u/.claude-personal"}}
+	if label, ok := labeled.ConfiguredLabel(cfg); !ok || label != "ccp" {
+		t.Errorf("ConfiguredLabel() = (%q, %v), want (\"ccp\", true)", label, ok)
 	}
 }

@@ -60,7 +60,7 @@ func buildTestProfile(t *testing.T) (profile.Profile, string) {
 
 func TestFullBuildIndexesClaudeSession(t *testing.T) {
 	p, bin := buildTestProfile(t)
-	r, err := New(p, bin)
+	r, err := New([]profile.Profile{p}, bin)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +112,7 @@ func TestFullBuildIndexesClaudeSession(t *testing.T) {
 
 func TestIncrementalRefreshOnlyReadsWhatChanged(t *testing.T) {
 	p, bin := buildTestProfile(t)
-	r, err := New(p, bin)
+	r, err := New([]profile.Profile{p}, bin)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +152,7 @@ func TestIncrementalRefreshOnlyReadsWhatChanged(t *testing.T) {
 
 func TestFullRebuildOption(t *testing.T) {
 	p, bin := buildTestProfile(t)
-	r, err := New(p, bin)
+	r, err := New([]profile.Profile{p}, bin)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +189,7 @@ func TestMissingSourceDoesNotBlockOthers(t *testing.T) {
 			`{"type":"message","message":{"role":"user","content":[{"type":"text","text":"synthetic prompt"}]},"timestamp":"2026-01-01T00:00:01Z"}`+"\n")
 
 	p := profile.Profile{Name: "default", Roots: map[string]string{"pi": piRoot}}
-	r, err := New(p, sqlite3Path(t))
+	r, err := New([]profile.Profile{p}, sqlite3Path(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,7 +233,7 @@ func TestMissingSourceDoesNotBlockOthers(t *testing.T) {
 
 func TestOrphanedLineageRetainsAnnotations(t *testing.T) {
 	p, bin := buildTestProfile(t)
-	r, err := New(p, bin)
+	r, err := New([]profile.Profile{p}, bin)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -298,7 +298,7 @@ func TestOrphanedLineageRetainsAnnotations(t *testing.T) {
 // present in its source stay attached - not just retained-as-orphaned.
 func TestAnnotationsSurviveFullRebuildForAStillPresentSession(t *testing.T) {
 	p, bin := buildTestProfile(t)
-	r, err := New(p, bin)
+	r, err := New([]profile.Profile{p}, bin)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -376,7 +376,7 @@ func TestPiSourceSessionIDComesFromRecordNotFileName(t *testing.T) {
 			`{"type":"message","message":{"role":"user","content":[{"type":"text","text":"hello"}]},"timestamp":"2026-01-01T00:00:01Z"}`+"\n")
 
 	p := profile.Profile{Name: "default", Roots: map[string]string{"pi": piRoot}}
-	r, err := New(p, sqlite3Path(t))
+	r, err := New([]profile.Profile{p}, sqlite3Path(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -434,7 +434,7 @@ func TestIncrementalRefreshPreservesCorrectedIdentifierAndCursor(t *testing.T) {
 			`{"type":"message","message":{"role":"user","content":[{"type":"text","text":"hello"}]},"timestamp":"2026-01-01T00:00:01Z"}`+"\n")
 
 	p := profile.Profile{Name: "default", Roots: map[string]string{"pi": piRoot}}
-	r, err := New(p, sqlite3Path(t))
+	r, err := New([]profile.Profile{p}, sqlite3Path(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -501,7 +501,7 @@ func TestFullRebuildCorrectsPiIdentifierAndMigratesAnnotations(t *testing.T) {
 			`{"type":"message","message":{"role":"user","content":[{"type":"text","text":"hello"}]},"timestamp":"2026-01-01T00:00:01Z"}`+"\n")
 
 	p := profile.Profile{Name: "default", Roots: map[string]string{"pi": piRoot}}
-	r, err := New(p, sqlite3Path(t))
+	r, err := New([]profile.Profile{p}, sqlite3Path(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -616,7 +616,7 @@ INSERT INTO messages (session_id, role, content, finish_reason, timestamp) VALUE
 	}
 
 	p := profile.Profile{Name: "hermes-only", Roots: map[string]string{"hermes": hermesRoot}}
-	r, err := New(p, bin)
+	r, err := New([]profile.Profile{p}, bin)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -662,7 +662,7 @@ INSERT INTO messages (session_id, role, content, finish_reason, timestamp) VALUE
 // touches lineages directly - must not reassign it.
 func TestHandleAllocatedOnFirstSightAndStableAcrossRebuild(t *testing.T) {
 	p, bin := buildTestProfile(t)
-	r, err := New(p, bin)
+	r, err := New([]profile.Profile{p}, bin)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -722,7 +722,7 @@ func TestHandlesAreSequentialAndNeverReusedWithinAProfile(t *testing.T) {
 			`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn"},"timestamp":"2026-01-02T00:00:01Z"}`+"\n")
 
 	p := profile.Profile{Name: "claude-personal", Roots: map[string]string{"claude": claudeRoot}}
-	r, err := New(p, sqlite3Path(t))
+	r, err := New([]profile.Profile{p}, sqlite3Path(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -790,7 +790,7 @@ func TestHandlesAreSequentialAndNeverReusedWithinAProfile(t *testing.T) {
 // re-extracting.
 func TestFullRebuildDropsPreviouslyIngestedLocalCommandOutput(t *testing.T) {
 	p, bin := buildTestProfile(t)
-	r, err := New(p, bin)
+	r, err := New([]profile.Profile{p}, bin)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -828,29 +828,47 @@ func TestFullRebuildDropsPreviouslyIngestedLocalCommandOutput(t *testing.T) {
 	}
 }
 
-func TestProfileIsolationSeparateDatabaseFiles(t *testing.T) {
+// TestOneIndexFileForEveryInstall covers the replacement for the old
+// per-profile database-file isolation (change group-sessions-in-one-index):
+// refreshing two installs writes to exactly one file, profile.DBPath(), and
+// creates no other database anywhere in the data directory.
+func TestOneIndexFileForEveryInstall(t *testing.T) {
 	dataDir := t.TempDir()
 	os.Setenv("LAZYRECALL_HOME", dataDir)
 	t.Cleanup(func() { os.Unsetenv("LAZYRECALL_HOME") })
 
-	p1 := profile.Profile{Name: "claude-personal"}
-	p2 := profile.Profile{Name: "claude"}
-	path1 := profile.DBPath(p1)
-	path2 := profile.DBPath(p2)
-	if path1 == path2 {
-		t.Fatal("two profiles must never resolve to the same database file")
+	installs := []profile.Profile{
+		{Name: "claude-personal"},
+		{Name: "claude"},
 	}
-
 	bin := sqlite3Path(t)
-	r1, err := New(p1, bin)
+	r, err := New(installs, bin)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r1.Refresh(Options{}); err != nil {
+	if _, err := r.Refresh(Options{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(path2); err == nil {
-		t.Fatal("refreshing one profile must not create the other profile's database file")
+
+	want := profile.DBPath()
+	if r.DB.DBPath != want {
+		t.Fatalf("Refresher opened %q, want the single index at %q", r.DB.DBPath, want)
+	}
+
+	var dbFiles []string
+	if err := filepath.Walk(dataDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() && filepath.Ext(path) == ".db" {
+			dbFiles = append(dbFiles, path)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(dbFiles) != 1 || dbFiles[0] != want {
+		t.Fatalf("expected exactly one database file (%s), found %v", want, dbFiles)
 	}
 }
 
@@ -887,7 +905,7 @@ func TestSessionNameIndexedAndSurvivesIncrementalRefresh(t *testing.T) {
 		return rows[0].Name
 	}
 
-	r, err := New(p, bin)
+	r, err := New([]profile.Profile{p}, bin)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -942,7 +960,7 @@ func TestOriginPersistedFromTranscript(t *testing.T) {
 			`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Hello."}],"stop_reason":"end_turn"},"timestamp":"2026-01-01T00:00:05Z"}`+"\n")
 
 	p := profile.Profile{Name: "claude-personal", Roots: map[string]string{"claude": claudeRoot}}
-	r, err := New(p, sqlite3Path(t))
+	r, err := New([]profile.Profile{p}, sqlite3Path(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1012,7 +1030,7 @@ func TestEditorClientSessionIsVisibleAndStaysVisible(t *testing.T) {
 			`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Here it is."}],"stop_reason":"end_turn"},"entrypoint":"sdk-ts","timestamp":"2026-01-01T00:00:05Z"}`+"\n")
 
 	p := profile.Profile{Name: "claude-personal", Roots: map[string]string{"claude": claudeRoot}}
-	r, err := New(p, sqlite3Path(t))
+	r, err := New([]profile.Profile{p}, sqlite3Path(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1095,7 +1113,7 @@ func TestClientFilterMatchesLabelAndRawValue(t *testing.T) {
 		`{"type":"user","message":{"role":"user","content":"from the terminal"},"cwd":"/work/repo","entrypoint":"cli","timestamp":"2026-01-01T00:00:00Z"}`+"\n")
 
 	p := profile.Profile{Name: "claude-personal", Roots: map[string]string{"claude": claudeRoot}}
-	r, err := New(p, sqlite3Path(t))
+	r, err := New([]profile.Profile{p}, sqlite3Path(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1153,7 +1171,7 @@ func TestOriginAgreesAcrossIncrementalAndFullRebuild(t *testing.T) {
 			`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"On it."}],"stop_reason":"end_turn"},"entrypoint":"cli","timestamp":"2026-01-01T00:00:05Z"}`+"\n")
 
 	p := profile.Profile{Name: "claude-personal", Roots: map[string]string{"claude": claudeRoot}}
-	r, err := New(p, sqlite3Path(t))
+	r, err := New([]profile.Profile{p}, sqlite3Path(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1228,7 +1246,7 @@ func TestOriginAgreesAcrossIncrementalAndFullRebuildWhenAutomationComesFirst(t *
 		`{"type":"user","message":{"role":"user","content":"run it unattended"},"cwd":"/work/repo","entrypoint":"sdk-cli","pad":"`+strings.Repeat("x", 300)+`","timestamp":"2026-01-01T00:00:00Z"}`+"\n")
 
 	p := profile.Profile{Name: "claude-personal", Roots: map[string]string{"claude": claudeRoot}}
-	r, err := New(p, sqlite3Path(t))
+	r, err := New([]profile.Profile{p}, sqlite3Path(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1305,7 +1323,7 @@ func TestRewriteDiscardsPriorTranscriptState(t *testing.T) {
 			`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Acknowledged."}],"stop_reason":"end_turn"},"entrypoint":"sdk-ts","timestamp":"2026-01-01T00:00:05Z"}`+"\n")
 
 	p := profile.Profile{Name: "claude-personal", Roots: map[string]string{"claude": claudeRoot}}
-	r, err := New(p, sqlite3Path(t))
+	r, err := New([]profile.Profile{p}, sqlite3Path(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1383,7 +1401,7 @@ func TestClientAgreesAcrossIncrementalAndFullRebuild(t *testing.T) {
 			`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Here you go."}],"stop_reason":"end_turn"},"entrypoint":"sdk-ts","timestamp":"2026-01-01T00:00:05Z"}`+"\n")
 
 	p := profile.Profile{Name: "claude-personal", Roots: map[string]string{"claude": claudeRoot}}
-	r, err := New(p, sqlite3Path(t))
+	r, err := New([]profile.Profile{p}, sqlite3Path(t))
 	if err != nil {
 		t.Fatal(err)
 	}

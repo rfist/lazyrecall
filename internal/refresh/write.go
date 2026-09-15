@@ -8,10 +8,10 @@ import (
 )
 
 var sessionColumns = []string{
-	"id", "source", "source_session_id", "lineage_id", "continues_from",
+	"id", "source", "source_session_id", "lineage_id", "install", "continues_from",
 	"topic", "name", "last_prompt", "cwd", "git_branch", "git_repo_root", "git_common_root",
 	"started_at", "last_activity_at", "end_state", "origin", "human_prompt", "client", "compaction_count",
-	"compaction_json", "transcript_path", "message_count", "resumable", "dir_exists",
+	"compaction_json", "transcript_path", "message_count", "resumable", "dir_exists", "git_resolved",
 }
 
 var cursorColumns = []string{
@@ -24,7 +24,7 @@ var cursorColumns = []string{
 // travels through sqlitex's NDJSON bulk-load path - never through a
 // formatted SQL string.
 func (r *Refresher) write(sessionRecords, promptRecords, cursorRecords []map[string]any) error {
-	lineageRecords := lineageRecordsFrom(sessionRecords, r.Profile.Name)
+	lineageRecords := lineageRecordsFrom(sessionRecords)
 
 	// origin is a closed set (session.Origin): normalize every record here,
 	// at the write boundary, so a session whose origin was never determined
@@ -121,17 +121,18 @@ func (r *Refresher) allocateHandles(lineageRecords []map[string]any) ([]map[stri
 	return out, nil
 }
 
-// loadLineageHandles reads which lineage ids already exist for this
-// profile, and the highest handle currently in use, so new handles are
-// allocated above it (task 1.2/2.1; design.md decision 2: the counter is
-// per profile).
+// loadLineageHandles reads which lineage ids already exist, and the highest
+// handle currently in use, so new handles are allocated above it (task
+// 1.2/2.1). The counter is global, not per install (change
+// group-sessions-in-one-index, schema v8's idx_lineages_handle): one index
+// now holds every install's lineages, so a handle is unique across all of
+// them, not just within one.
 func (r *Refresher) loadLineageHandles() (map[string]bool, int, error) {
 	var rows []struct {
 		ID     string `json:"id"`
 		Handle *int   `json:"handle"`
 	}
-	q := "SELECT id, handle FROM lineages WHERE profile = " + quoteStringLiteral(r.Profile.Name) + ";"
-	if err := r.DB.Query(q, &rows); err != nil {
+	if err := r.DB.Query(`SELECT id, handle FROM lineages;`, &rows); err != nil {
 		return nil, 0, err
 	}
 	existing := make(map[string]bool, len(rows))
@@ -145,7 +146,12 @@ func (r *Refresher) loadLineageHandles() (map[string]bool, int, error) {
 	return existing, max, nil
 }
 
-func lineageRecordsFrom(sessionRecords []map[string]any, profileName string) []map[string]any {
+// lineageRecordsFrom derives one lineage row per distinct lineage id among
+// sessionRecords, carrying forward the install that produced it (change
+// group-sessions-in-one-index: sessionRecords can now span every install in
+// one pass, so a single shared install name is no longer available here -
+// each record supplies its own via "install", set by sessionToRecord).
+func lineageRecordsFrom(sessionRecords []map[string]any) []map[string]any {
 	seen := map[string]bool{}
 	var out []map[string]any
 	for _, rec := range sessionRecords {
@@ -154,7 +160,8 @@ func lineageRecordsFrom(sessionRecords []map[string]any, profileName string) []m
 			continue
 		}
 		seen[id] = true
-		out = append(out, map[string]any{"id": id, "profile": profileName, "orphaned": 0})
+		install, _ := rec["install"].(string)
+		out = append(out, map[string]any{"id": id, "profile": install, "orphaned": 0})
 	}
 	return out
 }
@@ -180,11 +187,15 @@ func dedupeCursors(records []map[string]any) []map[string]any {
 	return out
 }
 
-// reconcileLineages marks every lineage in this profile that was not
-// observed during this refresh pass as orphaned, and any lineage that was
-// observed as no longer orphaned - without ever deleting a lineage row, so
-// its annotations are retained (spec session-annotations, "Annotated
-// session disappears from its source"; task 9.4).
+// reconcileLineages marks every lineage that was not observed during this
+// refresh pass as orphaned, and any lineage that was observed as no longer
+// orphaned - without ever deleting a lineage row, so its annotations are
+// retained (spec session-annotations, "Annotated session disappears from
+// its source"; task 9.4). Global, not scoped to one install (change
+// group-sessions-in-one-index): a Refresher normally covers every install
+// in one pass, so "not observed this pass" now means "gone from every
+// install", the same meaning "gone from this profile" used to have when a
+// profile was the whole database.
 func (r *Refresher) reconcileLineages(observed map[string]bool) error {
 	ids := make([]map[string]any, 0, len(observed))
 	for id := range observed {
@@ -192,7 +203,7 @@ func (r *Refresher) reconcileLineages(observed map[string]bool) error {
 	}
 
 	b := r.DB.NewBatch()
-	b.Exec(fmt.Sprintf("UPDATE lineages SET orphaned = 1 WHERE profile = %s;", quoteStringLiteral(r.Profile.Name)))
+	b.Exec(`UPDATE lineages SET orphaned = 1;`)
 	if len(ids) > 0 {
 		if err := b.BulkUpdate("lineages", "id", []string{"id", "orphaned"}, unorphanRecords(ids)); err != nil {
 			return err
@@ -261,10 +272,9 @@ func unorphanRecords(ids []map[string]any) []map[string]any {
 }
 
 func quoteStringLiteral(s string) string {
-	// r.Profile.Name is program-controlled (derived from a config
-	// directory basename at Discover time, validated indirectly by
-	// filesystem lookups) - not arbitrary session content - but it is
-	// still escaped defensively rather than trusted.
+	// Callers pass lineage ids here (migrateLineageAnnotations), which are
+	// program-derived hashes (session.LineageID), not arbitrary session
+	// content - but they are still escaped defensively rather than trusted.
 	out := "'"
 	for _, c := range s {
 		if c == '\'' {

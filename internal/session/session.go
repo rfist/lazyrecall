@@ -157,8 +157,13 @@ type Session struct {
 	// "omp", or "hermes".
 	Source string
 
-	// Profile is the isolated profile this session belongs to (e.g.
-	// "claude-work", "claude-personal"). See internal/profile.
+	// Profile names the install this session was read from (e.g.
+	// "claude-work", "claude-personal", "omp" - see internal/profile).
+	// Despite the field's historical name it no longer marks an isolated
+	// profile boundary now that one index holds every install together
+	// (change group-sessions-in-one-index): it decides which config root a
+	// session resumes into and is written out as sessions.install, not
+	// which database it lives in.
 	Profile string
 
 	// SourceSessionID is the identifier the source itself uses. It is not
@@ -276,6 +281,17 @@ type Session struct {
 	// DirExists reports whether CWD still exists on this machine, as of the
 	// last time it was checked. Nil until checked.
 	DirExists *bool
+
+	// GitResolved reports whether a refresh has already asked git about
+	// this session's CWD - regardless of what it found. GitRepoRoot and
+	// GitCommonRoot alone cannot distinguish "never asked" from "asked,
+	// and this directory really isn't a git repository": both read back
+	// nil either way. Without this flag a non-repo CWD had no cached
+	// outcome to fall back on and was re-resolved (one git subprocess
+	// call) on every single refresh, forever (perf fix for the
+	// group-sessions-in-one-index regression, devdocs/fyi.md). False
+	// until a refresh has actually checked - never a guess.
+	GitResolved bool
 }
 
 // Lineage is the identity annotations attach to, independent of any single

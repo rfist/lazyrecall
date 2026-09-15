@@ -177,7 +177,7 @@ func TestLineageForIdentifierByHandle(t *testing.T) {
 	db := testDB(t)
 	seedLineageWithHandle(t, db, "lin1", "claude:p:s1", "p", 5)
 
-	id, err := LineageForIdentifier(db, "p", "5")
+	id, err := LineageForIdentifier(db, "5")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +190,7 @@ func TestLineageForIdentifierFullyQualifiedStillWorks(t *testing.T) {
 	db := testDB(t)
 	seedLineageWithHandle(t, db, "lin1", "claude:p:s1", "p", 5)
 
-	id, err := LineageForIdentifier(db, "p", "claude:p:s1")
+	id, err := LineageForIdentifier(db, "claude:p:s1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +201,7 @@ func TestLineageForIdentifierFullyQualifiedStillWorks(t *testing.T) {
 
 func TestLineageForIdentifierHandleDoesNotResolve(t *testing.T) {
 	db := testDB(t)
-	if _, err := LineageForIdentifier(db, "p", "999"); err == nil {
+	if _, err := LineageForIdentifier(db, "999"); err == nil {
 		t.Fatal("expected an error for a handle that resolves to no session")
 	}
 }
@@ -212,7 +212,7 @@ func TestTagAndCommentByHandle(t *testing.T) {
 	db := testDB(t)
 	seedLineageWithHandle(t, db, "lin1", "claude:p:s1", "p", 9)
 
-	lineage, err := LineageForIdentifier(db, "p", "9")
+	lineage, err := LineageForIdentifier(db, "9")
 	if err != nil {
 		t.Fatal(err)
 	}

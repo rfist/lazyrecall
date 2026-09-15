@@ -71,6 +71,7 @@ type existingSessionRow struct {
 	GitBranch       *string `json:"git_branch"`
 	GitRepoRoot     *string `json:"git_repo_root"`
 	GitCommonRoot   *string `json:"git_common_root"`
+	GitResolved     int64   `json:"git_resolved"`
 	EndState        string  `json:"end_state"`
 	Origin          string  `json:"origin"`
 	HumanPrompt     int64   `json:"human_prompt"`
@@ -79,6 +80,7 @@ type existingSessionRow struct {
 	CompactionJSON  *string `json:"compaction_json"`
 	MessageCount    *int64  `json:"message_count"`
 	LastActivityAt  *int64  `json:"last_activity_at"`
+	DirExists       *int64  `json:"dir_exists"`
 }
 
 // existingSessions is the previous refresh pass's rows, indexed two ways.
@@ -100,7 +102,7 @@ type existingSessions struct {
 
 func (r *Refresher) loadExistingSessions() (existingSessions, error) {
 	var rows []existingSessionRow
-	if err := r.DB.Query(`SELECT id, source_session_id, transcript_path, topic, name, last_prompt, cwd, git_branch, git_repo_root, git_common_root, end_state, origin, human_prompt, client, compaction_count, compaction_json, message_count, last_activity_at FROM sessions;`, &rows); err != nil {
+	if err := r.DB.Query(`SELECT id, source_session_id, transcript_path, topic, name, last_prompt, cwd, git_branch, git_repo_root, git_common_root, git_resolved, end_state, origin, human_prompt, client, compaction_count, compaction_json, message_count, last_activity_at, dir_exists FROM sessions;`, &rows); err != nil {
 		return existingSessions{}, err
 	}
 	out := existingSessions{
@@ -126,10 +128,15 @@ func (r *Refresher) loadExistingSessions() (existingSessions, error) {
 			GitBranch:       row.GitBranch,
 			GitRepoRoot:     row.GitRepoRoot,
 			GitCommonRoot:   row.GitCommonRoot,
+			GitResolved:     row.GitResolved != 0,
 			EndState:        session.EndState(row.EndState),
 			Origin:          origin,
 			HumanPrompt:     row.HumanPrompt != 0,
 			Client:          row.Client,
+		}
+		if row.DirExists != nil {
+			exists := *row.DirExists != 0
+			s.DirExists = &exists
 		}
 		if row.MessageCount != nil {
 			mc := *row.MessageCount

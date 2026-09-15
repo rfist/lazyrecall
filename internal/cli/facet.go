@@ -121,13 +121,30 @@ func countBy(items []search.Item, allLabel string, keysOf func(search.Item) []st
 	return append(rows, rest...)
 }
 
-// agentKey / repoKey / tagKeys are the three facets' key functions.
+// installKey / repoKey / tagKeys are the three facets' key functions.
+//
+// installKey facets the Agents panel by install rather than by bare source
+// (change group-sessions-in-one-index): two Claude accounts now read as two
+// rows ("cc", "ccp" once labelled) instead of collapsing into one "claude"
+// row, which is what made "which account" unanswerable once one index held
+// every install together. See matchesFacets for how a row's Value is
+// matched back against an item.
+//
+// it.Install falls back to it.Source when empty - a row a refresh has not
+// yet stamped with an install (schema.go's sessions.install predates this
+// change and can be blank on an unmigrated row) still gets a facet key
+// instead of silently vanishing from the panel.
 //
 // repoKey is Item.GroupKey - the same canonical repo root the repository
 // filter and the grouped listing already use (internal/search), so a
 // repository panel row means exactly what `--repo` means and there is no
 // second notion of "which repo is this session in".
-func agentKey(it search.Item) []string { return []string{it.Source} }
+func installKey(it search.Item) []string {
+	if it.Install != "" {
+		return []string{it.Install}
+	}
+	return []string{it.Source}
+}
 
 func repoKey(it search.Item) []string {
 	key, _ := it.GroupKey()
@@ -140,8 +157,37 @@ func tagKeys(it search.Item) []string { return it.Tags }
 // Passing "" for a facet means that facet is not applied, which is the
 // same shape the "all" row produces - so "no filter" needs no special case
 // anywhere else.
-func matchesFacets(it search.Item, agent, repo, tag string) bool {
-	if agent != "" && it.Source != agent {
+//
+// install and source are two separate dimensions of the same Agents panel,
+// never conflated (change group-sessions-in-one-index, fixing a leak found
+// against real data): install narrows to one specific discovered install -
+// a panel row's own Value, matched against it.Install with a fallback to
+// it.Source only for a row a refresh has not yet stamped with an install
+// (see installKey) - while source narrows to every install of one source,
+// which is what a bare `--agent=claude` seed means (resolveAgentFilter's
+// Agent return) and which no single install row can express once two
+// installs of the same source exist. Matching install against
+// "it.Install == v OR it.Source == v" - the browser's first attempt - is
+// wrong, not just imprecise: when one install is literally named the same
+// as its own multi-install source (e.g. "claude" alongside
+// "claude-personal", installName's ordinary result), selecting
+// that one install's row matched every session of the shared source too,
+// because the OR's source half never distinguished "this install" from
+// "every install of this source". Keeping the two as separate parameters
+// - set from separate model state (browseModel.agentSource vs
+// browseModel.agents.Sel) - is what removes the ambiguity instead of
+// papering over it.
+func matchesFacets(it search.Item, install, source, repo, tag string) bool {
+	if install != "" {
+		got := it.Install
+		if got == "" {
+			got = it.Source
+		}
+		if got != install {
+			return false
+		}
+	}
+	if source != "" && it.Source != source {
 		return false
 	}
 	if repo != "" {
@@ -167,10 +213,10 @@ func matchesFacets(it search.Item, agent, repo, tag string) bool {
 
 // narrow returns the items matching the given facet values, in the order
 // they were loaded (most recently active first, as the query returned them).
-func narrow(items []search.Item, agent, repo, tag string) []search.Item {
+func narrow(items []search.Item, install, source, repo, tag string) []search.Item {
 	out := make([]search.Item, 0, len(items))
 	for _, it := range items {
-		if matchesFacets(it, agent, repo, tag) {
+		if matchesFacets(it, install, source, repo, tag) {
 			out = append(out, it)
 		}
 	}
