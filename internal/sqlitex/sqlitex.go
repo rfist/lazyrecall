@@ -525,3 +525,26 @@ func (p *ParamFile) Close() {
 func FTS5Phrase(s string) string {
 	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
 }
+
+// FTS5PrefixTerms turns text typed by a user into space-separated FTS5
+// prefix terms, one per word, which FTS5 ANDs together by default - so
+// "sketch" matches an indexed token like "sketchybar" (a whole-word phrase
+// match never would), and "fix retry" matches a row containing "fixing"
+// and "retries" anywhere, in either order. Each word is quoted exactly as
+// FTS5Phrase quotes its input - embedded '"' doubled - before the trailing
+// "*" is appended, so punctuation and FTS5 query-syntax characters (AND,
+// NOT, NEAR(...), :, ^, -, etc.) in what the user typed are still never
+// parsed as query operators; "*" only ever extends that one quoted term as
+// a prefix match. Empty or whitespace-only input is passed through to
+// FTS5Phrase unchanged, preserving its existing (no-match) behaviour.
+func FTS5PrefixTerms(s string) string {
+	words := strings.Fields(s)
+	if len(words) == 0 {
+		return FTS5Phrase(s)
+	}
+	terms := make([]string, len(words))
+	for i, w := range words {
+		terms[i] = FTS5Phrase(w) + "*"
+	}
+	return strings.Join(terms, " ")
+}

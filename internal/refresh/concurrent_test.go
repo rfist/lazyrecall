@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rfist/lazyrecall/internal/profile"
 	"github.com/rfist/lazyrecall/internal/sqlitex"
 )
 
@@ -18,7 +19,7 @@ import (
 // spec session-index, "Agent is running while the index refreshes").
 func TestRefreshToleratesConcurrentTranscriptWrites(t *testing.T) {
 	p, bin := buildTestProfile(t)
-	r, err := New(p, bin)
+	r, err := New([]profile.Profile{p}, bin)
 	if err != nil {
 		t.Fatal(err)
 	}

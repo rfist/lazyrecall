@@ -16,9 +16,61 @@ import (
 
 	"github.com/mattn/go-runewidth"
 
+	"github.com/rfist/lazyrecall/internal/config"
+	"github.com/rfist/lazyrecall/internal/profile"
 	"github.com/rfist/lazyrecall/internal/search"
 	"github.com/rfist/lazyrecall/internal/session"
 )
+
+// InstallLabels computes the install-name -> display-label map every row
+// renderer needs for its badge (change group-sessions-in-one-index): built
+// once per load from the installs actually discovered and the configured
+// [labels] table, never recomputed per row. installs is typically
+// profile.Discover()'s result, but is a parameter (not called here) so a
+// caller that already discovered installs for another reason - opening the
+// browser, refreshing - does not pay for a second discovery pass, and so
+// tests can hand it a synthetic list.
+func InstallLabels(installs []profile.Profile, cfg config.Config) map[string]string {
+	labels := make(map[string]string, len(installs))
+	for _, p := range installs {
+		labels[p.Name] = p.Label(cfg)
+	}
+	return labels
+}
+
+// GroupColors computes the group-name -> ANSI-code map every row renderer
+// needs (RenderOptions.GroupColors) from the configured groups plus the
+// built-in Archive and Unknown views' colors (config.Config.ArchiveColor,
+// UnknownColor; change archive-unknown-colors), once per load - never
+// re-parsed per row, the same discipline InstallLabels follows for install
+// badges. Archive and Unknown are stored under the literal keys "archive"
+// and "unknown", never a real group's name (config.Load rejects a
+// [groups.<name>] table using either as a real group), so the two can share
+// this one map with no collision: the Groups panel already looks up a row's
+// color by r.Value, which is exactly "archive"/"unknown" for those two rows,
+// and slotColor already needs a group's color keyed by name - both get their
+// answer from the same lookup with no extra plumbing. A color with nothing
+// configured, or the whole zero-groups-and-zero-view-colors case, simply has
+// no entry; groupAnsiCode does the actual name/hex-to-escape-sequence
+// conversion.
+func GroupColors(groups []config.Group, archiveColor, unknownColor string) map[string]string {
+	colors := make(map[string]string, len(groups)+2)
+	for _, g := range groups {
+		if code := groupAnsiCode(g.Color); code != "" {
+			colors[g.Name] = code
+		}
+	}
+	if code := groupAnsiCode(archiveColor); code != "" {
+		colors["archive"] = code
+	}
+	if code := groupAnsiCode(unknownColor); code != "" {
+		colors["unknown"] = code
+	}
+	if len(colors) == 0 {
+		return nil
+	}
+	return colors
+}
 
 // slot indices into the fixed-order row layout. Optional fields (age,
 // topic, tags) are simply the empty string when absent; empty slots are
@@ -47,7 +99,7 @@ func RenderRow(it search.Item, opts RenderOptions) string {
 		width = DefaultWidth
 	}
 
-	slots := rowSlots(it)
+	slots := rowSlots(it, opts.InstallLabels)
 	fitRowToWidth(slots, width)
 
 	var b strings.Builder
@@ -60,7 +112,7 @@ func RenderRow(it search.Item, opts RenderOptions) string {
 			b.WriteString(" ")
 		}
 		first = false
-		b.WriteString(style(s, slotColor(i, it), opts.Style))
+		b.WriteString(style(s, slotColor(i, it, opts.GroupColors), opts.Style))
 	}
 	return b.String()
 }
@@ -85,25 +137,38 @@ func rowText(it search.Item) string {
 	return ""
 }
 
-// sourceSlotText names the agent, and - when the session was not driven
-// through the agent's own terminal - the client it came through, as
-// "claude·acp". The two share one slot rather than claiming a column of
-// their own: the client is a qualifier on the agent (an editor chat is
-// still a claude session, resumed exactly the same way), it is absent for
-// most rows, and a column that is empty most of the time costs every row
-// width it cannot pay back (change show-editor-clients).
-func sourceSlotText(it search.Item) string {
+// sourceSlotText names the account the session ran under, and - when the
+// session was not driven through the agent's own terminal - the client it
+// came through, as "ccp·acp". The account part used to be the bare source
+// ("claude") for every row; it is now that session's install label when one
+// is known (labels maps install name -> label, built once per load by
+// InstallLabels), so two Claude accounts read as "[cc]"/"[ccp]" instead of
+// both reading "[claude]" now that one browsing session shows every install
+// together (change group-sessions-in-one-index). A single-install source's
+// label falls back to its own name (profile.Profile.Label), so this is a
+// no-op for every source but Claude unless a label is configured.
+//
+// The client shares one slot with the account rather than claiming a column
+// of its own: it is a qualifier on the session (an editor chat is still a
+// claude session, resumed exactly the same way), it is absent for most
+// rows, and a column that is empty most of the time costs every row width
+// it cannot pay back (change show-editor-clients).
+func sourceSlotText(it search.Item, labels map[string]string) string {
+	account := it.Source
+	if label, ok := labels[it.Install]; ok && label != "" {
+		account = label
+	}
 	if it.Client == nil {
-		return it.Source
+		return account
 	}
 	label := session.ClientLabel(*it.Client)
 	if label == "" {
-		return it.Source
+		return account
 	}
-	return it.Source + "·" + label
+	return account + "·" + label
 }
 
-func rowSlots(it search.Item) []string {
+func rowSlots(it search.Item, labels map[string]string) []string {
 	slots := make([]string, numSlots)
 
 	if it.Handle > 0 {
@@ -111,7 +176,7 @@ func rowSlots(it search.Item) []string {
 	} else {
 		slots[slotHandle] = "#?"
 	}
-	slots[slotSource] = "[" + sourceSlotText(it) + "]"
+	slots[slotSource] = "[" + sourceSlotText(it, labels) + "]"
 
 	location := "(no working directory)"
 	if it.CWD != nil {
@@ -420,14 +485,45 @@ func abbreviateHome(path string) string {
 	return path
 }
 
+// handleColor picks the handle's (#904) color: archived+colored beats the
+// session's group color, which beats unknown+colored, which beats the
+// default (change archive-unknown-colors, following on from per-group-
+// colors). groupColors is RenderOptions.GroupColors, keyed by a group's own
+// name and additionally by the literal keys "archive" and "unknown" for the
+// two built-in views (see GroupColors) - no real group can collide with
+// either key, since config.Load rejects a [groups.<name>] table using them.
+// A session in a configured group that itself has no color still gets the
+// default, not the unknown color - it does have a group, it just isn't
+// colored - which is why the group-color lookup is unconditional on
+// it.Group being non-empty, not gated behind "found a color". The default
+// is white, keeping the handle's bold weight, rather than the plain-cyan
+// every row used before groups had colors of their own.
+func handleColor(it search.Item, groupColors map[string]string) string {
+	if it.Archived {
+		if code, ok := groupColors["archive"]; ok && code != "" {
+			return code
+		}
+	}
+	if it.Group != "" {
+		if code, ok := groupColors[it.Group]; ok && code != "" {
+			return code
+		}
+	} else if code, ok := groupColors["unknown"]; ok && code != "" {
+		return code
+	}
+	return ansiBold + ansiWhite
+}
+
 // slotColor picks the ANSI code for one row slot, distinguishing each
 // field from the others (task 5.2) and, for the end-state slot, sessions
 // needing attention from those that do not (task 5.3). This is the single
-// built-in colour scheme (design.md non-goal: no theming/configuration).
-func slotColor(idx int, it search.Item) string {
+// built-in colour scheme (design.md non-goal: no theming/configuration) -
+// except for the handle, whose color is handleColor's (change per-group-
+// colors, archive-unknown-colors).
+func slotColor(idx int, it search.Item, groupColors map[string]string) string {
 	switch idx {
 	case slotHandle:
-		return ansiBold + ansiCyan
+		return handleColor(it, groupColors)
 	case slotSource:
 		return ansiDim
 	case slotLocation:

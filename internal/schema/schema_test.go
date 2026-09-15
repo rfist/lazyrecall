@@ -110,10 +110,13 @@ func TestSchemaBumpRebuildsIndexButKeepsAnnotations(t *testing.T) {
 	}
 }
 
-// TestFreshDatabaseHasHandleColumnWithUniquenessConstraint covers task 1.1:
-// a fresh install at the current schema version must have the handle column
-// and its uniqueness constraint (unique per profile - design.md decision 2)
-// without going through the migration path at all.
+// TestFreshDatabaseHasHandleColumnWithUniquenessConstraint covers task 1.1,
+// updated for change group-sessions-in-one-index: a fresh install at the
+// current schema version must have the handle column and its uniqueness
+// constraint, which is now unique across the whole index
+// (idx_lineages_handle) rather than per profile (design.md decision 2 no
+// longer applies - one index now serves every profile, so two profiles'
+// lineages sharing a handle number would collide in the same listing).
 func TestFreshDatabaseHasHandleColumnWithUniquenessConstraint(t *testing.T) {
 	r := testRunner(t)
 	if _, err := Open(r); err != nil {
@@ -125,12 +128,17 @@ func TestFreshDatabaseHasHandleColumnWithUniquenessConstraint(t *testing.T) {
 	// A second lineage in the same profile claiming the same handle must
 	// violate the uniqueness constraint.
 	if err := r.Exec(`INSERT INTO lineages (id, profile, orphaned, handle) VALUES ('lin_b', 'p', 0, 1);`); err == nil {
-		t.Fatal("expected a uniqueness violation for a duplicate (profile, handle) pair")
+		t.Fatal("expected a uniqueness violation for a duplicate handle in the same profile")
 	}
-	// The same handle number in a different profile is not a conflict -
-	// handles are per profile (design.md decision 2), not global.
-	if err := r.Exec(`INSERT INTO lineages (id, profile, orphaned, handle) VALUES ('lin_c', 'q', 0, 1);`); err != nil {
-		t.Fatalf("expected the same handle number in a different profile to be allowed: %v", err)
+	// The same handle number in a different profile is now also a
+	// conflict: idx_lineages_handle is unique on handle alone, not on
+	// (profile, handle) the way idx_lineages_handle_profile was.
+	if err := r.Exec(`INSERT INTO lineages (id, profile, orphaned, handle) VALUES ('lin_c', 'q', 0, 1);`); err == nil {
+		t.Fatal("expected a uniqueness violation for the same handle in a different profile too - handles are global now")
+	}
+	// A distinct handle number in a different profile is unaffected.
+	if err := r.Exec(`INSERT INTO lineages (id, profile, orphaned, handle) VALUES ('lin_d', 'q', 0, 2);`); err != nil {
+		t.Fatalf("expected a distinct handle number in a different profile to be allowed: %v", err)
 	}
 }
 
@@ -138,8 +146,19 @@ func TestFreshDatabaseHasHandleColumnWithUniquenessConstraint(t *testing.T) {
 // existing database at schema version 1 (created before the handle column
 // existed) must, on the next Open, gain the handle column and have it
 // backfilled for every existing lineage, ordered so the lineage whose
-// earliest session is chronologically first gets the lowest handle - and
-// this must happen per profile, never mixing two profiles' numbering.
+// earliest session is chronologically first gets the lowest handle.
+//
+// Every lineage here shares one profile, "p" - not because the backfill
+// migration (migrations[2], which partitions by profile) stopped doing
+// that, but because that partitioning is only ever exercised by a database
+// that predates group-sessions-in-one-index, and design.md decision 1 was
+// "one database per profile" for every version this migration could apply
+// to: a real pre-existing v1 database never held two profiles' lineages
+// side by side, so testing that scenario here would exercise a shape no
+// real database has, and one that migrations[8]'s now-global handle
+// uniqueness (idx_lineages_handle) cannot support - two profiles'
+// lineages independently numbering from 1 would collide the moment both
+// migrate into the same index.
 func TestMigrationBackfillsHandlesOldestFirst(t *testing.T) {
 	r := testRunner(t)
 
@@ -153,10 +172,10 @@ CREATE TABLE lineages (id TEXT PRIMARY KEY, profile TEXT NOT NULL, orphaned INTE
 CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, source_session_id TEXT, lineage_id TEXT, end_state TEXT NOT NULL, started_at INTEGER);
 INSERT INTO lineages (id, profile, orphaned) VALUES ('lin_newest', 'p', 0);
 INSERT INTO lineages (id, profile, orphaned) VALUES ('lin_oldest', 'p', 0);
-INSERT INTO lineages (id, profile, orphaned) VALUES ('lin_other_profile', 'q', 0);
-INSERT INTO sessions (id, source, source_session_id, lineage_id, end_state, started_at) VALUES ('s1', 'claude', 's1', 'lin_newest', 'completed', 2000);
+INSERT INTO lineages (id, profile, orphaned) VALUES ('lin_middle', 'p', 0);
+INSERT INTO sessions (id, source, source_session_id, lineage_id, end_state, started_at) VALUES ('s1', 'claude', 's1', 'lin_newest', 'completed', 3000);
 INSERT INTO sessions (id, source, source_session_id, lineage_id, end_state, started_at) VALUES ('s2', 'claude', 's2', 'lin_oldest', 'completed', 1000);
-INSERT INTO sessions (id, source, source_session_id, lineage_id, end_state, started_at) VALUES ('s3', 'claude', 's3', 'lin_other_profile', 'completed', 500);
+INSERT INTO sessions (id, source, source_session_id, lineage_id, end_state, started_at) VALUES ('s3', 'claude', 's3', 'lin_middle', 'completed', 2000);
 `
 	if err := r.Exec(v1DDL); err != nil {
 		t.Fatalf("seeding v1 database: %v", err)
@@ -182,17 +201,11 @@ INSERT INTO sessions (id, source, source_session_id, lineage_id, end_state, star
 	for _, row := range rows {
 		byID[row.ID] = row.Handle
 	}
-	if byID["lin_oldest"] == 0 || byID["lin_newest"] == 0 || byID["lin_other_profile"] == 0 {
+	if byID["lin_oldest"] == 0 || byID["lin_middle"] == 0 || byID["lin_newest"] == 0 {
 		t.Fatalf("expected every lineage to receive a nonzero handle, got %+v", byID)
 	}
-	if byID["lin_oldest"] >= byID["lin_newest"] {
-		t.Errorf("expected the oldest lineage (earliest session started_at) to take the lower handle: oldest=%d newest=%d", byID["lin_oldest"], byID["lin_newest"])
-	}
-	// A different profile's lineage must not compete for the same handle
-	// sequence - it should independently start at 1, not continue profile
-	// "p"'s numbering.
-	if byID["lin_other_profile"] != 1 {
-		t.Errorf("expected profile q's lone lineage to get handle 1 (its own counter), got %d", byID["lin_other_profile"])
+	if byID["lin_oldest"] >= byID["lin_middle"] || byID["lin_middle"] >= byID["lin_newest"] {
+		t.Errorf("expected handles to order oldest < middle < newest by session started_at, got %+v", byID)
 	}
 
 	// The v1 index table (sessions) must still have been discarded and
@@ -431,4 +444,222 @@ INSERT INTO sessions (id, source, source_session_id, lineage_id, end_state) VALU
 	if len(tags) != 1 || tags[0].Tag != "urgent" {
 		t.Errorf("expected the tag to survive migration, got %+v", tags)
 	}
+}
+
+// TestFreshDatabaseHasGroupNameAndInstallColumns covers change
+// group-sessions-in-one-index: a fresh install at the current schema
+// version must have lineages.group_name and sessions.install without going
+// through the migration path at all, and the old per-profile handle index
+// must not exist - only the new global one.
+func TestFreshDatabaseHasGroupNameAndInstallColumns(t *testing.T) {
+	r := testRunner(t)
+	if _, err := Open(r); err != nil {
+		t.Fatal(err)
+	}
+
+	var lineageCols []struct {
+		Name string `json:"name"`
+	}
+	if err := r.Query(`PRAGMA table_info(lineages);`, &lineageCols); err != nil {
+		t.Fatal(err)
+	}
+	if !hasColumn(lineageCols, "group_name") {
+		t.Errorf("expected lineages.group_name to exist on a fresh database, columns: %+v", lineageCols)
+	}
+
+	var sessionCols []struct {
+		Name string `json:"name"`
+	}
+	if err := r.Query(`PRAGMA table_info(sessions);`, &sessionCols); err != nil {
+		t.Fatal(err)
+	}
+	if !hasColumn(sessionCols, "install") {
+		t.Errorf("expected sessions.install to exist on a fresh database, columns: %+v", sessionCols)
+	}
+
+	var indexes []struct {
+		Name string `json:"name"`
+	}
+	if err := r.Query(`SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'lineages';`, &indexes); err != nil {
+		t.Fatal(err)
+	}
+	hasGlobal, hasOldComposite := false, false
+	for _, idx := range indexes {
+		switch idx.Name {
+		case "idx_lineages_handle":
+			hasGlobal = true
+		case "idx_lineages_handle_profile":
+			hasOldComposite = true
+		}
+	}
+	if !hasGlobal {
+		t.Errorf("expected idx_lineages_handle to exist on a fresh database, indexes: %+v", indexes)
+	}
+	if hasOldComposite {
+		t.Errorf("expected idx_lineages_handle_profile to be gone on a fresh database, indexes: %+v", indexes)
+	}
+}
+
+// TestGroupNameDefaultsNullAndSurvivesQueries covers change
+// group-sessions-in-one-index: with no override ever recorded,
+// lineages.group_name reads back NULL - "use the path rule," not an empty
+// string or any other stand-in value that would be indistinguishable from a
+// deliberate but empty override.
+func TestGroupNameDefaultsNullAndSurvivesQueries(t *testing.T) {
+	r := testRunner(t)
+	if _, err := Open(r); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Exec(`INSERT INTO lineages (id, profile, orphaned) VALUES ('lin_1', 'p', 0);`); err != nil {
+		t.Fatal(err)
+	}
+	var rows []struct {
+		GroupName *string `json:"group_name"`
+	}
+	if err := r.Query(`SELECT group_name FROM lineages WHERE id = 'lin_1';`, &rows); err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].GroupName != nil {
+		t.Errorf("expected a fresh lineage's group_name to be NULL, got %+v", rows)
+	}
+}
+
+// TestV7ToV8MigrationAddsGroupNameAndInstallKeepsDataAndSwapsIndex covers
+// change group-sessions-in-one-index end to end: an existing database at
+// schema version 7 (with lineages, comments, tags, handles and
+// archived_at already populated under the old per-profile handle index)
+// must, on the next Open, gain lineages.group_name (NULL, migrated
+// forward like archived_at) and sessions.install (index data, rebuilt like
+// origin and client were at v5/v6), keep every annotation intact, and end
+// up with idx_lineages_handle in place of idx_lineages_handle_profile.
+func TestV7ToV8MigrationAddsGroupNameAndInstallKeepsDataAndSwapsIndex(t *testing.T) {
+	r := testRunner(t)
+
+	v7DDL := `
+CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+INSERT INTO schema_meta (key, value) VALUES ('schema_version', '7');
+CREATE TABLE lineages (id TEXT PRIMARY KEY, profile TEXT NOT NULL, orphaned INTEGER NOT NULL DEFAULT 0, handle INTEGER, archived_at INTEGER);
+CREATE UNIQUE INDEX idx_lineages_handle_profile ON lineages(profile, handle);
+CREATE TABLE comments (id INTEGER PRIMARY KEY AUTOINCREMENT, lineage_id TEXT NOT NULL, body TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+CREATE INDEX idx_comments_lineage ON comments(lineage_id);
+CREATE TABLE tags (lineage_id TEXT NOT NULL, tag TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (lineage_id, tag));
+CREATE INDEX idx_tags_tag ON tags(tag);
+CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT NOT NULL, source_session_id TEXT NOT NULL, lineage_id TEXT NOT NULL, end_state TEXT NOT NULL, name TEXT, origin TEXT, human_prompt INTEGER NOT NULL DEFAULT 0, client TEXT);
+INSERT INTO lineages (id, profile, orphaned, handle, archived_at) VALUES ('lin_1', 'p', 0, 5, NULL);
+INSERT INTO comments (lineage_id, body, created_at, updated_at) VALUES ('lin_1', 'keep me', 1, 1);
+INSERT INTO tags (lineage_id, tag, created_at) VALUES ('lin_1', 'urgent', 1);
+INSERT INTO sessions (id, source, source_session_id, lineage_id, end_state, origin, client) VALUES ('s1', 'claude', 's1', 'lin_1', 'completed', 'interactive', 'vscode');
+`
+	if err := r.Exec(v7DDL); err != nil {
+		t.Fatalf("seeding v7 database: %v", err)
+	}
+
+	v, err := Open(r)
+	if err != nil {
+		t.Fatalf("Open (migrating v7 -> current): %v", err)
+	}
+	if v != CurrentVersion {
+		t.Fatalf("got version %d, want %d", v, CurrentVersion)
+	}
+
+	var lineageCols []struct {
+		Name string `json:"name"`
+	}
+	if err := r.Query(`PRAGMA table_info(lineages);`, &lineageCols); err != nil {
+		t.Fatal(err)
+	}
+	if !hasColumn(lineageCols, "group_name") {
+		t.Errorf("expected lineages.group_name to exist after migration, columns: %+v", lineageCols)
+	}
+
+	var sessionCols []struct {
+		Name string `json:"name"`
+	}
+	if err := r.Query(`PRAGMA table_info(sessions);`, &sessionCols); err != nil {
+		t.Fatal(err)
+	}
+	if !hasColumn(sessionCols, "install") {
+		t.Errorf("expected sessions.install to exist after migration, columns: %+v", sessionCols)
+	}
+
+	// The index is disposable: the seeded session row must be gone, the
+	// same as sessions.name was at v3 and sessions.origin was at v5.
+	var sessions []struct {
+		ID string `json:"id"`
+	}
+	if err := r.Query(`SELECT id FROM sessions;`, &sessions); err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 0 {
+		t.Errorf("expected the disposable index to still be discarded after migrating, got %d rows", len(sessions))
+	}
+
+	// Every annotation seeded at v7 must be intact, and group_name on the
+	// pre-existing lineage must default to NULL rather than being backfilled
+	// to anything.
+	var lineage []struct {
+		Handle     int     `json:"handle"`
+		ArchivedAt *int64  `json:"archived_at"`
+		GroupName  *string `json:"group_name"`
+	}
+	if err := r.Query(`SELECT handle, archived_at, group_name FROM lineages WHERE id = 'lin_1';`, &lineage); err != nil {
+		t.Fatal(err)
+	}
+	if len(lineage) != 1 || lineage[0].Handle != 5 || lineage[0].ArchivedAt != nil || lineage[0].GroupName != nil {
+		t.Errorf("expected the lineage (handle, archived_at, group_name) to survive migration, got %+v", lineage)
+	}
+
+	var comments []struct {
+		Body string `json:"body"`
+	}
+	if err := r.Query(`SELECT body FROM comments;`, &comments); err != nil {
+		t.Fatal(err)
+	}
+	if len(comments) != 1 || comments[0].Body != "keep me" {
+		t.Errorf("expected the comment to survive migration, got %+v", comments)
+	}
+
+	var tags []struct {
+		Tag string `json:"tag"`
+	}
+	if err := r.Query(`SELECT tag FROM tags;`, &tags); err != nil {
+		t.Fatal(err)
+	}
+	if len(tags) != 1 || tags[0].Tag != "urgent" {
+		t.Errorf("expected the tag to survive migration, got %+v", tags)
+	}
+
+	// The old composite index must be gone, replaced by the global one.
+	var indexes []struct {
+		Name string `json:"name"`
+	}
+	if err := r.Query(`SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'lineages';`, &indexes); err != nil {
+		t.Fatal(err)
+	}
+	hasGlobal, hasOldComposite := false, false
+	for _, idx := range indexes {
+		switch idx.Name {
+		case "idx_lineages_handle":
+			hasGlobal = true
+		case "idx_lineages_handle_profile":
+			hasOldComposite = true
+		}
+	}
+	if !hasGlobal {
+		t.Errorf("expected idx_lineages_handle to exist after migration, indexes: %+v", indexes)
+	}
+	if hasOldComposite {
+		t.Errorf("expected idx_lineages_handle_profile to be gone after migration, indexes: %+v", indexes)
+	}
+}
+
+func hasColumn(cols []struct {
+	Name string `json:"name"`
+}, name string) bool {
+	for _, c := range cols {
+		if c.Name == name {
+			return true
+		}
+	}
+	return false
 }

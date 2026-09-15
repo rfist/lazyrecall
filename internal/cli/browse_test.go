@@ -61,31 +61,44 @@ func seedBrowseSession(t *testing.T, db *sqlitex.Runner, lineageID, sessionID, p
 	}
 }
 
+// seedLineageOverride sets a lineage's manual group and archive state
+// directly, after seedBrowseSession has already created the row (its own
+// lineage insert only carries handle/orphaned) - the group/archive tests
+// below need lineages.group_name and lineages.archived_at, which no other
+// helper here writes. Values are Go string literals the test itself
+// chooses, never external input, so building the statement by hand rather
+// than through sqlitex's param mechanism carries no injection risk.
+func seedLineageOverride(t *testing.T, db *sqlitex.Runner, lineageID, groupName string, archived bool) {
+	t.Helper()
+	groupSQL, archivedSQL := "NULL", "NULL"
+	if groupName != "" {
+		groupSQL = "'" + groupName + "'"
+	}
+	if archived {
+		archivedSQL = "1700000000"
+	}
+	if err := db.Exec(fmt.Sprintf("UPDATE lineages SET group_name = %s, archived_at = %s WHERE id = '%s';", groupSQL, archivedSQL, lineageID)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// newTestBrowser builds a browser over db. name is kept only for call-site
+// compatibility with every existing test here - profile switching (and so
+// the active profile a browser opened "as") is gone (change
+// group-sessions-in-one-index: one browsing session covers every install's
+// data at once).
 func newTestBrowser(db *sqlitex.Runner, name string, opts BrowserOptions) *browseModel {
+	_ = name
 	opts.DB = db
-	opts.ProfileName = name
 	m := newBrowseModel(opts)
 	nm, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
 	return nm.(*browseModel)
 }
 
-// testResolve builds a resolver that returns the named profile verbatim -
-// the browser's refresh/profile-switch actions need a profile.Profile, and
-// profile.DBPath is derived from LAZYRECALL_HOME (set by the test) plus Name.
-func testResolve(name string) func(string) (profile.Profile, error) {
-	return func(n string) (profile.Profile, error) {
-		if n != name {
-			return profile.Profile{}, fmt.Errorf("no such profile %q", n)
-		}
-		return profile.Profile{Name: name}, nil
-	}
-}
-
-// testProfiles builds a BrowserOptions.Profiles lister over a fixed,
-// synthetic set of profile names - the profile-switch selection prompt
-// (change choose-from-known-values) must never depend on this machine's
-// real config roots, exactly like testResolve for the resolver.
-func testProfiles(names ...string) func() []profile.Profile {
+// testInstalls builds a BrowserOptions.Installs lister over a fixed,
+// synthetic set of install names, so the Transcript tab's install lookup
+// and the refresh action never depend on this machine's real config roots.
+func testInstalls(names ...string) func() []profile.Profile {
 	return func() []profile.Profile {
 		out := make([]profile.Profile, len(names))
 		for i, n := range names {
@@ -94,6 +107,11 @@ func testProfiles(names ...string) func() []profile.Profile {
 		return out
 	}
 }
+
+// noInstallInfo is the installInfo stand-in for renderItemDetail tests that
+// don't care about the install line: no discovered install, so the line
+// falls back to (or omits) exactly what a real lookup miss would produce.
+func noInstallInfo(search.Item) (label, root string, ok bool) { return "", "", false }
 
 func keyRunes(s string) tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)} }
 
@@ -135,8 +153,38 @@ func fixtureBrowser(t *testing.T) *browseModel {
 	db := browseTestDB(t)
 	seedFixture(t, db)
 	return newTestBrowser(db, "claude-personal", BrowserOptions{
-		Resolve:  testResolve("claude-personal"),
-		Profiles: testProfiles("claude-personal", "claude-work"),
+		Installs: testInstalls("claude-personal", "claude-work"),
+	})
+}
+
+// groupFixtureBrowser builds a browser over a synthetic corpus exercising
+// every branch of "which group is this session in" (change
+// group-sessions-in-one-index): two path-derived sessions each in "work"
+// and one in "personal" (g0/g1/g2), one with no cwd any group path claims
+// (g3, Unknown), one archived without ever having a manual group (g4,
+// counted under Archive rather than its path-derived "work"), and one whose
+// cwd alone would be Unknown but that carries a manual override filing it
+// under "work" regardless (g5). All content is hand-written, never real
+// session data.
+func groupFixtureBrowser(t *testing.T) *browseModel {
+	t.Helper()
+	db := browseTestDB(t)
+	seedBrowseSession(t, db, "G0", "claude:p:g0", "p", 1, map[string]any{"cwd": "/Users/x/work/api", "last_activity_at": 600})
+	seedBrowseSession(t, db, "G1", "claude:p:g1", "p", 2, map[string]any{"cwd": "/Users/x/work/api", "last_activity_at": 500})
+	seedBrowseSession(t, db, "G2", "claude:p:g2", "p", 3, map[string]any{"cwd": "/Users/x/personal/proj", "last_activity_at": 400})
+	seedBrowseSession(t, db, "G3", "claude:p:g3", "p", 4, map[string]any{"cwd": "/tmp", "last_activity_at": 300})
+	seedBrowseSession(t, db, "G4", "claude:p:g4", "p", 5, map[string]any{"cwd": "/Users/x/work/api", "last_activity_at": 200})
+	seedBrowseSession(t, db, "G5", "claude:p:g5", "p", 6, map[string]any{"cwd": "/tmp", "last_activity_at": 100})
+	seedLineageOverride(t, db, "G4", "", true)      // archived, no manual group
+	seedLineageOverride(t, db, "G5", "work", false) // manual override, path alone would be Unknown
+
+	groups := []config.Group{
+		{Name: "work", Paths: []string{"/Users/x/work"}},
+		{Name: "personal", Paths: []string{"/Users/x/personal"}},
+	}
+	return newTestBrowser(db, "p", BrowserOptions{
+		Groups:   groups,
+		Installs: testInstalls("claude"),
 	})
 }
 
@@ -182,7 +230,7 @@ func TestViewFitsTerminal(t *testing.T) {
 			db := browseTestDB(t)
 			seedFixture(t, db)
 			m := newTestBrowser(db, "claude-personal", BrowserOptions{
-				Style: styled, Resolve: testResolve("claude-personal"), Profiles: testProfiles("claude-personal"),
+				Style: styled, Installs: testInstalls("claude-personal"),
 			})
 			m = update(t, m, tea.WindowSizeMsg{Width: w, Height: h})
 			lines := strings.Split(m.View(), "\n")
@@ -226,7 +274,7 @@ func TestViewFitsWithPromptOpen(t *testing.T) {
 func TestDigitsJumpToPanels(t *testing.T) {
 	m := fixtureBrowser(t)
 	for key, want := range map[string]panelID{
-		"1": panelProfiles, "2": panelAgents, "3": panelRepos, "4": panelTags, "0": panelSessions,
+		"1": panelGroups, "2": panelAgents, "3": panelRepos, "4": panelTags, "0": panelSessions,
 	} {
 		m = update(t, m, keyRunes(key))
 		if m.focus != want {
@@ -243,13 +291,13 @@ func TestTabCyclesFocusAndWraps(t *testing.T) {
 		m = update(t, m, tea.KeyMsg{Type: tea.KeyTab})
 		seen = append(seen, m.focus)
 	}
-	want := []panelID{panelProfiles, panelAgents, panelRepos, panelTags, panelSessions, panelDetail}
+	want := []panelID{panelGroups, panelAgents, panelRepos, panelTags, panelSessions, panelDetail}
 	if !reflect.DeepEqual(seen, want) {
 		t.Errorf("tab visited %v, want %v", seen, want)
 	}
 	m = update(t, m, tea.KeyMsg{Type: tea.KeyTab})
-	if m.focus != panelProfiles {
-		t.Errorf("tab past the last panel went to %v, want it to wrap to Profiles", m.focus)
+	if m.focus != panelGroups {
+		t.Errorf("tab past the last panel went to %v, want it to wrap to Groups", m.focus)
 	}
 	m = update(t, m, tea.KeyMsg{Type: tea.KeyShiftTab})
 	if m.focus != panelDetail {
@@ -295,18 +343,18 @@ func TestFocusedNarrowPanelKeepsAHeaderAtMinimumBodyHeight(t *testing.T) {
 		if openPrompt {
 			m = update(t, m, keyRunes("/"))
 		}
-		if m.focus != panelProfiles {
-			t.Fatalf("prompt=%v: 1 focused %v, want Profiles", openPrompt, m.focus)
+		if m.focus != panelGroups {
+			t.Fatalf("prompt=%v: 1 focused %v, want Groups", openPrompt, m.focus)
 		}
-		if h := m.geometry().profilesH; h < 1 {
-			t.Errorf("prompt=%v: focused Profiles has height %d at 60x8", openPrompt, h)
+		if h := m.geometry().groupsH; h < 1 {
+			t.Errorf("prompt=%v: focused Groups has height %d at 60x8", openPrompt, h)
 		}
 	}
 }
 
 // When there are fewer rows than stacked panels, a candidate that is absent
 // from the current focus's layout can still receive its header after focus
-// moves to it. J from Sessions to Detail at 60x8 is that shape: Profiles'
+// moves to it. J from Sessions to Detail at 60x8 is that shape: Groups'
 // focus gave Detail the tail row up, then Sessions did; Detail must be
 // judged against Detail's destination layout, not the Sessions layout that
 // is about to cease to exist.
@@ -316,7 +364,7 @@ func TestSpatialFocusChecksTheDestinationLayout(t *testing.T) {
 	m = update(t, m, keyRunes("1"))
 	m = update(t, m, keyRunes("L"))
 	if m.focus != panelSessions {
-		t.Fatalf("L from Profiles focused %v, want Sessions", m.focus)
+		t.Fatalf("L from Groups focused %v, want Sessions", m.focus)
 	}
 	if h := m.geometry().detailH; h != 0 {
 		t.Fatalf("fixture leaves Detail at height %d before J; destination-layout check is not exercised", h)
@@ -357,8 +405,8 @@ func TestSpatialMovesFollowGeometry(t *testing.T) {
 		want panelID
 	}{
 		{"L from a left panel goes to Sessions", panelRepos, "L", panelSessions},
-		{"H from Sessions goes to Profiles", panelSessions, "H", panelProfiles},
-		{"H from Detail goes to Profiles", panelDetail, "H", panelProfiles},
+		{"H from Sessions goes to Groups", panelSessions, "H", panelGroups},
+		{"H from Detail goes to Groups", panelDetail, "H", panelGroups},
 		{"J walks down the left column", panelAgents, "J", panelRepos},
 		{"K walks up the left column", panelRepos, "K", panelAgents},
 		{"J from Sessions goes to Detail", panelSessions, "J", panelDetail},
@@ -376,12 +424,12 @@ func TestSpatialMovesFollowGeometry(t *testing.T) {
 	}
 }
 
-// H always resolves to Profiles specifically, never to whichever left panel
+// H always resolves to Groups specifically, never to whichever left panel
 // most recently had focus - the user asked for exactly that, rejecting the
 // cleverer "nearest panel" rule. This is the case that would tell the two
 // apart: Agents was the last left panel visited, so a "nearest" rule would
-// send H there instead of to Profiles.
-func TestHAlwaysReturnsToProfilesNotTheLastLeftPanel(t *testing.T) {
+// send H there instead of to Groups.
+func TestHAlwaysReturnsToGroupsNotTheLastLeftPanel(t *testing.T) {
 	m := fixtureBrowser(t)
 	m.focus = panelAgents
 	m = update(t, m, keyRunes("L")) // Agents -> Sessions
@@ -389,8 +437,8 @@ func TestHAlwaysReturnsToProfilesNotTheLastLeftPanel(t *testing.T) {
 		t.Fatalf("L from Agents landed on %v, want Sessions", m.focus)
 	}
 	m = update(t, m, keyRunes("H"))
-	if m.focus != panelProfiles {
-		t.Errorf("H from Sessions landed on %v, want Profiles, not the last left panel visited", m.focus)
+	if m.focus != panelGroups {
+		t.Errorf("H from Sessions landed on %v, want Groups, not the last left panel visited", m.focus)
 	}
 }
 
@@ -402,11 +450,11 @@ func TestSpatialMovesDoNotWrapAtEdges(t *testing.T) {
 		at   panelID
 		key  string
 	}{
-		{"K on Profiles", panelProfiles, "K"},
+		{"K on Groups", panelGroups, "K"},
 		{"J on Tags", panelTags, "J"},
 		{"L on Sessions", panelSessions, "L"},
 		{"L on Detail", panelDetail, "L"},
-		{"H on Profiles", panelProfiles, "H"},
+		{"H on Groups", panelGroups, "H"},
 		{"H on Agents", panelAgents, "H"},
 	}
 	for _, c := range cases {
@@ -423,7 +471,7 @@ func TestSpatialMovesDoNotWrapAtEdges(t *testing.T) {
 
 // A terminal too narrow for two columns stacks the panels into one instead
 // of dropping the side panels (change stack-panels-when-narrow), so H from
-// Sessions reaches Profiles at 60 columns exactly as it does at 100. This
+// Sessions reaches Groups at 60 columns exactly as it does at 100. This
 // test used to assert the opposite - that H found nothing drawn and left
 // focus alone - which was true only while a narrow terminal amputated four
 // of the six panels.
@@ -433,15 +481,15 @@ func TestSpatialMoveReachesTheStackedPanelsWhenNarrow(t *testing.T) {
 	if m.geometry().sidebar {
 		t.Fatal("fixture at 60x20 still draws two columns; pick a narrower width for this test to mean anything")
 	}
-	for _, p := range []panelID{panelProfiles, panelAgents, panelRepos, panelTags} {
+	for _, p := range []panelID{panelGroups, panelAgents, panelRepos, panelTags} {
 		if !m.panelDrawn(p) {
 			t.Fatalf("%v is not drawn at 60x20; the stacked layout must keep every panel on screen", p)
 		}
 	}
 	m.focus = panelSessions
 	m = update(t, m, keyRunes("H"))
-	if m.focus != panelProfiles {
-		t.Errorf("H at 60 columns landed on %v, want Profiles: the panels are stacked, not dropped", m.focus)
+	if m.focus != panelGroups {
+		t.Errorf("H at 60 columns landed on %v, want Groups: the panels are stacked, not dropped", m.focus)
 	}
 }
 
@@ -555,10 +603,10 @@ func TestAllSidePanelsDrawnAtShortHeight(t *testing.T) {
 		t.Fatal("fixture at 100x18 has no sidebar; pick a wider terminal for this test to mean anything")
 	}
 	g := m.geometry()
-	if g.profilesH < 1 || g.agentsH < 1 || g.reposH < 1 || g.tagsH < 1 {
+	if g.groupsH < 1 || g.agentsH < 1 || g.reposH < 1 || g.tagsH < 1 {
 		t.Errorf("a side panel has zero height at 100x18: %+v", g)
 	}
-	for _, p := range []panelID{panelProfiles, panelAgents, panelRepos, panelTags} {
+	for _, p := range []panelID{panelGroups, panelAgents, panelRepos, panelTags} {
 		if !m.panelDrawn(p) {
 			t.Errorf("%s is not drawn at 100x18", p.title())
 		}
@@ -571,45 +619,49 @@ func TestAllSidePanelsDrawnAtShortHeight(t *testing.T) {
 // frame from outgrowing the terminal.
 func TestFocusedPanelIsTallerThanTheUnfocusedOnes(t *testing.T) {
 	m := fixtureBrowser(t)
-	// A short column: the fixture's Profiles and Agents take 10 rows
-	// between them, so anything under a body of 18 leaves Repos and Tags
-	// too little to share and the accordion takes over. At a taller size
-	// the roomy sizing applies instead and every panel keeps its content,
-	// which is what this test would otherwise be asserting against.
-	m = update(t, m, tea.WindowSizeMsg{Width: 100, Height: 18})
+	// A short column: with a single "All" row (change
+	// group-sessions-in-one-index) the fixture's Groups and Agents take 9
+	// rows between them, so anything under a body of 17 leaves Repos and
+	// Tags too little to share and the accordion takes over. At a taller
+	// size the roomy sizing applies instead and every panel keeps its
+	// content, which is what this test would otherwise be asserting
+	// against.
+	m = update(t, m, tea.WindowSizeMsg{Width: 100, Height: 17})
 	m = update(t, m, keyRunes("2")) // Agents
 	g := m.geometry()
-	if g.agentsH <= g.profilesH || g.agentsH <= g.reposH || g.agentsH <= g.tagsH {
-		t.Errorf("focused Agents (%d) is not taller than the unfocused panels (P=%d R=%d T=%d)", g.agentsH, g.profilesH, g.reposH, g.tagsH)
+	if g.agentsH <= g.groupsH || g.agentsH <= g.reposH || g.agentsH <= g.tagsH {
+		t.Errorf("focused Agents (%d) is not taller than the unfocused panels (P=%d R=%d T=%d)", g.agentsH, g.groupsH, g.reposH, g.tagsH)
 	}
-	if g.profilesH != 1 || g.reposH != 1 || g.tagsH != 1 {
-		t.Errorf("unfocused panels are not one-line headers: P=%d R=%d T=%d", g.profilesH, g.reposH, g.tagsH)
+	if g.groupsH != 1 || g.reposH != 1 || g.tagsH != 1 {
+		t.Errorf("unfocused panels are not one-line headers: P=%d R=%d T=%d", g.groupsH, g.reposH, g.tagsH)
 	}
-	if g.profilesH+g.agentsH+g.reposH+g.tagsH != g.bodyHeight {
-		t.Errorf("left column %d != body %d", g.profilesH+g.agentsH+g.reposH+g.tagsH, g.bodyHeight)
+	if g.groupsH+g.agentsH+g.reposH+g.tagsH != g.bodyHeight {
+		t.Errorf("left column %d != body %d", g.groupsH+g.agentsH+g.reposH+g.tagsH, g.bodyHeight)
 	}
 }
 
 // The expansion follows focus: the panel a Tab or a digit key lands on is
-// the one that gets the space, so moving from Profiles to Repos and back
+// the one that gets the space, so moving from Groups to Repos and back
 // swaps which of the two is tall and which is a header.
 func TestMovingFocusMovesTheExpansion(t *testing.T) {
 	m := fixtureBrowser(t)
-	// A short column: the fixture's Profiles and Agents take 10 rows
-	// between them, so anything under a body of 18 leaves Repos and Tags
-	// too little to share and the accordion takes over. At a taller size
-	// the roomy sizing applies instead and every panel keeps its content,
-	// which is what this test would otherwise be asserting against.
-	m = update(t, m, tea.WindowSizeMsg{Width: 100, Height: 18})
-	m = update(t, m, keyRunes("1")) // Profiles
+	// A short column: with a single "All" row (change
+	// group-sessions-in-one-index) the fixture's Groups and Agents take 9
+	// rows between them, so anything under a body of 17 leaves Repos and
+	// Tags too little to share and the accordion takes over. At a taller
+	// size the roomy sizing applies instead and every panel keeps its
+	// content, which is what this test would otherwise be asserting
+	// against.
+	m = update(t, m, tea.WindowSizeMsg{Width: 100, Height: 17})
+	m = update(t, m, keyRunes("1")) // Groups
 	g := m.geometry()
-	if g.profilesH != g.bodyHeight-3 || g.agentsH != 1 || g.reposH != 1 || g.tagsH != 1 {
-		t.Fatalf("with Profiles focused: P=%d A=%d R=%d T=%d, want P=body-3 and the rest 1", g.profilesH, g.agentsH, g.reposH, g.tagsH)
+	if g.groupsH != g.bodyHeight-3 || g.agentsH != 1 || g.reposH != 1 || g.tagsH != 1 {
+		t.Fatalf("with Groups focused: P=%d A=%d R=%d T=%d, want P=body-3 and the rest 1", g.groupsH, g.agentsH, g.reposH, g.tagsH)
 	}
 	m = update(t, m, keyRunes("3")) // Repos
 	g = m.geometry()
-	if g.reposH != g.bodyHeight-3 || g.profilesH != 1 || g.agentsH != 1 || g.tagsH != 1 {
-		t.Fatalf("with Repos focused: P=%d A=%d R=%d T=%d, want R=body-3 and the rest 1", g.profilesH, g.agentsH, g.reposH, g.tagsH)
+	if g.reposH != g.bodyHeight-3 || g.groupsH != 1 || g.agentsH != 1 || g.tagsH != 1 {
+		t.Fatalf("with Repos focused: P=%d A=%d R=%d T=%d, want R=body-3 and the rest 1", g.groupsH, g.agentsH, g.reposH, g.tagsH)
 	}
 }
 
@@ -620,12 +672,14 @@ func TestMovingFocusMovesTheExpansion(t *testing.T) {
 // machine, so the most likely to be worth looking at.
 func TestRightColumnFocusExpandsThePanelWithAFilterOrRepos(t *testing.T) {
 	m := fixtureBrowser(t)
-	// A short column: the fixture's Profiles and Agents take 10 rows
-	// between them, so anything under a body of 18 leaves Repos and Tags
-	// too little to share and the accordion takes over. At a taller size
-	// the roomy sizing applies instead and every panel keeps its content,
-	// which is what this test would otherwise be asserting against.
-	m = update(t, m, tea.WindowSizeMsg{Width: 100, Height: 18})
+	// A short column: with a single "All" row (change
+	// group-sessions-in-one-index) the fixture's Groups and Agents take 9
+	// rows between them, so anything under a body of 17 leaves Repos and
+	// Tags too little to share and the accordion takes over. At a taller
+	// size the roomy sizing applies instead and every panel keeps its
+	// content, which is what this test would otherwise be asserting
+	// against.
+	m = update(t, m, tea.WindowSizeMsg{Width: 100, Height: 17})
 	m = update(t, m, keyRunes("0")) // Sessions
 	if g := m.geometry(); g.reposH != g.bodyHeight-3 {
 		t.Fatalf("with no filter applied the expansion should go to Repos, got R=%d want %d", g.reposH, g.bodyHeight-3)
@@ -643,7 +697,7 @@ func TestRightColumnFocusExpandsThePanelWithAFilterOrRepos(t *testing.T) {
 // because the panel lost its rows.
 func TestCollapsedPanelShowsItsAppliedValue(t *testing.T) {
 	m := fixtureBrowser(t)
-	// A short column: the fixture's Profiles and Agents take 10 rows
+	// A short column: the fixture's Groups and Agents take 10 rows
 	// between them, so anything under a body of 18 leaves Repos and Tags
 	// too little to share and the accordion takes over. At a taller size
 	// the roomy sizing applies instead and every panel keeps its content,
@@ -790,21 +844,80 @@ func TestClearAllFiltersResetsEveryFacet(t *testing.T) {
 	}
 }
 
+// TestClearAllFiltersAlsoResetsTheGroup is the P1 regression test for a
+// review finding against group-sessions-in-one-index: X cleared every other
+// facet but left the group filter (m.group and m.groups_.Sel) untouched, so
+// a session list narrowed to one group stayed narrowed after "clear all
+// filters" claimed to have cleared everything.
+func TestClearAllFiltersAlsoResetsTheGroup(t *testing.T) {
+	m := groupFixtureBrowser(t)
+	m.setGroupFilter("work")
+	m.agents.Sel = "claude" // the "another facet" alongside the group selection
+	m.rebuild()
+	if m.group != "work" || len(m.visible) == 0 {
+		t.Fatalf("setup: group=%q visible=%d, want group=work with some sessions before clearing", m.group, len(m.visible))
+	}
+
+	m = update(t, m, keyRunes("X"))
+
+	if m.group != "" {
+		t.Errorf(`X left group=%q applied, want "" (All)`, m.group)
+	}
+	if m.groups_.Sel != "" {
+		t.Errorf(`X left groups_.Sel=%q applied, want ""`, m.groups_.Sel)
+	}
+	if m.agents.Sel != "" {
+		t.Errorf("X left agents.Sel=%q applied, want \"\"", m.agents.Sel)
+	}
+	// groupFixtureBrowser has 6 sessions, one archived (G4) and so hidden by
+	// default (not showAll) - the same 5 a plain, unfiltered All view shows.
+	if len(m.visible) != 5 {
+		t.Errorf("%d sessions listed after X, want 5 (every non-archived session, group cleared)", len(m.visible))
+	}
+}
+
 // Command-line filters and panel selections have to be the same state, or
 // `--agent=pi` and walking to "pi" would put the browser in two different
 // places.
+// BrowserOptions.Agent is a bare source name (a --agent value resolveAgentFilter
+// decided spans every install of a source, not one specific install), so it
+// seeds agentSource - the source-level dimension - not agents.Sel, which is
+// reserved for an install a panel row (or a label/install seed) names
+// specifically (change group-sessions-in-one-index; see matchesFacets).
 func TestCommandLineFiltersOpenAsPanelSelections(t *testing.T) {
 	db := browseTestDB(t)
 	seedFixture(t, db)
 	m := newTestBrowser(db, "claude-personal", BrowserOptions{
 		Agent: "pi", Tag: "wip",
-		Resolve: testResolve("claude-personal"), Profiles: testProfiles("claude-personal"),
+		Installs: testInstalls("claude-personal"),
 	})
-	if m.agents.Sel != "pi" || m.tags.Sel != "wip" {
-		t.Fatalf("opened with agent=%q tag=%q, want pi/wip", m.agents.Sel, m.tags.Sel)
+	if m.agentSource != "pi" || m.agents.Sel != "" || m.tags.Sel != "wip" {
+		t.Fatalf("opened with agentSource=%q agents.Sel=%q tag=%q, want pi/\"\"/wip",
+			m.agentSource, m.agents.Sel, m.tags.Sel)
 	}
 	if len(m.visible) != 1 {
 		t.Errorf("%d sessions listed under agent=pi tag=wip, want 1", len(m.visible))
+	}
+}
+
+// TestCommandLineInstallSeedOpensAsAgentsPanelSelection is
+// TestCommandLineFiltersOpenAsPanelSelections' install-seed counterpart: a
+// --agent value that resolved to one specific install (BrowserOptions.
+// Install, from a configured label or an install's own name) seeds
+// agents.Sel exactly like walking to that row and pressing Enter would.
+func TestCommandLineInstallSeedOpensAsAgentsPanelSelection(t *testing.T) {
+	db := browseTestDB(t)
+	seedBrowseSession(t, db, "I0", "claude:cc:1", "cc", 1, map[string]any{"install": "cc", "cwd": "/x"})
+	seedBrowseSession(t, db, "I1", "claude:ccp:1", "ccp", 2, map[string]any{"install": "ccp", "cwd": "/y"})
+	m := newTestBrowser(db, "p", BrowserOptions{
+		Install:  "cc",
+		Installs: testInstalls("cc", "ccp"),
+	})
+	if m.agents.Sel != "cc" || m.agentSource != "" {
+		t.Fatalf("opened with agents.Sel=%q agentSource=%q, want cc/\"\"", m.agents.Sel, m.agentSource)
+	}
+	if len(m.visible) != 1 || m.visible[0].SessionID != "claude:cc:1" {
+		t.Errorf("%+v visible under install=cc, want only claude:cc:1", m.visible)
 	}
 }
 
@@ -924,7 +1037,7 @@ func TestCommentsTabShowsCommentsWithTheirIDs(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := newTestBrowser(db, "claude-personal", BrowserOptions{
-		Resolve: testResolve("claude-personal"), Profiles: testProfiles("claude-personal"),
+		Installs: testInstalls("claude-personal"),
 	})
 	m.tab = tabComments
 	got := m.detailContent(RenderOptions{Width: 60})
@@ -958,11 +1071,15 @@ func TestActionMenuOffersThePanelsActions(t *testing.T) {
 		}
 	}
 	if strings.Contains(joined, "switch to this profile") {
-		t.Errorf("the Sessions menu offers a Profiles action: %s", joined)
+		t.Errorf("the Sessions menu offers a Groups action: %s", joined)
 	}
 }
 
-func TestActionMenuNarrowsByTyping(t *testing.T) {
+// TestActionMenuLettersDoNotNarrowByDefault covers the menu's default
+// navigation (change menu-jk-navigation): a letter typed with no preceding
+// "/" is not fed to the menu as narrowing text, and does not so much as
+// enter narrowing mode - only "/" does that (TestActionMenuSlashNarrows).
+func TestActionMenuLettersDoNotNarrowByDefault(t *testing.T) {
 	m := fixtureBrowser(t)
 	m = update(t, m, keyRunes("0"))
 	m = update(t, m, keyRunes("x"))
@@ -970,24 +1087,98 @@ func TestActionMenuNarrowsByTyping(t *testing.T) {
 	for _, r := range "comment" {
 		m = update(t, m, keyRunes(string(r)))
 	}
+	if len(m.menuFiltered) != before {
+		t.Fatalf("typing narrowed the menu from %d to %d entries; letters should not narrow by default", before, len(m.menuFiltered))
+	}
+	if m.menuNarrowing {
+		t.Error("typing letters (none of them /) put the menu into narrowing mode")
+	}
+}
+
+// TestActionMenuJKMoveTheCursor covers j/k as the menu's default navigation
+// (change menu-jk-navigation) - the same keys that move every other panel,
+// now moving the highlighted menu entry too instead of being stolen for
+// narrowing.
+func TestActionMenuJKMoveTheCursor(t *testing.T) {
+	m := fixtureBrowser(t)
+	m = update(t, m, keyRunes("0"))
+	m = update(t, m, keyRunes("x"))
+	start := m.menuCursor
+	m = update(t, m, keyRunes("j"))
+	if m.menuCursor != start+1 {
+		t.Errorf("j left the cursor at %d, want %d", m.menuCursor, start+1)
+	}
+	m = update(t, m, keyRunes("k"))
+	if m.menuCursor != start {
+		t.Errorf("k left the cursor at %d, want %d", m.menuCursor, start)
+	}
+}
+
+// TestActionMenuSlashNarrows covers the "/" quick-filter sub-state (change
+// menu-jk-navigation): "/" switches the menu into the old typing-narrows
+// behaviour, and Esc leaves narrowing - clearing the filter but leaving the
+// menu open - rather than closing the menu outright; a second Esc does
+// that.
+func TestActionMenuSlashNarrows(t *testing.T) {
+	m := fixtureBrowser(t)
+	m = update(t, m, keyRunes("0"))
+	m = update(t, m, keyRunes("x"))
+	before := len(m.menuFiltered)
+
+	m = update(t, m, keyRunes("/"))
+	if !m.menuNarrowing {
+		t.Fatal("/ did not enter narrowing mode")
+	}
+	for _, r := range "comment" {
+		m = update(t, m, keyRunes(string(r)))
+	}
 	if len(m.menuFiltered) == 0 || len(m.menuFiltered) >= before {
-		t.Fatalf("typing narrowed the menu from %d to %d entries", before, len(m.menuFiltered))
+		t.Fatalf("typing after / narrowed the menu from %d to %d entries", before, len(m.menuFiltered))
 	}
 	for _, a := range m.menuFiltered {
 		if !strings.Contains(a.label, "comment") {
 			t.Errorf("narrowed menu still offers %q", a.label)
 		}
 	}
+
+	m = update(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.menuNarrowing {
+		t.Error("esc did not leave narrowing mode")
+	}
+	if m.mode != modeMenu {
+		t.Fatalf("esc while narrowing closed the menu (mode %v), want it to stay open", m.mode)
+	}
+	if len(m.menuFiltered) != before {
+		t.Errorf("esc left the menu narrowed to %d of %d entries, want the filter cleared", len(m.menuFiltered), before)
+	}
+
+	m = update(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.mode != modeNone {
+		t.Errorf("a second esc left mode %v, want the menu closed", m.mode)
+	}
 }
 
+// TestActionMenuRunsTheHighlightedAction drives the menu with Down (the
+// same movement j/k perform - see TestActionMenuJKMoveTheCursor) to reach
+// "clear all filters" and applies it with Enter, since typing the label no
+// longer narrows to it by default (change menu-jk-navigation).
 func TestActionMenuRunsTheHighlightedAction(t *testing.T) {
 	m := fixtureBrowser(t)
 	m.agents.Sel = "pi"
 	m.rebuild()
 	m = update(t, m, keyRunes("0"))
 	m = update(t, m, keyRunes("x"))
-	for _, r := range "clear all" {
-		m = update(t, m, keyRunes(string(r)))
+	target := -1
+	for i, a := range m.menuFiltered {
+		if a.label == "clear all filters" {
+			target = i
+		}
+	}
+	if target < 0 {
+		t.Fatalf("menu has no 'clear all filters' entry: %+v", m.menuFiltered)
+	}
+	for m.menuCursor < target {
+		m = update(t, m, tea.KeyMsg{Type: tea.KeyDown})
 	}
 	m = update(t, m, tea.KeyMsg{Type: tea.KeyEnter})
 	if m.mode != modeNone {
@@ -1059,45 +1250,27 @@ func TestQuitDoesNotSelect(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------
-// Profiles
+// Groups
 // ---------------------------------------------------------------------
 
-func TestSwitchingProfileResetsTheView(t *testing.T) {
-	m := fixtureBrowser(t)
-	m.agents.Sel, m.tags.Sel, m.textFilter = "claude", "wip", "topic"
-	m.rebuild()
-	other := browseTestDB(t)
-	m = update(t, m, dbSwitchedMsg{name: "claude-work", db: other})
-	if m.profileName != "claude-work" {
-		t.Errorf("active profile is %q, want claude-work", m.profileName)
-	}
-	if m.agents.Sel != "" || m.tags.Sel != "" || m.textFilter != "" {
-		t.Errorf("filters survived the profile switch: agent=%q tag=%q filter=%q",
-			m.agents.Sel, m.tags.Sel, m.textFilter)
-	}
-	if len(m.visible) != 0 {
-		t.Errorf("%d sessions listed from the other (empty) profile", len(m.visible))
-	}
-}
-
-// The active profile is marked in the Profiles panel. The accordion layout
+// TestAllRowIsAlwaysMarkedInTheGroupsPanel covers the zero-config case
+// (change group-sessions-in-one-index, "Zero-config and public users"):
+// with no groups configured the Groups panel shows exactly one row, "All",
+// and it is marked applied since it is in fact the active view - not
+// "Profiles", the panel this replaced, whose one row was always marked for
+// a different reason (it wasn't a filter at all). The accordion layout
 // gives a side panel its rows only while it is the one expanded, so the
-// panel has to be focused first for this assertion to have rows to look at
-// - the unfocused Profiles panel is a one-line header by design, and there
-// is nothing in it to mark.
-func TestActiveProfileIsMarkedInThePanel(t *testing.T) {
+// panel has to be focused first for this assertion to have rows to look at.
+func TestAllRowIsAlwaysMarkedInTheGroupsPanel(t *testing.T) {
 	m := fixtureBrowser(t)
 	m = update(t, m, keyRunes("1"))
 	g := m.geometry()
-	box := m.facetPanel(panelProfiles, &m.profiles_, g.leftWidth, g.profilesH, "")
-	if len(box.Lines) == 0 {
-		t.Fatal("the Profiles panel drew no rows")
+	box := m.facetPanel(panelGroups, &m.groups_, g.leftWidth, g.groupsH, "")
+	if len(box.Lines) != 1 {
+		t.Fatalf("expected exactly the All row, got %+v", box.Lines)
 	}
-	if !strings.Contains(box.Lines[0], "claude-personal") || !strings.Contains(box.Lines[0], "●") {
-		t.Errorf("the active profile is not marked in %q", box.Lines[0])
-	}
-	if strings.Contains(box.Lines[1], "●") {
-		t.Errorf("an inactive profile is marked as active in %q", box.Lines[1])
+	if !strings.Contains(box.Lines[0], "All") || !strings.Contains(box.Lines[0], "●") {
+		t.Errorf("the All row is not marked, got %q", box.Lines[0])
 	}
 }
 
@@ -1150,7 +1323,7 @@ func TestArchiveKeyToggles(t *testing.T) {
 	db := browseTestDB(t)
 	seedFixture(t, db)
 	m := newTestBrowser(db, "claude-personal", BrowserOptions{
-		ShowAll: true, Resolve: testResolve("claude-personal"), Profiles: testProfiles("claude-personal"),
+		ShowAll: true, Installs: testInstalls("claude-personal"),
 	})
 	m = update(t, m, keyRunes("0"))
 	target := m.visible[0].LineageID
@@ -1202,8 +1375,8 @@ func TestDotTogglesShowAll(t *testing.T) {
 	db := browseTestDB(t)
 	seedFixture(t, db)
 	m := newTestBrowser(db, "claude-personal", BrowserOptions{
-		Hide:    config.Hide{MinMessages: 44},
-		Resolve: testResolve("claude-personal"), Profiles: testProfiles("claude-personal"),
+		Hide:     config.Hide{MinMessages: 44},
+		Installs: testInstalls("claude-personal"),
 	})
 	before := len(m.visible)
 	if before == 7 {
@@ -1232,8 +1405,8 @@ func TestSessionsBorderShowsHiddenCount(t *testing.T) {
 	db := browseTestDB(t)
 	seedFixture(t, db)
 	m := newTestBrowser(db, "claude-personal", BrowserOptions{
-		Hide:    config.Hide{MinMessages: 44},
-		Resolve: testResolve("claude-personal"), Profiles: testProfiles("claude-personal"),
+		Hide:     config.Hide{MinMessages: 44},
+		Installs: testInstalls("claude-personal"),
 	})
 	m = update(t, m, tea.WindowSizeMsg{Width: 100, Height: 26})
 	border := strings.Split(m.sessionsPanel(m.geometry()).render(), "\n")[0]
@@ -1257,7 +1430,7 @@ func TestArchivedMarkerWithoutStyling(t *testing.T) {
 	}
 	m := newTestBrowser(db, "claude-personal", BrowserOptions{
 		Style: false, ShowAll: true,
-		Resolve: testResolve("claude-personal"), Profiles: testProfiles("claude-personal"),
+		Installs: testInstalls("claude-personal"),
 	})
 	m = update(t, m, tea.WindowSizeMsg{Width: 100, Height: 26})
 	v := m.View()
@@ -1300,7 +1473,7 @@ func TestViewFitsWithHiddenCountAndArchivedRow(t *testing.T) {
 				}
 				m := newTestBrowser(db, "claude-personal", BrowserOptions{
 					Style: styled, ShowAll: showAll, Hide: config.Hide{MinMessages: 44},
-					Resolve: testResolve("claude-personal"), Profiles: testProfiles("claude-personal"),
+					Installs: testInstalls("claude-personal"),
 				})
 				m = update(t, m, tea.WindowSizeMsg{Width: w, Height: h})
 				view := m.View()
@@ -1377,7 +1550,7 @@ func TestControlCharactersCannotBreakThePanels(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := newTestBrowser(db, "claude-personal", BrowserOptions{
-		Resolve: testResolve("claude-personal"), Profiles: testProfiles("claude-personal"),
+		Installs: testInstalls("claude-personal"),
 	})
 	m = update(t, m, tea.WindowSizeMsg{Width: 100, Height: 26})
 	lines := strings.Split(m.View(), "\n")
@@ -1398,7 +1571,7 @@ func TestUnstyledViewEmitsNoEscapes(t *testing.T) {
 	db := browseTestDB(t)
 	seedFixture(t, db)
 	m := newTestBrowser(db, "claude-personal", BrowserOptions{
-		Style: false, Resolve: testResolve("claude-personal"), Profiles: testProfiles("claude-personal"),
+		Style: false, Installs: testInstalls("claude-personal"),
 	})
 	m = update(t, m, tea.WindowSizeMsg{Width: 100, Height: 26})
 	for _, v := range []string{m.View(), m.footer(), m.helpView(), m.tabStrip()} {
@@ -1475,27 +1648,28 @@ func browseTestDBAt(t *testing.T, path string) *sqlitex.Runner {
 // Paths that only the real event loop exercises
 // ---------------------------------------------------------------------
 
-// TestProfileSwitchThroughRealProgramEventLoop drives the real tea.Program
-// - the same one RunBrowser constructs - over a piped input, pressing keys
-// as the actual bytes a terminal would send, with no test code calling
-// Update or a returned command itself. Every other test here proves the
-// *model's* logic; only this one proves that bubbletea delivers a real key
-// press through Update and feeds the tea.Cmd it returns back in as a
-// message, which is where a profile switch would silently fail.
-func TestProfileSwitchThroughRealProgramEventLoop(t *testing.T) {
+// TestRefreshThroughRealProgramEventLoop drives the real tea.Program - the
+// same one RunBrowser constructs - over a piped input, pressing keys as the
+// actual bytes a terminal would send, with no test code calling Update or a
+// returned command itself. Every other test here proves the *model's*
+// logic; only this one proves that bubbletea delivers a real key press
+// through Update and feeds the tea.Cmd it returns back in as a message -
+// which used to be exercised via a profile switch (now gone, change
+// group-sessions-in-one-index) and is exercised here via the refresh
+// action instead, the one other async command the browser has.
+func TestRefreshThroughRealProgramEventLoop(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("LAZYRECALL_HOME", home)
 
-	pdb := browseTestDBAt(t, filepath.Join(home, "p.db"))
-	seedBrowseSession(t, pdb, "lp", "claude:p:1", "p", 1, map[string]any{"topic": "profile p session"})
-	qdb := browseTestDBAt(t, filepath.Join(home, "q.db"))
-	seedBrowseSession(t, qdb, "lq", "claude:q:1", "q", 1, map[string]any{"topic": "profile q session"})
-	_ = qdb
+	// refreshCmd opens the real index at profile.DBPath(), not whatever
+	// *sqlitex.Runner the test injects as opts.DB - so for its effect to be
+	// observable here, the two must be the same file.
+	db := browseTestDBAt(t, profile.DBPath())
+	seedBrowseSession(t, db, "l1", "claude:p:1", "p", 1, map[string]any{"topic": "before refresh"})
 
 	opts := BrowserOptions{
-		DB: pdb, ProfileName: "p", Style: false,
-		Resolve:  testResolve("q"),
-		Profiles: testProfiles("p", "q"),
+		DB: db, Style: false,
+		Installs: testInstalls(), // no real installs: the refresh pass is a fast no-op
 	}
 	m := newBrowseModel(opts)
 	nm, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
@@ -1506,30 +1680,26 @@ func TestProfileSwitchThroughRealProgramEventLoop(t *testing.T) {
 	p := tea.NewProgram(&m, tea.WithInput(in), tea.WithOutput(&out))
 
 	done := make(chan struct{})
-	var final tea.Model
 	var runErr error
 	go func() {
-		final, runErr = p.Run()
+		_, runErr = p.Run()
 		close(done)
 	}()
 
-	in.chunks <- []byte("1")      // focus the Profiles panel
-	in.chunks <- []byte("\x1b[B") // Down arrow, delivered as one chunk
-	in.chunks <- []byte("\r")     // switch to the highlighted profile
+	in.chunks <- []byte("R") // trigger the async refresh action
 
-	// switchProfileCmd is itself asynchronous - bubbletea runs it in its
-	// own goroutine and only feeds its result back in as a dbSwitchedMsg
-	// once that goroutine returns. Sending "q" without waiting for that to
-	// land races the real quit against the real switch, which looks exactly
-	// like "switching had no effect" but is a race in this test's own
-	// timing. Wait for the switched-to profile's session to actually be
-	// drawn, the same way a person would wait to see it happen.
+	// refreshCmd is itself asynchronous - bubbletea runs it in its own
+	// goroutine and only feeds its result back in as a refreshDoneMsg once
+	// that goroutine returns. Sending "q" without waiting for that to land
+	// races the real quit against the real refresh completing, which looks
+	// exactly like "the action had no effect" but is a race in this test's
+	// own timing.
 	deadline := time.Now().Add(5 * time.Second)
-	for !out.Contains("profile q session") && time.Now().Before(deadline) {
+	for !out.Contains("index refreshed") && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
-	if !out.Contains("profile q session") {
-		t.Fatal("profile q's session never appeared in the rendered output within 5s")
+	if !out.Contains("index refreshed") {
+		t.Fatal("the refresh action's result never appeared in the rendered output within 5s")
 	}
 	in.chunks <- []byte("q")
 	close(in.chunks)
@@ -1541,36 +1711,6 @@ func TestProfileSwitchThroughRealProgramEventLoop(t *testing.T) {
 	}
 	if runErr != nil {
 		t.Fatalf("p.Run: %v", runErr)
-	}
-
-	fm := final.(*browseModel)
-	if fm.profileName != "q" {
-		t.Errorf("profileName = %s, want q - switching profile through the real event loop had no effect", fm.profileName)
-	}
-	view := fm.View()
-	if !strings.Contains(view, "profile q session") {
-		t.Error("the new profile's session must be listed after switching through the real event loop")
-	}
-	if strings.Contains(view, "profile p session") {
-		t.Error("the previous profile's session must never remain listed - no listing may span two profiles")
-	}
-}
-
-// A failed profile switch reports why and keeps the current profile and its
-// sessions, rather than silently doing nothing (spec session-search,
-// "Chosen profile cannot be opened").
-func TestProfileSwitchFailureKeepsCurrentProfile(t *testing.T) {
-	m := fixtureBrowser(t)
-	before := len(m.visible)
-	m = update(t, m, dbSwitchedMsg{err: fmt.Errorf("no such profile \"nope\"")})
-	if m.profileName != "claude-personal" {
-		t.Errorf("a failed switch changed the active profile to %q", m.profileName)
-	}
-	if len(m.visible) != before {
-		t.Errorf("a failed switch changed the listing from %d to %d sessions", before, len(m.visible))
-	}
-	if !strings.Contains(m.footer(), "nope") {
-		t.Errorf("a failed switch did not report why: %q", m.footer())
 	}
 }
 
@@ -1689,7 +1829,7 @@ func TestRefreshActionReloads(t *testing.T) {
 	t.Setenv("LAZYRECALL_HOME", home)
 	db := browseTestDBAt(t, filepath.Join(home, "p.db"))
 	seedBrowseSession(t, db, "l1", "claude:p:1", "p", 1, map[string]any{"topic": "first"})
-	m := newTestBrowser(db, "p", BrowserOptions{Resolve: testResolve("p"), Profiles: testProfiles("p")})
+	m := newTestBrowser(db, "p", BrowserOptions{Installs: testInstalls("p")})
 	if len(m.visible) != 1 {
 		t.Fatalf("opened with %d sessions, want 1", len(m.visible))
 	}
@@ -1833,7 +1973,7 @@ func TestStylingWhenEnabled(t *testing.T) {
 	db := browseTestDB(t)
 	seedFixture(t, db)
 	m := newTestBrowser(db, "claude-personal", BrowserOptions{
-		Style: true, Resolve: testResolve("claude-personal"), Profiles: testProfiles("claude-personal"),
+		Style: true, Installs: testInstalls("claude-personal"),
 	})
 	m = update(t, m, tea.WindowSizeMsg{Width: 100, Height: 26})
 	if v := m.View(); !strings.Contains(v, "\x1b") {
@@ -1868,7 +2008,7 @@ func TestRenderItemDetailShowsNameAndTopicSeparately(t *testing.T) {
 	db := browseTestDB(t)
 	name, topic := "the release checklist", "derived topic text"
 	it := search.Item{SessionID: "claude:p:1", Source: "claude", Name: &name, Topic: &topic}
-	got := renderItemDetail(db, it, RenderOptions{Width: 80})
+	got := renderItemDetail(db, it, nil, noInstallInfo, RenderOptions{Width: 80})
 	if !strings.Contains(got, "name:   "+name) {
 		t.Errorf("the detail pane does not show the chosen name:\n%s", got)
 	}
@@ -1884,7 +2024,7 @@ func TestRenderItemDetailShowsClientWithItsRawValue(t *testing.T) {
 	db := browseTestDB(t)
 	client := "sdk-ts"
 	it := search.Item{SessionID: "claude:p:1", Source: "claude", Client: &client}
-	got := renderItemDetail(db, it, RenderOptions{Width: 80})
+	got := renderItemDetail(db, it, nil, noInstallInfo, RenderOptions{Width: 80})
 	if !strings.Contains(got, "client: acp (sdk-ts)") {
 		t.Errorf("the detail pane does not show the client and what it was read from:\n%s", got)
 	}
@@ -1894,13 +2034,13 @@ func TestRenderItemDetailShowsClientWithItsRawValue(t *testing.T) {
 	// source never said" are different facts and this is the one place
 	// with room to tell them apart.
 	terminal := "cli"
-	got = renderItemDetail(db, search.Item{SessionID: "claude:p:2", Source: "claude", Client: &terminal}, RenderOptions{Width: 80})
+	got = renderItemDetail(db, search.Item{SessionID: "claude:p:2", Source: "claude", Client: &terminal}, nil, noInstallInfo, RenderOptions{Width: 80})
 	if !strings.Contains(got, "client: cli") {
 		t.Errorf("the detail pane should still state a terminal session's client:\n%s", got)
 	}
 
 	// A source that records no client at all carries no line.
-	got = renderItemDetail(db, search.Item{SessionID: "pi:p:3", Source: "pi"}, RenderOptions{Width: 80})
+	got = renderItemDetail(db, search.Item{SessionID: "pi:p:3", Source: "pi"}, nil, noInstallInfo, RenderOptions{Width: 80})
 	if strings.Contains(got, "client:") {
 		t.Errorf("a source that records no client should carry no client line:\n%s", got)
 	}
@@ -1929,7 +2069,7 @@ func TestActionMenuDrawsOverTheFrame(t *testing.T) {
 		t.Errorf("the popup does not say which panel it is for:\n%s", view)
 	}
 	// The frame survives underneath: the side panels are still on screen.
-	for _, want := range []string{"Profiles", "Agents", "Repos"} {
+	for _, want := range []string{"Groups", "Agents", "Repos"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("the popup displaced the %s panel instead of covering part of it", want)
 		}
@@ -1952,7 +2092,7 @@ func TestActionMenuPopupOverStyledFrameStaysInBounds(t *testing.T) {
 	db := browseTestDB(t)
 	seedFixture(t, db)
 	m := newTestBrowser(db, "claude-personal", BrowserOptions{
-		Style: true, Resolve: testResolve("claude-personal"), Profiles: testProfiles("claude-personal"),
+		Style: true, Installs: testInstalls("claude-personal"),
 	})
 	m = update(t, m, tea.WindowSizeMsg{Width: 100, Height: 26})
 	m = update(t, m, keyRunes("0"))
@@ -2122,7 +2262,7 @@ func TestTextFilterDoesNotMatchTextPastTheTerminalTruncation(t *testing.T) {
 	// at, the topic slot does not reach character 600 - this fixture only
 	// tests what it claims to if the row genuinely cannot show the word.
 	width := m.sessionRowWidth()
-	slots := rowSlots(m.visible[0])
+	slots := rowSlots(m.visible[0], m.installLabels)
 	fitRowToWidth(slots, width)
 	if strings.Contains(strings.Join(slots, " "), "advertises") {
 		t.Fatalf("fixture's target word survives fitRowToWidth at width %d; the fixture no longer isolates truncation", width)
@@ -2157,10 +2297,10 @@ func TestTextFilterDoesNotMatchPastAnArchivedRowsMarkerBudget(t *testing.T) {
 	m := &browseModel{width: 60, showAll: true, textFilter: "marker-only"}
 	baseWidth := m.sessionRowWidth()
 	drawnWidth := maxInt(baseWidth-visibleWidth(" "+archivedMarker), 1)
-	if !strings.Contains(matchText(it, baseWidth), m.textFilter) {
+	if !strings.Contains(matchText(it, baseWidth, nil), m.textFilter) {
 		t.Fatalf("fixture's target word does not fit the ordinary %d-column row", baseWidth)
 	}
-	if strings.Contains(matchText(it, drawnWidth), m.textFilter) {
+	if strings.Contains(matchText(it, drawnWidth, nil), m.textFilter) {
 		t.Fatalf("fixture's target word still fits the archived %d-column row", drawnWidth)
 	}
 	if got := m.applyTextFilter([]search.Item{it}); len(got) != 0 {
@@ -2190,7 +2330,7 @@ func TestTextFilterMatchesTextWithinTheTruncationWidth(t *testing.T) {
 	// Guard the premise the other direction: the word is still there once
 	// the row is fitted to the width it is actually drawn at.
 	width := m.sessionRowWidth()
-	slots := rowSlots(m.visible[0])
+	slots := rowSlots(m.visible[0], m.installLabels)
 	fitRowToWidth(slots, width)
 	if !strings.Contains(strings.Join(slots, " "), "bug") {
 		t.Fatalf("fixture's target word does not survive fitRowToWidth at width %d; pick shorter filler", width)
@@ -2336,12 +2476,12 @@ func TestSpatialDownWalksTheWholeStackWhenNarrow(t *testing.T) {
 		t.Fatal("fixture at 60x24 still draws two columns; pick a narrower width")
 	}
 
-	m.focus = panelProfiles
+	m.focus = panelGroups
 	want := []panelID{panelAgents, panelRepos, panelTags, panelSessions, panelDetail}
 	for _, w := range want {
 		m = update(t, m, keyRunes("J"))
 		if m.focus != w {
-			t.Fatalf("J landed on %v, want %v (walking the stack from Profiles)", m.focus, w)
+			t.Fatalf("J landed on %v, want %v (walking the stack from Groups)", m.focus, w)
 		}
 	}
 	// And back up again.
@@ -2428,5 +2568,902 @@ func TestRemoveTagUnderCursorSaysWhenTheSessionLacksTheTag(t *testing.T) {
 	m = update(t, m, keyRunes("d"))
 	if !strings.Contains(m.notice, "not tagged") {
 		t.Errorf("notice = %q, want it to say the selected session does not carry the tag", m.notice)
+	}
+}
+
+// ---------------------------------------------------------------------
+// The Groups panel (change group-sessions-in-one-index)
+// ---------------------------------------------------------------------
+
+func TestGroupsPanelRowsAndCounts(t *testing.T) {
+	m := groupFixtureBrowser(t)
+	m = update(t, m, keyRunes("1"))
+	wantOrder := []string{"", "work", "personal", "archive", "unknown"}
+	if len(m.groups_.rows) != len(wantOrder) {
+		t.Fatalf("Groups panel has %d rows, want %d (All, work, personal, Archive, Unknown): %+v",
+			len(m.groups_.rows), len(wantOrder), m.groups_.rows)
+	}
+	for i, v := range wantOrder {
+		if m.groups_.rows[i].Value != v {
+			t.Errorf("row %d = %q, want %q", i, m.groups_.rows[i].Value, v)
+		}
+	}
+	wantCounts := map[string]int{"": 5, "work": 3, "personal": 1, "archive": 1, "unknown": 1}
+	for _, r := range m.groups_.rows {
+		if r.Count != wantCounts[r.Value] {
+			t.Errorf("row %q count = %d, want %d", r.Value, r.Count, wantCounts[r.Value])
+		}
+	}
+}
+
+// groupCountsFixtureBrowser builds a browser over a corpus that exercises
+// filter-aware Groups panel counts (change group-sessions-in-one-index, P1
+// review fix #4): two agents (claude, pi) and three groups (work, personal,
+// sandbox), with sandbox occupied by pi alone so an agent filter can drive
+// its count to zero. Each session's topic doubles as a word an "/" text
+// narrow can select on: "alpha" for the claude-only pair plus one archived
+// claude session, "beta"/"gamma" for everything else. All content is
+// hand-written, never real session data.
+//
+//	work:     W1 claude alpha, W2 pi beta
+//	personal: P1 claude alpha, P2 pi beta
+//	sandbox:  S1 pi gamma
+//	archived: A1 claude alpha, A2 pi beta
+func groupCountsFixtureBrowser(t *testing.T) *browseModel {
+	t.Helper()
+	db := browseTestDB(t)
+	seedBrowseSession(t, db, "W1", "claude:p:w1", "p", 1, map[string]any{"source": "claude", "cwd": "/Users/x/work/api", "topic": "alpha", "last_activity_at": 700})
+	seedBrowseSession(t, db, "W2", "claude:p:w2", "p", 2, map[string]any{"source": "pi", "cwd": "/Users/x/work/api", "topic": "beta", "last_activity_at": 600})
+	seedBrowseSession(t, db, "P1", "claude:p:p1", "p", 3, map[string]any{"source": "claude", "cwd": "/Users/x/personal/proj", "topic": "alpha", "last_activity_at": 500})
+	seedBrowseSession(t, db, "P2", "claude:p:p2", "p", 4, map[string]any{"source": "pi", "cwd": "/Users/x/personal/proj", "topic": "beta", "last_activity_at": 400})
+	seedBrowseSession(t, db, "S1", "claude:p:s1", "p", 5, map[string]any{"source": "pi", "cwd": "/Users/x/sandbox/proj", "topic": "gamma", "last_activity_at": 300})
+	seedBrowseSession(t, db, "A1", "claude:p:a1", "p", 6, map[string]any{"source": "claude", "cwd": "/Users/x/work/api", "topic": "alpha", "last_activity_at": 200})
+	seedBrowseSession(t, db, "A2", "claude:p:a2", "p", 7, map[string]any{"source": "pi", "cwd": "/Users/x/personal/proj", "topic": "beta", "last_activity_at": 100})
+	seedLineageOverride(t, db, "A1", "", true)
+	seedLineageOverride(t, db, "A2", "", true)
+
+	groups := []config.Group{
+		{Name: "work", Paths: []string{"/Users/x/work"}},
+		{Name: "personal", Paths: []string{"/Users/x/personal"}},
+		{Name: "sandbox", Paths: []string{"/Users/x/sandbox"}},
+	}
+	return newTestBrowser(db, "p", BrowserOptions{
+		Groups:   groups,
+		Installs: testInstalls("claude", "pi"),
+	})
+}
+
+// TestGroupsPanelCountsRespectAgentFilter covers the core of review finding
+// #4: the Groups panel used to count over the whole index (search.Counts),
+// ignoring the active Agent/Repo/Tag/text selections that already narrow
+// every other panel on screen. With agent=claude selected, every group and
+// Archive row must drop to claude's own sessions, not the fixture's true
+// (agent-blind) totals - this also covers "Archive counts respect the
+// other facets", since claude occupies only one of the two archived
+// sessions.
+func TestGroupsPanelCountsRespectAgentFilter(t *testing.T) {
+	m := groupCountsFixtureBrowser(t)
+	m.agents.Sel = "claude"
+	m.rebuild()
+
+	wantCounts := map[string]int{"": 2, "work": 1, "personal": 1, "archive": 1}
+	for value, want := range wantCounts {
+		if got := rowCount(t, m.groups_, value); got != want {
+			t.Errorf("row %q count = %d under agent=claude, want %d", value, got, want)
+		}
+	}
+	// sandbox is pi-only, so under agent=claude it has zero matching
+	// sessions and (not being the selected row) must not be advertised at
+	// all - the zero-count convention every other facet panel follows.
+	for _, r := range m.groups_.rows {
+		if r.Value == "sandbox" {
+			t.Fatalf("sandbox row shown with a zero count under agent=claude: %+v", m.groups_.rows)
+		}
+	}
+}
+
+// TestGroupsPanelZeroCountRowStaysWhenSelected covers "a group with no
+// matching sessions under the filter is not advertised, unless it's the
+// selected row": TestGroupsPanelCountsRespectAgentFilter already shows
+// sandbox is hidden under agent=claude when nothing has it selected: this
+// test selects sandbox itself first and confirms the row survives the same
+// narrowing that would otherwise hide it, at its true zero count, so the
+// selection stays reachable to clear.
+func TestGroupsPanelZeroCountRowStaysWhenSelected(t *testing.T) {
+	m := groupCountsFixtureBrowser(t)
+	m.setGroupFilter("sandbox")
+	m.agents.Sel = "claude"
+	m.rebuild()
+
+	found := false
+	for _, r := range m.groups_.rows {
+		if r.Value == "sandbox" {
+			found = true
+			if r.Count != 0 {
+				t.Errorf("sandbox row count = %d under agent=claude, want 0", r.Count)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("sandbox row missing even though it is the selected group: %+v", m.groups_.rows)
+	}
+}
+
+// TestGroupsPanelCountsRespectTextFilter covers "with a text narrow active,
+// counts follow it": the "/" filter (m.textFilter) narrows Groups panel
+// counts the same way it already narrows Agents/Repos/Tags.
+func TestGroupsPanelCountsRespectTextFilter(t *testing.T) {
+	m := groupCountsFixtureBrowser(t)
+	m.textFilter = "alpha" // only W1, P1 and the archived A1 carry this topic
+	m.rebuild()
+
+	wantCounts := map[string]int{"": 2, "work": 1, "personal": 1, "archive": 1}
+	for value, want := range wantCounts {
+		if got := rowCount(t, m.groups_, value); got != want {
+			t.Errorf("row %q count = %d under text filter %q, want %d", value, got, m.textFilter, want)
+		}
+	}
+	for _, r := range m.groups_.rows {
+		if r.Value == "sandbox" {
+			t.Fatalf("sandbox row shown with a zero count under text filter %q: %+v", m.textFilter, m.groups_.rows)
+		}
+	}
+}
+
+// TestSelectingAGroupStillFiltersTheList is the sanity check behind moving
+// the Groups panel's counts onto a client-side superset (m.groupItems):
+// the Sessions list itself must still narrow to exactly the selected
+// group's sessions, unaffected by however its count is now computed.
+func TestSelectingAGroupStillFiltersTheList(t *testing.T) {
+	m := groupCountsFixtureBrowser(t)
+	m.setGroupFilter("sandbox")
+
+	if len(m.visible) != 1 || m.visible[0].SessionID != "claude:p:s1" {
+		t.Fatalf("visible = %+v, want exactly the one sandbox session", m.visible)
+	}
+}
+
+// TestGroupsPanelHidesUnknownRowWhenEmpty covers the other half of the
+// panel's row-selection rule (TestGroupsPanelRowsAndCounts covers the case
+// where Unknown is non-empty and shown): a row that leads nowhere is never
+// offered, the same rule every other facet's rows follow.
+func TestGroupsPanelHidesUnknownRowWhenEmpty(t *testing.T) {
+	db := browseTestDB(t)
+	seedBrowseSession(t, db, "U0", "claude:p:u0", "p", 1, map[string]any{"cwd": "/Users/x/work/api"})
+	groups := []config.Group{{Name: "work", Paths: []string{"/Users/x/work"}}}
+	m := newTestBrowser(db, "p", BrowserOptions{Groups: groups, Installs: testInstalls("claude")})
+	m = update(t, m, keyRunes("1"))
+	for _, r := range m.groups_.rows {
+		if r.Value == "unknown" {
+			t.Fatalf("Unknown row shown with a zero count: %+v", m.groups_.rows)
+		}
+	}
+}
+
+// TestGroupsPanelZeroConfigShowsAllPlusArchiveWhenArchived is
+// TestAllRowIsAlwaysMarkedInTheGroupsPanel's sibling, checking row content
+// rather than the marker. With no groups configured and nothing archived,
+// the browser looks exactly as it did before groups existed (plan,
+// "Zero-config and public users"): just All. But archived sessions still
+// need a row to reach them even with zero groups configured, since Archive
+// is not a group - so as soon as something is archived, the panel also
+// offers Archive (with the right count) alongside All, and Enter on it
+// filters to only the archived sessions. Unknown stays hidden either way:
+// with no groups configured, every non-archived session is Unknown, so an
+// Unknown row would only duplicate All.
+func TestGroupsPanelZeroConfigShowsAllPlusArchiveWhenArchived(t *testing.T) {
+	t.Run("nothing archived", func(t *testing.T) {
+		m := fixtureBrowser(t)
+		m = update(t, m, keyRunes("1"))
+		if len(m.groups_.rows) != 1 || m.groups_.rows[0].Value != "" {
+			t.Errorf("zero-config Groups panel rows = %+v, want exactly one All row", m.groups_.rows)
+		}
+	})
+
+	t.Run("something archived", func(t *testing.T) {
+		db := browseTestDB(t)
+		seedFixture(t, db)
+		seedLineageOverride(t, db, "L0", "", true)
+		seedLineageOverride(t, db, "L1", "", true)
+		m := newTestBrowser(db, "p", BrowserOptions{
+			Installs: testInstalls("claude", "pi", "omp"),
+		})
+		m = update(t, m, keyRunes("1"))
+
+		if len(m.groups_.rows) != 2 {
+			t.Fatalf("zero-config Groups panel rows = %+v, want All and Archive only", m.groups_.rows)
+		}
+		if m.groups_.rows[0].Value != "" || m.groups_.rows[0].Label != "All" {
+			t.Errorf("first row = %+v, want All", m.groups_.rows[0])
+		}
+		if m.groups_.rows[1].Value != "archive" || m.groups_.rows[1].Label != "Archive" || m.groups_.rows[1].Count != 2 {
+			t.Errorf("second row = %+v, want Archive with count 2", m.groups_.rows[1])
+		}
+
+		for i, r := range m.groups_.rows {
+			if r.Value == "archive" {
+				m.groups_.cursor = i
+			}
+		}
+		m = update(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+		if len(m.visible) != 2 {
+			t.Fatalf("Archive row shows %+v, want only the 2 archived sessions", m.visible)
+		}
+		for _, it := range m.visible {
+			if it.SessionID != "claude:p:s0" && it.SessionID != "claude:p:s1" {
+				t.Errorf("Archive row shows unarchived session %s", it.SessionID)
+			}
+		}
+	})
+}
+
+func TestEnterOnGroupsPanelFiltersSessionList(t *testing.T) {
+	m := groupFixtureBrowser(t)
+	m = update(t, m, keyRunes("1"))
+	for i, r := range m.groups_.rows {
+		if r.Value == "work" {
+			m.groups_.cursor = i
+		}
+	}
+	m = update(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.group != "work" {
+		t.Fatalf("group filter is %q, want work", m.group)
+	}
+	if len(m.visible) != 3 {
+		t.Fatalf("%d sessions visible under group=work, want 3", len(m.visible))
+	}
+	for _, it := range m.visible {
+		if it.Group != "work" {
+			t.Errorf("session %s has group %q, want work", it.SessionID, it.Group)
+		}
+	}
+}
+
+func TestEscOnGroupsPanelReturnsToAll(t *testing.T) {
+	m := groupFixtureBrowser(t)
+	m = update(t, m, keyRunes("1"))
+	for i, r := range m.groups_.rows {
+		if r.Value == "personal" {
+			m.groups_.cursor = i
+		}
+	}
+	m = update(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.group != "personal" {
+		t.Fatalf("group filter is %q, want personal", m.group)
+	}
+	m = update(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.group != "" {
+		t.Errorf("esc left group filter at %q, want cleared", m.group)
+	}
+	if len(m.visible) != 5 {
+		t.Errorf("%d sessions visible after esc, want all 5 non-archived sessions", len(m.visible))
+	}
+}
+
+func TestArchiveGroupRowListsOnlyArchivedSessions(t *testing.T) {
+	m := groupFixtureBrowser(t)
+	m = update(t, m, keyRunes("1"))
+	for i, r := range m.groups_.rows {
+		if r.Value == "archive" {
+			m.groups_.cursor = i
+		}
+	}
+	m = update(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if len(m.visible) != 1 || m.visible[0].SessionID != "claude:p:g4" {
+		t.Fatalf("Archive row shows %+v, want only the archived session", m.visible)
+	}
+}
+
+// ---------------------------------------------------------------------
+// The `p` popup (change group-sessions-in-one-index)
+// ---------------------------------------------------------------------
+
+// TestGroupPopupMarksTheCurrentChoice covers the three states
+// groupMenuActions distinguishes: a manual override, an archived session
+// with no override (GroupManual wins when both are somehow true, but
+// neither of these fixtures is), and neither (automatic).
+func TestGroupPopupMarksTheCurrentChoice(t *testing.T) {
+	m := groupFixtureBrowser(t)
+	items, err := search.List(m.db, search.Filter{Groups: m.groups, ShowAll: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]search.Item{}
+	for _, it := range items {
+		byID[it.SessionID] = it
+	}
+
+	cases := []struct {
+		name, sessionID, want string
+	}{
+		{"manual override", "claude:p:g5", "work"},
+		{"archived, no override", "claude:p:g4", "Archive"},
+		{"automatic", "claude:p:g0", "Automatic (work)"},
+	}
+	for _, c := range cases {
+		it, ok := byID[c.sessionID]
+		if !ok {
+			t.Fatalf("%s: fixture is missing session %s", c.name, c.sessionID)
+		}
+		actions := m.groupMenuActions(it)
+		idx := currentGroupMenuIndex(actions)
+		if !strings.HasPrefix(actions[idx].label, "● ") {
+			t.Errorf("%s: marked entry %q has no applied marker", c.name, actions[idx].label)
+		}
+		if !strings.Contains(actions[idx].label, c.want) {
+			t.Errorf("%s: marked entry is %q, want it to name %q", c.name, actions[idx].label, c.want)
+		}
+	}
+}
+
+// TestGroupPopupZeroConfigOffersOnlyArchiveAndAutomatic covers the other
+// zero-config requirement: with no groups configured, `p` offers only the
+// two entries every session always has, never a phantom configured group.
+func TestGroupPopupZeroConfigOffersOnlyArchiveAndAutomatic(t *testing.T) {
+	m := fixtureBrowser(t)
+	m = update(t, m, keyRunes("0"))
+	m = update(t, m, keyRunes("p"))
+	if m.mode != modeMenu {
+		t.Fatalf("p did not open the popup (mode %v)", m.mode)
+	}
+	if len(m.menuFiltered) != 2 {
+		t.Fatalf("zero-config popup has %d entries, want 2 (Archive, Automatic): %+v", len(m.menuFiltered), m.menuFiltered)
+	}
+	joined := m.menuFiltered[0].label + "|" + m.menuFiltered[1].label
+	if !strings.Contains(joined, "Archive") || !strings.Contains(joined, "Automatic") {
+		t.Errorf("zero-config popup entries are %q, want Archive and Automatic", joined)
+	}
+}
+
+// TestGroupPopupAppliesChoiceAndMovesTheSessionBetweenGroups drives the
+// popup through the real key-event loop end to end: open with `p`, move to
+// an entry (Up/Down - typing in this popup narrows by substring, as it
+// does in the `x` menu it reuses), apply with Enter, then checks the
+// persisted database state and that the session moved between group
+// filters.
+func TestGroupPopupAppliesChoiceAndMovesTheSessionBetweenGroups(t *testing.T) {
+	m := groupFixtureBrowser(t)
+	idx := -1
+	for i, it := range m.visible {
+		if it.SessionID == "claude:p:g0" {
+			idx = i
+		}
+	}
+	if idx < 0 {
+		t.Fatalf("fixture session g0 not found in %+v", m.visible)
+	}
+	m.cursor = idx
+
+	m = update(t, m, keyRunes("p"))
+	if m.mode != modeMenu {
+		t.Fatalf("p did not open the group popup (mode %v)", m.mode)
+	}
+	if m.menuTitle != "Session group" {
+		t.Errorf("popup title = %q, want it to name the group popup, not the focused panel", m.menuTitle)
+	}
+	if !strings.Contains(m.menuFiltered[m.menuCursor].label, "Automatic (work)") {
+		t.Errorf("popup opened on %q, want the Automatic entry marked and pre-selected", m.menuFiltered[m.menuCursor].label)
+	}
+
+	personalIdx := -1
+	for i, a := range m.menuFiltered {
+		if strings.Contains(a.label, "personal") {
+			personalIdx = i
+		}
+	}
+	if personalIdx < 0 {
+		t.Fatalf("popup has no personal entry: %+v", m.menuFiltered)
+	}
+	for m.menuCursor < personalIdx {
+		m = update(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	}
+	for m.menuCursor > personalIdx {
+		m = update(t, m, tea.KeyMsg{Type: tea.KeyUp})
+	}
+	m = update(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+
+	if m.mode != modeNone {
+		t.Errorf("applying a group choice left mode %v", m.mode)
+	}
+	if !strings.Contains(m.notice, "personal") {
+		t.Errorf("notice = %q, want it to mention personal", m.notice)
+	}
+
+	items, err := search.List(m.db, search.Filter{Groups: m.groups, ShowAll: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got search.Item
+	for _, it := range items {
+		if it.SessionID == "claude:p:g0" {
+			got = it
+		}
+	}
+	if got.Group != "personal" || !got.GroupManual {
+		t.Errorf("g0 is group=%q manual=%v after the popup, want personal/manual", got.Group, got.GroupManual)
+	}
+
+	m.setGroupFilter("personal")
+	found := false
+	for _, it := range m.visible {
+		if it.SessionID == "claude:p:g0" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("g0 does not appear under group=personal after being filed there")
+	}
+	m.setGroupFilter("work")
+	for _, it := range m.visible {
+		if it.SessionID == "claude:p:g0" {
+			t.Error("g0 still appears under group=work after being filed under personal")
+		}
+	}
+}
+
+func TestGroupPopupEscChangesNothing(t *testing.T) {
+	m := groupFixtureBrowser(t)
+	idx := -1
+	for i, it := range m.visible {
+		if it.SessionID == "claude:p:g0" {
+			idx = i
+		}
+	}
+	m.cursor = idx
+	before, err := search.List(m.db, search.Filter{Groups: m.groups, ShowAll: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	m = update(t, m, keyRunes("p"))
+	m = update(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.mode != modeNone {
+		t.Errorf("esc left the popup open (mode %v)", m.mode)
+	}
+
+	after, err := search.List(m.db, search.Filter{Groups: m.groups, ShowAll: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b, a search.Item
+	for _, it := range before {
+		if it.SessionID == "claude:p:g0" {
+			b = it
+		}
+	}
+	for _, it := range after {
+		if it.SessionID == "claude:p:g0" {
+			a = it
+		}
+	}
+	if a.Group != b.Group || a.GroupManual != b.GroupManual || a.Archived != b.Archived {
+		t.Errorf("esc changed g0's group state: before %+v after %+v", b, a)
+	}
+}
+
+// ---------------------------------------------------------------------
+// The Agents panel facets by install (change group-sessions-in-one-index)
+// ---------------------------------------------------------------------
+
+func TestAgentsPanelListsInstallsByLabelAndFiltersByInstall(t *testing.T) {
+	db := browseTestDB(t)
+	seedBrowseSession(t, db, "A0", "claude:cc:1", "cc", 1, map[string]any{"install": "cc", "cwd": "/x"})
+	seedBrowseSession(t, db, "A1", "claude:ccp:1", "ccp", 2, map[string]any{"install": "ccp", "cwd": "/y"})
+	m := newTestBrowser(db, "p", BrowserOptions{
+		Installs:      testInstalls("cc", "ccp"),
+		InstallLabels: map[string]string{"cc": "cc-label", "ccp": "ccp-label"},
+	})
+	m = update(t, m, keyRunes("2"))
+
+	var got []string
+	for _, r := range m.agents.rows {
+		got = append(got, r.Label)
+	}
+	joined := strings.Join(got, "|")
+	for _, want := range []string{"cc-label", "ccp-label"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("Agents panel rows are %v, want the label %q present", got, want)
+		}
+	}
+
+	for i, r := range m.agents.rows {
+		if r.Value == "cc" {
+			m.agents.cursor = i
+		}
+	}
+	m = update(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if len(m.visible) != 1 || m.visible[0].SessionID != "claude:cc:1" {
+		t.Errorf("filtering by install cc gave %+v, want only claude:cc:1", m.visible)
+	}
+}
+
+// ---------------------------------------------------------------------
+// Detail: install and group lines (change group-sessions-in-one-index)
+// ---------------------------------------------------------------------
+
+func TestDetailShowsInstallAndGroupLines(t *testing.T) {
+	db := browseTestDB(t)
+	groups := []config.Group{{Name: "work", Paths: []string{"/Users/x/work"}}}
+	seedBrowseSession(t, db, "D0", "claude:acct:1", "acct", 1, map[string]any{"install": "acct", "cwd": "/Users/x/work/api"})
+	m := newTestBrowser(db, "acct", BrowserOptions{
+		Groups: groups,
+		Installs: func() []profile.Profile {
+			return []profile.Profile{{Name: "acct", Roots: map[string]string{"claude": "/home/me/.claude-acct"}}}
+		},
+		InstallLabels: map[string]string{"acct": "cc"},
+	})
+	it := m.visible[0]
+	got := renderItemDetail(m.db, it, m.groups, m.installInfo, RenderOptions{Width: 100})
+	if !strings.Contains(got, "install: cc (") || !strings.Contains(got, ".claude-acct)") {
+		t.Errorf("detail pane does not show the install label and its root:\n%s", got)
+	}
+	if !strings.Contains(got, "group:  work (path") {
+		t.Errorf("detail pane does not show the group and its path provenance:\n%s", got)
+	}
+}
+
+func TestDetailGroupLineVariants(t *testing.T) {
+	m := groupFixtureBrowser(t)
+	items, err := search.List(m.db, search.Filter{Groups: m.groups, ShowAll: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]search.Item{}
+	for _, it := range items {
+		byID[it.SessionID] = it
+	}
+
+	manual := renderItemDetail(m.db, byID["claude:p:g5"], m.groups, m.installInfo, RenderOptions{Width: 100})
+	if !strings.Contains(manual, "group:  work (set manually)") {
+		t.Errorf("manual group line wrong:\n%s", manual)
+	}
+	unknown := renderItemDetail(m.db, byID["claude:p:g3"], m.groups, m.installInfo, RenderOptions{Width: 100})
+	if !strings.Contains(unknown, "group:  unknown") {
+		t.Errorf("unknown group line wrong:\n%s", unknown)
+	}
+}
+
+func TestDetailNoGroupLineWithZeroConfig(t *testing.T) {
+	m := fixtureBrowser(t)
+	it := m.visible[0]
+	got := renderItemDetail(m.db, it, m.groups, m.installInfo, RenderOptions{Width: 100})
+	if strings.Contains(got, "group:") {
+		t.Errorf("detail pane shows a group line with no groups configured:\n%s", got)
+	}
+}
+
+// ---------------------------------------------------------------------
+// Transcript tab: install resolution (change group-sessions-in-one-index)
+// ---------------------------------------------------------------------
+
+// TestInstallForResolvesTheSessionsOwnInstall covers what the Transcript
+// tab (and now the Detail tab's install line) depends on for a
+// database-backed source like hermes: the install embedded in the
+// session's own composite id, never "the profile being browsed" - a notion
+// that no longer exists once one browsing session covers every install's
+// data together.
+func TestInstallForResolvesTheSessionsOwnInstall(t *testing.T) {
+	m := newTestBrowser(browseTestDB(t), "unused", BrowserOptions{
+		Installs: testInstalls("claude-personal", "hermes-work"),
+	})
+	it := search.Item{SessionID: "hermes:hermes-work:abc123", Source: "hermes"}
+	p, err := m.installFor(it)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Name != "hermes-work" {
+		t.Errorf("installFor resolved %q, want hermes-work (the session's own install)", p.Name)
+	}
+}
+
+// TestAgentsPanelInstallSelectionDoesNotLeakSiblingInstallSessions is the
+// regression test for a real bug: matching an Agents panel selection
+// against "it.Install == v OR it.Source == v" is wrong whenever one
+// install is literally named the same as its own multi-install source -
+// internal/profile.installName's ordinary result for a primary claude root -
+// because the source half of that OR
+// matches every install of the source, silently widening "this one
+// install" back out to "every install of it". Two installs both sourced
+// from "claude" - one of them named "claude" itself - is exactly that
+// shape.
+func TestAgentsPanelInstallSelectionDoesNotLeakSiblingInstallSessions(t *testing.T) {
+	db := browseTestDB(t)
+	seedBrowseSession(t, db, "W0", "claude:claude:1", "claude", 1, map[string]any{"install": "claude", "cwd": "/x/work"})
+	seedBrowseSession(t, db, "W1", "claude:claude:2", "claude", 2, map[string]any{"install": "claude", "cwd": "/x/work"})
+	seedBrowseSession(t, db, "W2", "claude:claude-personal:1", "claude-personal", 3, map[string]any{"install": "claude-personal", "cwd": "/x/work"})
+	labels := map[string]string{"claude": "cc", "claude-personal": "ccp"}
+
+	m := newTestBrowser(db, "p", BrowserOptions{
+		Installs:      testInstalls("claude", "claude-personal"),
+		InstallLabels: labels,
+	})
+	m = update(t, m, keyRunes("2"))
+	for i, r := range m.agents.rows {
+		if r.Value == "claude" {
+			m.agents.cursor = i
+		}
+	}
+	m = update(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if len(m.visible) != 2 {
+		t.Fatalf("selecting the claude install shows %d sessions, want 2 (claude-personal must not leak in): %+v", len(m.visible), m.visible)
+	}
+	for _, it := range m.visible {
+		if it.Install != "claude" {
+			t.Errorf("session %s has install %q, want claude", it.SessionID, it.Install)
+		}
+	}
+
+	// A bare source seed (--agent=claude -> resolveAgentFilter's Agent
+	// return, spanning every install of the source) is the one case that
+	// IS supposed to show every claude session, via the separate
+	// agentSource dimension.
+	src := newTestBrowser(db, "p", BrowserOptions{
+		Agent: "claude", Installs: testInstalls("claude", "claude-personal"), InstallLabels: labels,
+	})
+	if len(src.visible) != 3 {
+		t.Errorf("--agent=claude shows %d sessions, want all 3", len(src.visible))
+	}
+
+	// A label seed (--agent=cc / --agent=ccp -> resolveAgentFilter's
+	// Install return) narrows to the one install it names.
+	cc := newTestBrowser(db, "p", BrowserOptions{
+		Install: "claude", Installs: testInstalls("claude", "claude-personal"), InstallLabels: labels,
+	})
+	if len(cc.visible) != 2 {
+		t.Errorf("--agent=cc shows %d sessions, want 2", len(cc.visible))
+	}
+	ccp := newTestBrowser(db, "p", BrowserOptions{
+		Install: "claude-personal", Installs: testInstalls("claude", "claude-personal"), InstallLabels: labels,
+	})
+	if len(ccp.visible) != 1 {
+		t.Errorf("--agent=ccp shows %d sessions, want 1", len(ccp.visible))
+	}
+}
+
+// TestSessionsPanelUsesInstallLabelsInBadges is the regression test for a
+// real bug: RenderRow itself honours RenderOptions.InstallLabels (row_test.go
+// covers that directly), but the Sessions panel built its own RenderOptions
+// per row without copying installLabels onto it, so every row kept showing
+// the bare source ("[claude]") no matter what BrowserOptions.InstallLabels
+// carried. This renders through sessionsPanel - the actual draw path - not
+// RenderRow in isolation, so it would have caught the gap.
+func TestSessionsPanelUsesInstallLabelsInBadges(t *testing.T) {
+	db := browseTestDB(t)
+	seedBrowseSession(t, db, "B0", "claude:claude:1", "claude", 1, map[string]any{"install": "claude", "cwd": "/x", "client": "sdk-ts"})
+	seedBrowseSession(t, db, "B1", "claude:claude-personal:1", "claude-personal", 2, map[string]any{"install": "claude-personal", "cwd": "/y"})
+	m := newTestBrowser(db, "p", BrowserOptions{
+		Installs:      testInstalls("claude", "claude-personal"),
+		InstallLabels: map[string]string{"claude": "cc", "claude-personal": "ccp"},
+	})
+	g := m.geometry()
+	box := m.sessionsPanel(g)
+	view := strings.Join(box.Lines, "\n")
+	if !strings.Contains(view, "[cc·acp]") {
+		t.Errorf("Sessions panel does not show the labelled+client badge:\n%s", view)
+	}
+	if !strings.Contains(view, "[ccp]") {
+		t.Errorf("Sessions panel does not show the labelled badge:\n%s", view)
+	}
+	if strings.Contains(view, "[claude]") || strings.Contains(view, "[claude·acp]") {
+		t.Errorf("Sessions panel still shows the bare source instead of the install label:\n%s", view)
+	}
+}
+
+// TestSessionsPanelColorsHandleByEffectiveGroup covers change
+// per-group-colors: a session's handle is drawn in its effective group's
+// configured color, and the selected row - drawn in reverse video - still
+// carries that color, since highlightLine re-applies reverse after every
+// field's own reset (TestHighlightLineReappliesReverseAfterFieldResets) the
+// same way it always has for the default bold-cyan handle.
+func TestSessionsPanelColorsHandleByEffectiveGroup(t *testing.T) {
+	db := browseTestDB(t)
+	seedBrowseSession(t, db, "W0", "claude:p:w0", "p", 1, map[string]any{"cwd": "/Users/x/work/api", "last_activity_at": 600})
+	seedBrowseSession(t, db, "U0", "claude:p:u0", "p", 2, map[string]any{"cwd": "/tmp", "last_activity_at": 500})
+
+	groups := []config.Group{{Name: "work", Paths: []string{"/Users/x/work"}, Color: "blue"}}
+	m := newTestBrowser(db, "p", BrowserOptions{
+		Groups:   groups,
+		Installs: testInstalls("claude"),
+		Style:    true,
+	})
+	if len(m.visible) < 2 || m.visible[0].SessionID != "claude:p:w0" {
+		t.Fatalf("fixture ordering assumption broken, m.visible = %+v", m.visible)
+	}
+	m.cursor = 0 // the work-group session, most recently active
+	g := m.geometry()
+	box := m.sessionsPanel(g)
+
+	wantCode := "\x1b[34m" // ansi blue
+	selectedLine := box.Lines[0]
+	if !strings.Contains(selectedLine, ansiReverse) {
+		t.Errorf("selected row is not drawn in reverse video: %q", selectedLine)
+	}
+	if !strings.Contains(selectedLine, wantCode) {
+		t.Errorf("selected row lost its group color: %q", selectedLine)
+	}
+
+	otherLine := box.Lines[1]
+	if strings.Contains(otherLine, wantCode) {
+		t.Errorf("the Unknown-group session's row carries work's color: %q", otherLine)
+	}
+}
+
+// TestGroupsPanelShowsAllRowsWhenTheColumnHasRoom is the regression test
+// for a real bug: the roomy left-column layout capped the Groups panel at
+// 4 content rows (boxHeight's old maxRows), so a config with 2 groups
+// (All, work, personal, Archive, Unknown - 5 rows) always scrolled Unknown
+// out of view even at a generous terminal size, while Tags below it had
+// empty lines to spare. maxGroupsRows is meant to be large enough that a
+// small, config-bounded row count never gets capped this way.
+func TestGroupsPanelShowsAllRowsWhenTheColumnHasRoom(t *testing.T) {
+	m := groupFixtureBrowser(t)
+	m = update(t, m, tea.WindowSizeMsg{Width: 170, Height: 42})
+	if len(m.groups_.rows) != 5 {
+		t.Fatalf("fixture has %d Groups rows, want 5 (All, work, personal, Archive, Unknown)", len(m.groups_.rows))
+	}
+	g := m.geometry()
+	box := m.facetPanel(panelGroups, &m.groups_, g.leftWidth, g.groupsH, m.group)
+	if len(box.Lines) != 5 {
+		t.Errorf("Groups panel draws %d of 5 rows at 170x42 (groupsH=%d): %+v", len(box.Lines), g.groupsH, box.Lines)
+	}
+	if !strings.Contains(strings.Join(box.Lines, "\n"), "Unknown") {
+		t.Errorf("Unknown row is not drawn even with room: %+v", box.Lines)
+	}
+}
+
+// TestGroupsPanelColorsConfiguredGroupNames covers change per-group-colors:
+// a configured group's own name in the Groups panel is drawn in its color,
+// while a group with no configured color and the All/Archive/Unknown rows
+// all keep today's default styling.
+func TestGroupsPanelColorsConfiguredGroupNames(t *testing.T) {
+	db := browseTestDB(t)
+	seedBrowseSession(t, db, "C0", "claude:p:c0", "p", 1, map[string]any{"cwd": "/Users/x/work/api", "last_activity_at": 600})
+	seedBrowseSession(t, db, "C1", "claude:p:c1", "p", 2, map[string]any{"cwd": "/Users/x/personal/proj", "last_activity_at": 500})
+
+	groups := []config.Group{
+		{Name: "work", Paths: []string{"/Users/x/work"}, Color: "blue"},
+		{Name: "personal", Paths: []string{"/Users/x/personal"}}, // no color configured
+	}
+	m := newTestBrowser(db, "p", BrowserOptions{
+		Groups:   groups,
+		Installs: testInstalls("claude"),
+		Style:    true,
+	})
+	m = update(t, m, tea.WindowSizeMsg{Width: 170, Height: 42})
+	g := m.geometry()
+	box := m.facetPanel(panelGroups, &m.groups_, g.leftWidth, g.groupsH, m.group)
+
+	var workLine, personalLine, allLine string
+	for _, l := range box.Lines {
+		switch {
+		case strings.Contains(l, "work"):
+			workLine = l
+		case strings.Contains(l, "personal"):
+			personalLine = l
+		case strings.Contains(l, "All"):
+			allLine = l
+		}
+	}
+	if workLine == "" || personalLine == "" || allLine == "" {
+		t.Fatalf("Groups panel missing an expected row: %+v", box.Lines)
+	}
+	wantCode := "\x1b[34m" // ansi blue
+	if !strings.Contains(workLine, wantCode) {
+		t.Errorf("work row does not carry its configured color %q: %q", wantCode, workLine)
+	}
+	if strings.Contains(personalLine, wantCode) {
+		t.Errorf("personal row (no configured color) carries work's color: %q", personalLine)
+	}
+	if strings.Contains(allLine, wantCode) {
+		t.Errorf("All row carries a group's color: %q", allLine)
+	}
+}
+
+// TestGroupsPanelColorsArchiveAndUnknownRows covers change
+// archive-unknown-colors: the Archive and Unknown rows in the Groups panel
+// are drawn in their own configured colors exactly like a real group's own
+// name already is (TestGroupsPanelColorsConfiguredGroupNames), and default
+// (no escape code) when neither is configured.
+func TestGroupsPanelColorsArchiveAndUnknownRows(t *testing.T) {
+	db := browseTestDB(t)
+	seedBrowseSession(t, db, "G0", "claude:p:g0", "p", 1, map[string]any{"cwd": "/Users/x/work/api", "last_activity_at": 600})
+	seedBrowseSession(t, db, "G1", "claude:p:g1", "p", 2, map[string]any{"cwd": "/tmp", "last_activity_at": 500}) // Unknown
+	seedBrowseSession(t, db, "G2", "claude:p:g2", "p", 3, map[string]any{"cwd": "/Users/x/work/api", "last_activity_at": 400})
+	seedLineageOverride(t, db, "G2", "", true) // archived, counted under Archive
+
+	groups := []config.Group{{Name: "work", Paths: []string{"/Users/x/work"}}}
+	archiveCode, unknownCode := "\x1b[31m", "\x1b[32m" // ansi red, ansi green
+
+	rowsByLabel := func(m *browseModel) map[string]string {
+		m = update(t, m, tea.WindowSizeMsg{Width: 170, Height: 42})
+		g := m.geometry()
+		box := m.facetPanel(panelGroups, &m.groups_, g.leftWidth, g.groupsH, m.group)
+		out := map[string]string{}
+		for _, l := range box.Lines {
+			switch {
+			case strings.Contains(l, "Archive"):
+				out["archive"] = l
+			case strings.Contains(l, "Unknown"):
+				out["unknown"] = l
+			case strings.Contains(l, "All"):
+				out["all"] = l
+			}
+		}
+		return out
+	}
+
+	colored := newTestBrowser(db, "p", BrowserOptions{
+		Groups:       groups,
+		ArchiveColor: "red",
+		UnknownColor: "green",
+		Installs:     testInstalls("claude"),
+		Style:        true,
+	})
+	lines := rowsByLabel(colored)
+	if lines["archive"] == "" || lines["unknown"] == "" || lines["all"] == "" {
+		t.Fatalf("Groups panel missing an expected row: %+v", lines)
+	}
+	if !strings.Contains(lines["archive"], archiveCode) {
+		t.Errorf("Archive row does not carry its configured color %q: %q", archiveCode, lines["archive"])
+	}
+	if !strings.Contains(lines["unknown"], unknownCode) {
+		t.Errorf("Unknown row does not carry its configured color %q: %q", unknownCode, lines["unknown"])
+	}
+	if strings.Contains(lines["all"], archiveCode) || strings.Contains(lines["all"], unknownCode) {
+		t.Errorf("All row carries Archive/Unknown's color: %q", lines["all"])
+	}
+
+	uncolored := newTestBrowser(db, "p", BrowserOptions{
+		Groups:   groups,
+		Installs: testInstalls("claude"),
+		Style:    true,
+	})
+	lines = rowsByLabel(uncolored)
+	// The row still carries the count's own dim styling (like any other
+	// row); what must be absent with nothing configured is specifically the
+	// archive/unknown color codes above.
+	if strings.Contains(lines["archive"], archiveCode) {
+		t.Errorf("Archive row carries a color with none configured: %q", lines["archive"])
+	}
+	if strings.Contains(lines["unknown"], unknownCode) {
+		t.Errorf("Unknown row carries a color with none configured: %q", lines["unknown"])
+	}
+}
+
+// TestGroupsPanelAllCountWithZeroConfig is the regression test for a real
+// bug: with no groups configured, the All row's Count was left at its zero
+// value ("All  0") because groupRows' zero-groups branch returned before
+// ever touching the panel's own counts, while the very same fixture's
+// Sessions list and the Agents panel's own "all agents" row both showed the
+// true count. All's count must equal the number of sessions the All view
+// actually lists, computed from the same source (m.groupItems, via loadAll)
+// whether or not any group is configured. The fixture also archives one
+// session, so this doubles as coverage that the Archive row's own count is
+// unaffected by whatever fixed the All row (change group-sessions-in-one-
+// index's zero-config-plus-archive rule, TestGroupsPanelZeroConfigShows-
+// AllPlusArchiveWhenArchived covers that row's presence and behavior
+// directly).
+func TestGroupsPanelAllCountWithZeroConfig(t *testing.T) {
+	db := browseTestDB(t)
+	for i := 0; i < 4; i++ {
+		seedBrowseSession(t, db, fmt.Sprintf("Z%d", i), fmt.Sprintf("claude:p:z%d", i), "p", i+1,
+			map[string]any{"cwd": "/x", "last_activity_at": int64(1000 - i)})
+	}
+	seedBrowseSession(t, db, "Z4", "claude:p:z4", "p", 5, map[string]any{"cwd": "/x", "last_activity_at": 500})
+	seedLineageOverride(t, db, "Z4", "", true) // archived, excluded from All
+
+	m := newTestBrowser(db, "p", BrowserOptions{Installs: testInstalls("claude")})
+	m = update(t, m, keyRunes("1"))
+	if len(m.groups_.rows) != 2 || m.groups_.rows[0].Value != "" || m.groups_.rows[1].Value != "archive" {
+		t.Fatalf("zero-config Groups panel rows = %+v, want All then Archive", m.groups_.rows)
+	}
+	if m.groups_.rows[0].Count != 4 {
+		t.Errorf("All row count = %d, want 4 (5 sessions minus 1 archived)", m.groups_.rows[0].Count)
+	}
+	if m.groups_.rows[0].Count != len(m.visible) {
+		t.Errorf("All row count (%d) does not match the Sessions list length (%d)", m.groups_.rows[0].Count, len(m.visible))
+	}
+	if m.groups_.rows[1].Count != 1 {
+		t.Errorf("Archive row count = %d, want 1", m.groups_.rows[1].Count)
 	}
 }

@@ -5,8 +5,11 @@
 package cli
 
 import (
+	"fmt"
 	"io"
 	"os"
+	"strconv"
+	"strings"
 )
 
 const (
@@ -20,6 +23,7 @@ const (
 	ansiRed     = "\x1b[31m"
 	ansiGreen   = "\x1b[32m"
 	ansiMagenta = "\x1b[35m"
+	ansiWhite   = "\x1b[37m"
 )
 
 // style wraps s in code when enabled is true, and returns s unchanged
@@ -41,6 +45,23 @@ func style(s, code string, enabled bool) string {
 type RenderOptions struct {
 	Width int
 	Style bool
+
+	// InstallLabels maps an install name (search.Item.Install) to the
+	// display label its row badge should show instead of the bare source -
+	// "[claude]" becomes "[ccp]" (change group-sessions-in-one-index). Built
+	// once per load by InstallLabels, never per row; nil is a valid "no
+	// labels known" value and every source falls back to its own name, the
+	// pre-groups behaviour.
+	InstallLabels map[string]string
+
+	// GroupColors maps a configured group's name (search.Item.Group) to the
+	// raw ANSI escape sequence its sessions' handles - and, in the browser,
+	// its own name in the Groups panel - are drawn in. Built once per load
+	// by GroupColors from config.Config.Groups, never re-parsed per row, the
+	// same discipline InstallLabels follows. nil (or a group with no entry)
+	// is the "no color configured" case and leaves the handle in its
+	// default style.
+	GroupColors map[string]string
 }
 
 // DefaultWidth is used when no output width can be determined at all (not a
@@ -93,6 +114,53 @@ func IsTerminal(f *os.File) bool {
 func isTerminal(f *os.File) bool {
 	_, ok := terminalWidth(f)
 	return ok
+}
+
+// groupColorNames maps a configured group color's normalized form
+// (internal/config.Group.Color, already validated and lowercased by
+// config.Load) to its ANSI SGR foreground parameter. Bright variants use
+// the dedicated high-intensity codes (90-97) rather than "bold + base
+// color" (1;3x), so a bright group color composes with a field that is
+// separately bold (the handle, in slotColor) without either one clobbering
+// the other's bold bit.
+var groupColorNames = map[string]string{
+	"black": "30", "red": "31", "green": "32", "yellow": "33",
+	"blue": "34", "magenta": "35", "cyan": "36", "white": "37",
+	"bright-black": "90", "bright-red": "91", "bright-green": "92", "bright-yellow": "93",
+	"bright-blue": "94", "bright-magenta": "95", "bright-cyan": "96", "bright-white": "97",
+}
+
+// groupAnsiCode converts a config.Group.Color value into the raw escape
+// sequence style() expects - the one place in the program that turns a
+// group's configured color into terminal control bytes, mirroring how
+// slotColor is the one place a row's other colors are chosen. color has
+// already been validated and normalized by internal/config.Load (a name or
+// a lowercased "#rrggbb" hex triplet), so this never has anything to
+// reject; an unrecognized value falls back to "", the "no color" case,
+// rather than panicking on state that should be unreachable.
+func groupAnsiCode(color string) string {
+	if color == "" {
+		return ""
+	}
+	if code, ok := groupColorNames[color]; ok {
+		return "\x1b[" + code + "m"
+	}
+	if r, g, b, ok := parseHexColor(color); ok {
+		return fmt.Sprintf("\x1b[38;2;%d;%d;%dm", r, g, b)
+	}
+	return ""
+}
+
+// parseHexColor reads a "#rrggbb" triplet into its three byte components.
+func parseHexColor(s string) (r, g, b int, ok bool) {
+	if len(s) != 7 || s[0] != '#' {
+		return 0, 0, 0, false
+	}
+	v, err := strconv.ParseInt(strings.ToLower(s[1:]), 16, 32)
+	if err != nil {
+		return 0, 0, 0, false
+	}
+	return int(v >> 16 & 0xff), int(v >> 8 & 0xff), int(v & 0xff), true
 }
 
 func parsePositiveInt(s string) (int, bool) {

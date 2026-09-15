@@ -1,9 +1,9 @@
-// Package refresh is the orchestrator: it calls every adapter for the
-// active profile, drives the transcript reader incrementally, ingests each
-// source's tier-2 prompt index, writes everything to LazyRecall's own database
-// through sqlitex, and keeps lineages/orphans up to date. It is what "every
-// operation refreshes the index before answering" (design.md decision 6)
-// actually runs.
+// Package refresh is the orchestrator: it calls every adapter for every
+// discovered install, drives the transcript reader incrementally, ingests
+// each source's tier-2 prompt index, writes everything to LazyRecall's own
+// single index through sqlitex, and keeps lineages/orphans up to date. It
+// is what "every operation refreshes the index before answering" (design.md
+// decision 6) actually runs.
 package refresh
 
 import (
@@ -12,7 +12,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/rfist/lazyrecall/internal/adapter"
@@ -45,87 +44,72 @@ type Options struct {
 	FullRebuild bool
 }
 
-// SourceStatus reports one source's outcome for this refresh, so a caller
-// can show "which agents are available" (spec session-index, "Source
-// discovery").
+// SourceStatus reports one (source, install) pair's outcome for this
+// refresh, so a caller can show "which agents are available" (spec
+// session-index, "Source discovery"). Install is "" for a source no
+// discovered install carries at all - the same "unavailable" a single
+// install with no root for that source used to report, kept as one row per
+// adapter rather than silently dropped, so `sum.Sources` still names every
+// known source even when nothing on this machine has it (change
+// group-sessions-in-one-index: an adapter is no longer scoped to one
+// profile, so its unavailability is no longer either).
 type SourceStatus struct {
 	Source    string
+	Install   string
 	Available bool
 	Sessions  int
 	Err       error
 }
 
-// Summary is what one refresh pass produced.
+// Summary is what one refresh pass produced, across every install it
+// covered.
 type Summary struct {
-	Profile profile.Profile
-	Sources []SourceStatus
+	Installs []profile.Profile
+	Sources  []SourceStatus
 }
 
-// Refresher runs refresh passes for one profile against one LazyRecall
-// database.
+// Refresher runs one refresh pass over every given install into one shared
+// LazyRecall database (change group-sessions-in-one-index: one index for
+// every install, replacing one database per profile).
 type Refresher struct {
-	Profile     profile.Profile
+	Installs    []profile.Profile
 	DB          *sqlitex.Runner // read-write, LazyRecall's own database
 	SQLite3Path string
 	Now         func() time.Time
+
+	// GitResolve is the resolver Refresh asks about a CWD's git identity;
+	// nil (the default) means gitutil.Resolve. It exists as a seam for
+	// tests to inject a fake or counting resolver instead of shelling out
+	// to a real git binary against real directories (perf fix for the
+	// group-sessions-in-one-index regression, devdocs/fyi.md).
+	GitResolve func(dir string) (gitutil.Info, bool)
 }
 
-// migrateLegacyDataDir moves a pre-rename ~/.recall to the current data
-// directory the first time this version runs (change rename-to-lazyrecall).
-// Everything in there - the per-profile databases, and with them the short
-// handles, comments, and tags that are LazyRecall's own data and cannot be
-// re-derived from any source - would otherwise be orphaned by the rename.
-//
-// It runs only when the new location does not exist yet, so it can never
-// overwrite a live database, and only for the default location: a caller
-// that has set LAZYRECALL_HOME or RECALL_HOME has said where its data is,
-// and moving something else on top of that would be the opposite of what
-// it asked for.
-//
-// A failure here is reported and then ignored rather than returned. The
-// index is a cache of what the sources already hold; the worst case is a
-// rebuild on the next refresh, which is not worth refusing to start over.
-// (The annotations are the part that cannot be rebuilt - which is why the
-// old directory is left untouched on failure, for a later attempt or a
-// manual move, instead of being half-moved.)
-func migrateLegacyDataDir() {
-	if profile.DataDirExplicit() {
-		return
+// installsFor returns the installs, in the order they were given to New,
+// that carry data for source - the ones adapter.Discover should actually be
+// called against for it.
+func (r *Refresher) installsFor(source string) []profile.Profile {
+	var out []profile.Profile
+	for _, p := range r.Installs {
+		if p.Roots[source] != "" {
+			out = append(out, p)
+		}
 	}
-	newDir, oldDir := profile.DataDir(), profile.LegacyDataDir()
-	if newDir == oldDir {
-		return
-	}
-	if _, err := os.Stat(newDir); err == nil {
-		return
-	}
-	if fi, err := os.Stat(oldDir); err != nil || !fi.IsDir() {
-		return
-	}
-	if err := os.MkdirAll(filepath.Dir(newDir), 0o755); err != nil {
-		fmt.Fprintf(os.Stderr, "lazyrecall: could not prepare %s (%v); leaving %s in place\n", newDir, err, oldDir)
-		return
-	}
-	if err := os.Rename(oldDir, newDir); err != nil {
-		fmt.Fprintf(os.Stderr, "lazyrecall: could not move %s to %s (%v); starting a fresh index\n", oldDir, newDir, err)
-		return
-	}
-	fmt.Fprintf(os.Stderr, "lazyrecall: moved %s to %s\n", oldDir, newDir)
+	return out
 }
 
-// New opens (creating and migrating if needed) the database for p and
-// returns a Refresher for it.
-func New(p profile.Profile, sqlite3Path string) (*Refresher, error) {
-	migrateLegacyDataDir()
-	dbPath := profile.DBPath(p)
+// New opens (creating the data directory as needed) the single index and
+// returns a Refresher that will refresh it over installs.
+func New(installs []profile.Profile, sqlite3Path string) (*Refresher, error) {
 	if err := os.MkdirAll(profile.DataDir(), 0o755); err != nil {
 		return nil, fmt.Errorf("refresh: creating %s: %w", profile.DataDir(), err)
 	}
+	dbPath := profile.DBPath()
 	db := &sqlitex.Runner{BinPath: sqlite3Path, DBPath: dbPath}
 	if _, err := schema.Open(db); err != nil {
-		return nil, fmt.Errorf("refresh: opening database for profile %s: %w", p.Name, err)
+		return nil, fmt.Errorf("refresh: opening the index: %w", err)
 	}
-	return &Refresher{Profile: p, DB: db, SQLite3Path: sqlite3Path, Now: time.Now}, nil
+	return &Refresher{Installs: installs, DB: db, SQLite3Path: sqlite3Path, Now: time.Now}, nil
 }
 
 func (r *Refresher) adapters() []adapter.Adapter {
@@ -175,118 +159,171 @@ func (r *Refresher) Refresh(opts Options) (Summary, error) {
 		return Summary{}, err
 	}
 
-	sum := Summary{Profile: r.Profile}
+	sum := Summary{Installs: r.Installs}
 	var sessionRecords []map[string]any
 	var promptRecords []map[string]any
 	var cursorRecords []map[string]any
 	observedLineages := map[string]bool{}
 	fallbackPrompts := map[string][]transcript.PromptText{} // adapter.Discover's raw session id -> transcript-extracted prompts
+	gitMemo := map[string]gitMemoEntry{}                    // one distinct CWD resolved at most once for this whole pass, across every install/source (gitResolveCached)
 
 	// hermes sessions are collected first so claude/pi/omp lineage linking
 	// (task 9.3, "each source's continuation and fork markers") has no
 	// cross-source dependency to worry about - every source resolves its
 	// own continuation chain independently.
+	//
+	// Every adapter now runs once per install that carries its source
+	// (change group-sessions-in-one-index), instead of once per refresh
+	// pass against a single profile: two claude roots are two installs, and
+	// each is scanned and written into the same shared index. An adapter
+	// with no install at all still gets one "unavailable" status row, by
+	// calling it against an empty Profile - the same outcome a.Discover
+	// itself reports for a missing root, kept here so sum.Sources still
+	// names every known source (spec session-index, "Some agents are not
+	// installed").
 	for _, a := range r.adapters() {
-		status := SourceStatus{Source: a.Name()}
-		discovered, derr := a.Discover(r.Profile)
-		if derr != nil {
-			status.Available = false
+		installs := r.installsFor(a.Name())
+		if len(installs) == 0 {
+			status := SourceStatus{Source: a.Name()}
+			_, derr := a.Discover(profile.Profile{})
 			status.Err = derr
 			sum.Sources = append(sum.Sources, status)
 			continue
 		}
-		status.Available = true
 
-		bySourceID := map[string]session.Session{}
-		for _, d := range discovered {
-			bySourceID[d.Session.SourceSessionID] = d.Session
-		}
-
-		for _, d := range discovered {
-			s := d.Session
-			rawID := d.Session.ID // adapter.Discover's own composite id, before any correction below - the fallbackPrompts key tier2ForSource looks up by (it walks the same discovered slice, never the corrected s)
-			prior := existing.priorFor(s.ID, d.TranscriptPath)
-
-			replaced := false
-			if d.TranscriptPath != "" {
-				var cursorRow map[string]any
-				var prompts []transcript.PromptText
-				s, cursorRow, prompts, replaced = r.applyTranscript(s, d, prior, cursors[cursorKey(a.Name(), s.SourceSessionID)])
-				cursorRecords = append(cursorRecords, cursorRow)
-				if len(prompts) > 0 {
-					fallbackPrompts[rawID] = prompts
-				}
+		for _, p := range installs {
+			status := SourceStatus{Source: a.Name(), Install: p.Name}
+			discovered, derr := a.Discover(p)
+			if derr != nil {
+				status.Available = false
+				status.Err = derr
+				sum.Sources = append(sum.Sources, status)
+				continue
 			}
-			// hermes (TranscriptPath == ""): fully re-derived from its own
-			// DB every pass by the adapter already - hermes is
-			// authoritative about its own end state, nothing more to layer
-			// on here.
+			status.Available = true
 
-			// LazyRecall's own composite id is "<source>:<profile>:<source
-			// session id>" (session.Session.ID doc comment) - recomputed
-			// here now that applyTranscript may have corrected
-			// SourceSessionID from the file-derived value adapter.Discover
-			// supplied to the source's own recorded identifier (change
-			// fix-resume-session-identity, design.md decision 1). Everything
-			// downstream - the DB primary key, the lineage root, and the
-			// resume path's cmd/lazyrecall/main.go, which recovers
-			// SourceSessionID by splitting this same composite id - must see
-			// the corrected value consistently.
-			s.ID = s.Source + ":" + r.Profile.Name + ":" + s.SourceSessionID
-
-			// dir_exists: checked opportunistically here so listings never
-			// need to stat the filesystem themselves (spec session-search,
-			// "Missing working directories are marked").
-			if s.CWD != nil {
-				exists := dirExists(*s.CWD)
-				s.DirExists = &exists
+			bySourceID := map[string]session.Session{}
+			for _, d := range discovered {
+				bySourceID[d.Session.SourceSessionID] = d.Session
 			}
 
-			// Git identity (repo root + the canonical root worktrees
-			// share) is resolved once and then cached via the prior-row merge
-			// below - it costs a git subprocess call only the first time a
-			// session's directory is seen to exist and nothing is known yet
-			// (spec session-search, "Grouping by repository and worktree").
-			// A replaced transcript is not eligible for that cache: its CWD
-			// evidence was re-derived from new bytes, so the old CWD's
-			// repository identity is stale rather than a useful fallback.
-			if prior != nil && !replaced {
-				if s.GitRepoRoot == nil {
-					s.GitRepoRoot = prior.GitRepoRoot
-				}
-				if s.GitCommonRoot == nil {
-					s.GitCommonRoot = prior.GitCommonRoot
-				}
-			}
-			if s.GitCommonRoot == nil && s.CWD != nil && s.DirExists != nil && *s.DirExists {
-				if info, ok := gitutil.Resolve(*s.CWD); ok {
-					if s.GitRepoRoot == nil {
-						// Only fill this in if the source didn't already
-						// record it (hermes does) - never substitute a
-						// derived value for one the source provided.
-						s.GitRepoRoot = &info.RepoRoot
+			for _, d := range discovered {
+				s := d.Session
+				rawID := d.Session.ID // adapter.Discover's own composite id, before any correction below - the fallbackPrompts key tier2ForSource looks up by (it walks the same discovered slice, never the corrected s)
+				prior := existing.priorFor(s.ID, d.TranscriptPath)
+
+				replaced := false
+				if d.TranscriptPath != "" {
+					var cursorRow map[string]any
+					var prompts []transcript.PromptText
+					s, cursorRow, prompts, replaced = r.applyTranscript(s, d, prior, cursors[cursorKey(a.Name(), s.SourceSessionID)])
+					cursorRecords = append(cursorRecords, cursorRow)
+					if len(prompts) > 0 {
+						fallbackPrompts[rawID] = prompts
 					}
-					s.GitCommonRoot = &info.CommonRoot
 				}
+				// hermes (TranscriptPath == ""): fully re-derived from its own
+				// DB every pass by the adapter already - hermes is
+				// authoritative about its own end state, nothing more to layer
+				// on here.
+
+				// LazyRecall's own composite id is "<source>:<install>:<source
+				// session id>" (session.Session.ID doc comment) - recomputed
+				// here now that applyTranscript may have corrected
+				// SourceSessionID from the file-derived value adapter.Discover
+				// supplied to the source's own recorded identifier (change
+				// fix-resume-session-identity, design.md decision 1). Everything
+				// downstream - the DB primary key, the lineage root, and the
+				// resume path's cmd/lazyrecall/main.go, which recovers
+				// SourceSessionID by splitting this same composite id - must see
+				// the corrected value consistently.
+				s.ID = s.Source + ":" + p.Name + ":" + s.SourceSessionID
+				s.Profile = p.Name // written out as sessions.install (sessionToRecord)
+
+				// dir_exists: checked opportunistically here so listings never
+				// need to stat the filesystem themselves (spec session-search,
+				// "Missing working directories are marked").
+				if s.CWD != nil {
+					exists := dirExists(*s.CWD)
+					s.DirExists = &exists
+				}
+
+				// Git identity (repo root + the canonical root worktrees
+				// share) is resolved once and then cached via the prior-row merge
+				// below - it costs a git subprocess call only the first time a
+				// session's directory is seen to exist and nothing is known yet
+				// (spec session-search, "Grouping by repository and worktree").
+				// A replaced transcript is not eligible for that cache: its CWD
+				// evidence was re-derived from new bytes, so the old CWD's
+				// repository identity is stale rather than a useful fallback.
+				if prior != nil && !replaced {
+					if s.GitRepoRoot == nil {
+						s.GitRepoRoot = prior.GitRepoRoot
+					}
+					if s.GitCommonRoot == nil {
+						s.GitCommonRoot = prior.GitCommonRoot
+					}
+				}
+				switch {
+				case s.GitCommonRoot != nil:
+					// Already known, either just merged forward above or
+					// supplied directly by the source (hermes) - nothing left
+					// to ask git.
+					s.GitResolved = true
+				case prior != nil && !replaced && prior.GitResolved && samePtrString(prior.CWD, s.CWD) && !dirNewlyExists(prior, s.DirExists):
+					// Same CWD as last time, and a prior pass already asked
+					// git about it and came up with nothing further
+					// (git_resolved, schema v9). The two root columns alone
+					// can't tell "never asked" from "asked, and this really
+					// isn't a git repository" - both read back nil - so
+					// without this a non-repo CWD re-ran git on every single
+					// session, on every single refresh, forever: 95 calls a
+					// pass for one real directory, measured in this fix
+					// (devdocs/fyi.md). Git state changes rarely enough that
+					// today's rule already accepts this same staleness for a
+					// directory that *is* a repo (the merge above); trusting
+					// a recorded "no repo" for one whose CWD and dir-exists
+					// state have not changed is the same bet.
+					s.GitResolved = true
+				case s.CWD != nil && s.DirExists != nil && *s.DirExists:
+					// Ask git at most once per distinct CWD in this whole
+					// pass (gitMemo), not once per session in that CWD.
+					if info, ok := r.gitResolveCached(gitMemo, *s.CWD); ok {
+						if s.GitRepoRoot == nil {
+							// Only fill this in if the source didn't already
+							// record it (hermes does) - never substitute a
+							// derived value for one the source provided.
+							s.GitRepoRoot = &info.RepoRoot
+						}
+						s.GitCommonRoot = &info.CommonRoot
+					}
+					s.GitResolved = true
+				default:
+					// No known CWD, or its directory doesn't exist (yet):
+					// leave GitResolved false, so a later pass tries again
+					// once the directory appears or a CWD becomes known,
+					// rather than caching a determination that was never
+					// actually made.
+				}
+
+				lineageID := resolveLineage(a.Name(), p.Name, s, bySourceID)
+				s.LineageID = lineageID
+				observedLineages[lineageID] = true
+
+				sessionRecords = append(sessionRecords, sessionToRecord(s))
+				status.Sessions++
 			}
 
-			lineageID := resolveLineage(a.Name(), r.Profile.Name, s, bySourceID)
-			s.LineageID = lineageID
-			observedLineages[lineageID] = true
+			sum.Sources = append(sum.Sources, status)
 
-			sessionRecords = append(sessionRecords, sessionToRecord(s))
-			status.Sessions++
-		}
-
-		sum.Sources = append(sum.Sources, status)
-
-		// Tier 2: each source's own prompt index first, transcript
-		// extraction as the fallback for whatever it doesn't cover (task
-		// 6.4).
-		prompts, newCursorRows, terr := r.tier2ForSource(a.Name(), cursors, discovered, fallbackPrompts)
-		if terr == nil {
-			promptRecords = append(promptRecords, prompts...)
-			cursorRecords = append(cursorRecords, newCursorRows...)
+			// Tier 2: each source's own prompt index first, transcript
+			// extraction as the fallback for whatever it doesn't cover (task
+			// 6.4).
+			prompts, newCursorRows, terr := r.tier2ForSource(a.Name(), p, cursors, discovered, fallbackPrompts)
+			if terr == nil {
+				promptRecords = append(promptRecords, prompts...)
+				cursorRecords = append(cursorRecords, newCursorRows...)
+			}
 		}
 	}
 
@@ -300,6 +337,54 @@ func (r *Refresher) Refresh(opts Options) (Summary, error) {
 		return sum, err
 	}
 	return sum, nil
+}
+
+// gitMemoEntry is one distinct CWD's git identity, resolved at most once
+// per refresh pass (gitResolveCached's memo) rather than once per session -
+// the per-pass half of the fix; git_resolved, folded forward through
+// existingSessions/session.Session, is the cross-pass half (devdocs/fyi.md).
+type gitMemoEntry struct {
+	info gitutil.Info
+	ok   bool
+}
+
+// gitResolveCached resolves dir's git identity through r.GitResolve
+// (defaulting to gitutil.Resolve), consulting and populating memo first so
+// that every session sharing a CWD within one pass - 95 of them, for one
+// real, non-repo directory measured in this fix - costs at most one git
+// subprocess call instead of one per session.
+func (r *Refresher) gitResolveCached(memo map[string]gitMemoEntry, dir string) (gitutil.Info, bool) {
+	if e, ok := memo[dir]; ok {
+		return e.info, e.ok
+	}
+	resolve := gitutil.Resolve
+	if r.GitResolve != nil {
+		resolve = r.GitResolve
+	}
+	info, ok := resolve(dir)
+	memo[dir] = gitMemoEntry{info: info, ok: ok}
+	return info, ok
+}
+
+// samePtrString reports whether two optional strings hold the same value:
+// both nil, or both non-nil and equal.
+func samePtrString(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
+// dirNewlyExists reports whether curExists says a directory exists now that
+// prior's own last check did not (nil counts as "didn't"). A prior "not a
+// git repository" result must not be trusted forward across that
+// transition: the directory could be a freshly created repo, and prior's
+// git_resolved says only that git was asked about *some* state of this CWD,
+// not this one.
+func dirNewlyExists(prior *session.Session, curExists *bool) bool {
+	now := curExists != nil && *curExists
+	was := prior != nil && prior.DirExists != nil && *prior.DirExists
+	return now && !was
 }
 
 func dirExists(path string) bool {
@@ -335,10 +420,12 @@ func sessionToRecord(s session.Session) map[string]any {
 		"source":            s.Source,
 		"source_session_id": s.SourceSessionID,
 		"lineage_id":        s.LineageID,
+		"install":           s.Profile,
 		"end_state":         string(s.EndState),
 		"origin":            string(s.Origin),
 		"human_prompt":      boolToInt(s.HumanPrompt),
 		"resumable":         boolToInt(s.Resumable),
+		"git_resolved":      boolToInt(s.GitResolved),
 	}
 	if s.ContinuesFrom != nil {
 		rec["continues_from"] = *s.ContinuesFrom

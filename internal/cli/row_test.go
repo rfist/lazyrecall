@@ -8,6 +8,8 @@ import (
 
 	"github.com/mattn/go-runewidth"
 
+	"github.com/rfist/lazyrecall/internal/config"
+	"github.com/rfist/lazyrecall/internal/profile"
 	"github.com/rfist/lazyrecall/internal/search"
 )
 
@@ -332,7 +334,7 @@ func TestRenderRowStylingDistinguishesEveryField(t *testing.T) {
 		LastActivityAt: &at, EndState: "completed", Topic: strp("a topic"),
 	}
 	line := RenderRow(it, RenderOptions{Width: 120, Style: true})
-	for _, code := range []string{ansiBold + ansiCyan, ansiDim, ansiItalic, ansiGreen, ansiRed} {
+	for _, code := range []string{ansiBold + ansiWhite, ansiDim, ansiItalic, ansiGreen, ansiRed} {
 		if !strings.Contains(line, code) {
 			t.Errorf("expected styling code %q to appear (handle/source-or-age/topic/state/missing-location distinguishers), got %q", code, line)
 		}
@@ -520,5 +522,252 @@ func TestRenderRowShowsClientBesideAgent(t *testing.T) {
 	line = RenderRow(unknown, RenderOptions{Width: 200, Style: false})
 	if !strings.Contains(line, "[claude·vscode]") {
 		t.Errorf("an unrecognised client should still be shown: %q", line)
+	}
+}
+
+// TestRenderRowShowsInstallLabelInBadge covers the badge half of change
+// group-sessions-in-one-index: the source part of "[claude]" becomes the
+// session's install label when one is configured, so two Claude accounts
+// read as two different badges instead of both reading "[claude]" now that
+// one browsing session shows every install together.
+func TestRenderRowShowsInstallLabelInBadge(t *testing.T) {
+	labels := map[string]string{"claude": "cc", "claude-personal": "ccp"}
+	work := search.Item{SessionID: "claude:claude:1", Source: "claude", Install: "claude", Handle: 1,
+		CWD: strp("/Users/example/project"), EndState: "completed"}
+	personal := work
+	personal.SessionID = "claude:claude-personal:2"
+	personal.Install = "claude-personal"
+
+	if line := RenderRow(work, RenderOptions{Width: 200, InstallLabels: labels}); !strings.Contains(line, "[cc]") {
+		t.Errorf("labelled install should show its label: %q", line)
+	}
+	if line := RenderRow(personal, RenderOptions{Width: 200, InstallLabels: labels}); !strings.Contains(line, "[ccp]") {
+		t.Errorf("labelled install should show its label: %q", line)
+	}
+
+	// The client suffix rides along after the label, unchanged.
+	personal.Client = strp("sdk-ts")
+	if line := RenderRow(personal, RenderOptions{Width: 200, InstallLabels: labels}); !strings.Contains(line, "[ccp·acp]") {
+		t.Errorf("labelled install should keep the client qualifier: %q", line)
+	}
+}
+
+// TestRenderRowUnlabelledInstallShowsInstallName covers InstallLabels'
+// built-in fallback: an install with no configured label (or with no labels
+// map at all) shows its own install name rather than the bare source -
+// InstallLabels always seeds a map entry from profile.Discover(), even
+// unlabelled, so two differently-named Claude installs are distinguishable
+// by default.
+func TestRenderRowUnlabelledInstallShowsInstallName(t *testing.T) {
+	labels := map[string]string{"claude": "claude", "claude-personal": "claude-personal"}
+	it := search.Item{SessionID: "claude:claude-personal:1", Source: "claude", Install: "claude-personal",
+		Handle: 1, CWD: strp("/Users/example/project"), EndState: "completed"}
+	if line := RenderRow(it, RenderOptions{Width: 200, InstallLabels: labels}); !strings.Contains(line, "[claude-personal]") {
+		t.Errorf("unlabelled install should show its own name: %q", line)
+	}
+
+	// No labels map at all (nil) is the pre-groups behaviour: every row
+	// falls back to its bare source.
+	if line := RenderRow(it, RenderOptions{Width: 200}); !strings.Contains(line, "[claude]") {
+		t.Errorf("with no labels map, the row should fall back to the bare source: %q", line)
+	}
+}
+
+// TestRenderRowLongBadgeStillFitsNarrowWidth covers the width-budget side
+// of the badge change: a long label ("claude-personal") must still cascade
+// through fitRowToWidth's shrink order exactly like a long topic or
+// location would, never pushing the row past its budget.
+func TestRenderRowLongBadgeStillFitsNarrowWidth(t *testing.T) {
+	labels := map[string]string{"claude-personal": "claude-personal"}
+	it := longItem()
+	it.Install = "claude-personal"
+	for _, width := range []int{80, 40, 20, 12} {
+		line := RenderRow(it, RenderOptions{Width: width, InstallLabels: labels})
+		if w := runewidth.StringWidth(line); w > width {
+			t.Errorf("width %d: row is %d columns wide with a long install badge: %q", width, w, line)
+		}
+	}
+}
+
+// TestInstallLabels covers the install-name -> label map builder: a
+// configured label wins, and an install with none falls back to its own
+// name (profile.Profile.Label's own rule, exercised here through the
+// builder every row renderer and the Agents panel share).
+func TestInstallLabels(t *testing.T) {
+	cfg := config.Config{Labels: map[string]string{"/home/me/.claude": "cc"}}
+	installs := []profile.Profile{
+		{Name: "claude", Roots: map[string]string{"claude": "/home/me/.claude"}},
+		{Name: "claude-personal", Roots: map[string]string{"claude": "/home/me/.claude-personal"}},
+	}
+	got := InstallLabels(installs, cfg)
+	if got["claude"] != "cc" {
+		t.Errorf(`InstallLabels()["claude"] = %q, want "cc"`, got["claude"])
+	}
+	if got["claude-personal"] != "claude-personal" {
+		t.Errorf(`InstallLabels()["claude-personal"] = %q, want "claude-personal" (no label configured)`, got["claude-personal"])
+	}
+}
+
+// ---------------------------------------------------------------------
+// Per-group colors (change per-group-colors)
+// ---------------------------------------------------------------------
+
+// TestGroupColors covers the group-name -> ANSI-code map builder: a
+// configured name and a configured hex both resolve to their escape
+// sequence, a group with no color contributes no entry, and no groups and no
+// archive/unknown color at all yields a nil map - the same "nothing
+// configured, no key present" shape InstallLabels uses for labels with no
+// matching root.
+func TestGroupColors(t *testing.T) {
+	groups := []config.Group{
+		{Name: "work", Color: "blue"},
+		{Name: "personal", Color: "#3355ff"},
+		{Name: "misc"},
+	}
+	got := GroupColors(groups, "", "")
+	if got["work"] != "\x1b[34m" {
+		t.Errorf(`GroupColors()["work"] = %q, want "\x1b[34m"`, got["work"])
+	}
+	if got["personal"] != "\x1b[38;2;51;85;255m" {
+		t.Errorf(`GroupColors()["personal"] = %q, want the 24-bit truecolor escape`, got["personal"])
+	}
+	if _, ok := got["misc"]; ok {
+		t.Errorf("GroupColors()[%q] present for a group with no configured color: %q", "misc", got["misc"])
+	}
+	if got := GroupColors(nil, "", ""); got != nil {
+		t.Errorf(`GroupColors(nil, "", "") = %v, want nil`, got)
+	}
+}
+
+// TestGroupColorsArchiveAndUnknown covers change archive-unknown-colors: the
+// built-in Archive and Unknown views' colors land in the same map under the
+// literal keys "archive" and "unknown", alongside any real groups, with no
+// collision - config.Load never lets a real group claim either name.
+func TestGroupColorsArchiveAndUnknown(t *testing.T) {
+	groups := []config.Group{{Name: "work", Color: "blue"}}
+	got := GroupColors(groups, "red", "white")
+	if got["archive"] != "\x1b[31m" {
+		t.Errorf(`GroupColors()["archive"] = %q, want "\x1b[31m"`, got["archive"])
+	}
+	if got["unknown"] != "\x1b[37m" {
+		t.Errorf(`GroupColors()["unknown"] = %q, want "\x1b[37m"`, got["unknown"])
+	}
+	if got["work"] != "\x1b[34m" {
+		t.Errorf(`GroupColors()["work"] = %q, want "\x1b[34m" (unaffected by archive/unknown)`, got["work"])
+	}
+
+	if got := GroupColors(nil, "", ""); got != nil {
+		t.Errorf(`GroupColors(nil, "", "") = %v, want nil`, got)
+	}
+}
+
+// TestRenderRowHandleUsesGroupColor covers the row renderer's half of
+// change per-group-colors: a session's handle is drawn in its effective
+// group's configured color when RenderOptions.GroupColors has an entry for
+// it, replacing the default bold white rather than being layered under it -
+// "apply the color only as foreground" (see the browser's selected-row
+// styling, which relies on this being a single style() wrap to stay
+// readable in reverse video).
+func TestRenderRowHandleUsesGroupColor(t *testing.T) {
+	colors := map[string]string{"work": "\x1b[34m"}
+	it := search.Item{SessionID: "claude:p:1", Source: "claude", Handle: 904, EndState: "completed", Group: "work"}
+	line := RenderRow(it, RenderOptions{Width: 200, Style: true, GroupColors: colors})
+	if !strings.Contains(line, "\x1b[34m#904"+ansiReset) {
+		t.Errorf("expected the handle to be wrapped in the group's color with no other code, got %q", line)
+	}
+	if strings.Contains(line, ansiBold+ansiWhite) {
+		t.Errorf("expected the group color to replace the default bold-white handle style, got %q", line)
+	}
+}
+
+// TestRenderRowHandleDefaultsWithoutGroupColor covers the fallback cases:
+// a session with no effective group, a group with no configured color, and
+// a nil GroupColors map altogether all get the default bold white handle
+// (change archive-unknown-colors: white replaced the old bold cyan).
+func TestRenderRowHandleDefaultsWithoutGroupColor(t *testing.T) {
+	colors := map[string]string{"work": "\x1b[34m"}
+	cases := []struct {
+		name string
+		it   search.Item
+		opts RenderOptions
+	}{
+		{"no group", search.Item{SessionID: "claude:p:1", Source: "claude", Handle: 1, EndState: "completed"}, RenderOptions{Width: 200, Style: true, GroupColors: colors}},
+		{"group with no configured color", search.Item{SessionID: "claude:p:2", Source: "claude", Handle: 2, EndState: "completed", Group: "misc"}, RenderOptions{Width: 200, Style: true, GroupColors: colors}},
+		{"nil GroupColors", search.Item{SessionID: "claude:p:3", Source: "claude", Handle: 3, EndState: "completed", Group: "work"}, RenderOptions{Width: 200, Style: true}},
+	}
+	for _, c := range cases {
+		line := RenderRow(c.it, c.opts)
+		if !strings.Contains(line, ansiBold+ansiWhite) {
+			t.Errorf("%s: expected the default bold-white handle style, got %q", c.name, line)
+		}
+	}
+}
+
+// TestRenderRowNoGroupColorWhenStyleDisabled covers the NO_COLOR /
+// non-terminal path: a configured group color must never leak an escape
+// code into unstyled output, the same contract every other field's styling
+// already keeps (TestRenderRowNoStylingWhenDisabled).
+func TestRenderRowNoGroupColorWhenStyleDisabled(t *testing.T) {
+	colors := map[string]string{"work": "\x1b[34m"}
+	it := search.Item{SessionID: "claude:p:1", Source: "claude", Handle: 904, EndState: "completed", Group: "work"}
+	line := RenderRow(it, RenderOptions{Width: 200, Style: false, GroupColors: colors})
+	if strings.Contains(line, "\x1b[") {
+		t.Errorf("expected no ANSI escape codes when Style is false, got %q", line)
+	}
+	if !strings.Contains(line, "#904") {
+		t.Errorf("expected the plain handle text to still be present, got %q", line)
+	}
+}
+
+// TestRenderRowHandleArchiveUnknownPrecedence covers change
+// archive-unknown-colors' precedence rules for the handle color, in the
+// order they are meant to be checked: archived+colored beats the session's
+// own group color; the group color applies when the session isn't archived
+// (or archive has no color); unknown+colored applies only when the session
+// has no group at all; and a configured group with no color of its own
+// falls to the default white, never to the unknown color, since the session
+// does have a group - it just isn't colored.
+func TestRenderRowHandleArchiveUnknownPrecedence(t *testing.T) {
+	colors := map[string]string{"work": "\x1b[34m", "archive": "\x1b[31m", "unknown": "\x1b[37m"}
+
+	cases := []struct {
+		name string
+		it   search.Item
+		want string
+	}{
+		{
+			name: "archived and colored beats the group color",
+			it:   search.Item{SessionID: "claude:p:1", Source: "claude", Handle: 1, EndState: "completed", Group: "work", Archived: true},
+			want: "\x1b[31m",
+		},
+		{
+			name: "group color applies when not archived",
+			it:   search.Item{SessionID: "claude:p:2", Source: "claude", Handle: 2, EndState: "completed", Group: "work"},
+			want: "\x1b[34m",
+		},
+		{
+			name: "unknown and colored applies with no group",
+			it:   search.Item{SessionID: "claude:p:3", Source: "claude", Handle: 3, EndState: "completed"},
+			want: "\x1b[37m",
+		},
+		{
+			name: "a configured group with no color of its own is white, not the unknown color",
+			it:   search.Item{SessionID: "claude:p:4", Source: "claude", Handle: 4, EndState: "completed", Group: "misc"},
+			want: ansiBold + ansiWhite,
+		},
+	}
+	for _, c := range cases {
+		line := RenderRow(c.it, RenderOptions{Width: 200, Style: true, GroupColors: colors})
+		if !strings.Contains(line, c.want) {
+			t.Errorf("%s: line %q does not contain %q", c.name, line, c.want)
+		}
+	}
+
+	// Archived without an archive color still falls through to the group
+	// color, exactly like an unarchived session would.
+	archivedNoArchiveColor := search.Item{SessionID: "claude:p:5", Source: "claude", Handle: 5, EndState: "completed", Group: "work", Archived: true}
+	line := RenderRow(archivedNoArchiveColor, RenderOptions{Width: 200, Style: true, GroupColors: map[string]string{"work": "\x1b[34m"}})
+	if !strings.Contains(line, "\x1b[34m#5") {
+		t.Errorf("archived with no archive color: expected the group color to apply, got %q", line)
 	}
 }

@@ -76,7 +76,7 @@ INSERT INTO messages (session_id, role, content, finish_reason, timestamp) VALUE
 	}
 	before := snapshot(t, sources)
 
-	r, err := New(p, bin)
+	r, err := New([]profile.Profile{p}, bin)
 	if err != nil {
 		t.Fatal(err)
 	}

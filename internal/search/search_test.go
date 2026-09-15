@@ -250,6 +250,97 @@ func TestSearchQueryIsLiteralNotFTS5Syntax(t *testing.T) {
 	}
 }
 
+// The following cover the switch from one literal FTS5 phrase to per-word
+// ANDed prefix terms (sqlitex.FTS5PrefixTerms), fixing the reported bug
+// that searching "sketch" found nothing even though a prompt contained
+// "sketchybar".
+
+func TestSearchPrefixMatchesShortWordAgainstLongerToken(t *testing.T) {
+	db := testDB(t)
+	seedSession(t, db, map[string]any{
+		"id": "claude:p:1", "source": "claude", "source_session_id": "1", "lineage_id": "lin1",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 100,
+	})
+	seedPrompt(t, db, "claude:p:1", "let's install sketchybar for the status bar")
+
+	hits, err := Search(db, "sketch", Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 1 {
+		t.Fatalf("got %d hits, want 1 (prefix match of \"sketch\" against \"sketchybar\")", len(hits))
+	}
+}
+
+func TestSearchMultiWordMatchesAnyOrderAndRequiresAllWords(t *testing.T) {
+	db := testDB(t)
+	seedSession(t, db, map[string]any{
+		"id": "claude:p:1", "source": "claude", "source_session_id": "1", "lineage_id": "lin1",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 100,
+	})
+	seedPrompt(t, db, "claude:p:1", "please look at the retries before fixing the timeout")
+	seedSession(t, db, map[string]any{
+		"id": "claude:p:2", "source": "claude", "source_session_id": "2", "lineage_id": "lin2",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 200,
+	})
+	seedPrompt(t, db, "claude:p:2", "please just fix the timeout")
+
+	// The query words are in the opposite order from how they appear in the
+	// matching prompt, and session 2 has only one of the two words.
+	hits, err := Search(db, "fix retry", Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 1 || hits[0].SessionID != "claude:p:1" {
+		t.Fatalf("got %+v, want only session 1 (both words present, in either order)", hits)
+	}
+}
+
+func TestSearchWordMatchingNothingExcludesWholeQuery(t *testing.T) {
+	db := testDB(t)
+	seedSession(t, db, map[string]any{
+		"id": "claude:p:1", "source": "claude", "source_session_id": "1", "lineage_id": "lin1",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 100,
+	})
+	seedPrompt(t, db, "claude:p:1", "please fix the flaky retry test")
+
+	hits, err := Search(db, "fix nonexistentword", Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 0 {
+		t.Fatalf("expected no hits when one word of the query matches nothing, got %+v", hits)
+	}
+}
+
+// TestSearchCountAgreesWithHitsUnderPrefixMatching covers that
+// countSearchHits (via SearchWithHidden) and Search never disagree now that
+// both build their MATCH query the same way, through FTS5PrefixTerms.
+func TestSearchCountAgreesWithHitsUnderPrefixMatching(t *testing.T) {
+	db := testDB(t)
+	seedSession(t, db, map[string]any{
+		"id": "claude:p:1", "source": "claude", "source_session_id": "1", "lineage_id": "lin1",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 100,
+	})
+	seedPrompt(t, db, "claude:p:1", "install sketchybar please")
+	seedSession(t, db, map[string]any{
+		"id": "claude:p:2", "source": "claude", "source_session_id": "2", "lineage_id": "lin2",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 200,
+	})
+	seedPrompt(t, db, "claude:p:2", "sketching out a design doc")
+
+	hits, hidden, err := SearchWithHidden(db, "sketch", Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hidden != 0 {
+		t.Fatalf("hidden = %d, want 0 (no hide rules configured)", hidden)
+	}
+	if len(hits) != 2 {
+		t.Fatalf("got %d hits, want 2 - count and hits must agree", len(hits))
+	}
+}
+
 func TestGroupByRepoNestsWorktrees(t *testing.T) {
 	main := "/repo/main"
 	wt := "/repo/wt-feature"
@@ -288,12 +379,48 @@ func TestGroupByCWDWhenNotInGitRepo(t *testing.T) {
 	}
 }
 
-func TestEmptyMessageNamesProfileAndScope(t *testing.T) {
-	msg := EmptyMessage("claude-personal", Filter{}, "some phrase")
+// TestEmptyMessageNamesGroupWhenSelected covers change
+// group-sessions-in-one-index's fix to a stale message: EmptyMessage used
+// to say `No session in profile "all"...` regardless of what was actually
+// selected, a leftover from before groups replaced the single active
+// profile. With a group selected, the message names it directly from f.Group
+// - not a caller-supplied placeholder, which is what let one call site
+// (cmd/lazyrecall's cmdResume) pass the literal "all" without regard to its
+// own filter.
+func TestEmptyMessageNamesGroupWhenSelected(t *testing.T) {
+	msg := EmptyMessage(Filter{Group: "work"}, "some phrase")
 	if msg == "" {
 		t.Fatal("expected a non-empty message")
 	}
-	for _, want := range []string{"claude-personal", "some phrase", "prompts and topics"} {
+	for _, want := range []string{`group "work"`, "some phrase", "prompts and topics"} {
+		if !contains(msg, want) {
+			t.Errorf("message %q missing %q", msg, want)
+		}
+	}
+}
+
+// TestEmptyMessageSaysNothingAboutScopeForAll covers the other half of the
+// same fix: with no group selected, the message must not name a scope at
+// all - not "all", not "profile" - since All is the ordinary, unscoped
+// view.
+func TestEmptyMessageSaysNothingAboutScopeForAll(t *testing.T) {
+	msg := EmptyMessage(Filter{}, "")
+	for _, unwanted := range []string{"group", "profile", `"all"`} {
+		if contains(msg, unwanted) {
+			t.Errorf("message %q should not mention a scope for All (found %q)", msg, unwanted)
+		}
+	}
+	if !contains(msg, "the active filters") {
+		t.Errorf("message %q should describe the no-query scope", msg)
+	}
+}
+
+// TestEmptyMessageListsOtherFilters covers "Keep any other filters the
+// message lists": the group rewrite must not drop the existing
+// agent/install/client/repo/tag/time-range clauses.
+func TestEmptyMessageListsOtherFilters(t *testing.T) {
+	msg := EmptyMessage(Filter{Agent: "claude", Repo: "/x", Tag: "wip"}, "")
+	for _, want := range []string{"agent=claude", "repo=/x", "tag=wip"} {
 		if !contains(msg, want) {
 			t.Errorf("message %q missing %q", msg, want)
 		}
@@ -341,7 +468,7 @@ func TestItemForIdentifierByHandle(t *testing.T) {
 		"end_state": "completed", "resumable": 1, "last_activity_at": 100,
 	})
 
-	it, ok, err := ItemForIdentifier(db, "p", "3")
+	it, ok, err := ItemForIdentifier(db, "3", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -358,7 +485,7 @@ func TestItemForIdentifierByFullyQualifiedID(t *testing.T) {
 		"end_state": "completed", "resumable": 1, "last_activity_at": 100,
 	})
 
-	it, ok, err := ItemForIdentifier(db, "p", "claude:p:1")
+	it, ok, err := ItemForIdentifier(db, "claude:p:1", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -369,7 +496,7 @@ func TestItemForIdentifierByFullyQualifiedID(t *testing.T) {
 
 func TestItemForIdentifierHandleDoesNotResolve(t *testing.T) {
 	db := testDB(t)
-	it, ok, err := ItemForIdentifier(db, "p", "999")
+	it, ok, err := ItemForIdentifier(db, "999", nil)
 	if err != nil {
 		t.Fatalf("a handle that resolves to nothing should not be an error: %v", err)
 	}
@@ -390,12 +517,346 @@ func TestItemForIdentifierHandlePicksMostRecentSessionInLineage(t *testing.T) {
 		"end_state": "completed", "resumable": 1, "last_activity_at": 200,
 	})
 
-	it, ok, err := ItemForIdentifier(db, "p", "3")
+	it, ok, err := ItemForIdentifier(db, "3", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !ok || it.SessionID != "claude:p:2" {
 		t.Fatalf("expected the most recently active session in the lineage, got %+v ok=%v", it, ok)
+	}
+}
+
+// The following cover change group-sessions-in-one-index, effective-group
+// resolution (see effective_group.go): the query-time CASE expression that
+// classifies every session into a group, and its interaction with the
+// archive flag, manual overrides, and --agent.
+
+func TestEffectiveGroupByPathPrefix(t *testing.T) {
+	db := testDB(t)
+	seedSession(t, db, map[string]any{
+		"id": "claude:p:work", "source": "claude", "source_session_id": "work", "lineage_id": "lin-work",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 100, "cwd": "/home/me/code/proj",
+	})
+	seedSession(t, db, map[string]any{
+		"id": "claude:p:personal", "source": "claude", "source_session_id": "personal", "lineage_id": "lin-personal",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 200, "cwd": "/home/me/personal/x",
+	})
+	seedSession(t, db, map[string]any{
+		"id": "claude:p:unknown", "source": "claude", "source_session_id": "unknown", "lineage_id": "lin-unknown",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 300, "cwd": "/home/me",
+	})
+	seedSession(t, db, map[string]any{
+		"id": "claude:p:nocwd", "source": "claude", "source_session_id": "nocwd", "lineage_id": "lin-nocwd",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 400,
+		// deliberately no cwd
+	})
+
+	groups := []config.Group{
+		{Name: "work", Paths: []string{"/home/me/code"}},
+		{Name: "personal", Paths: []string{"/home/me/personal"}},
+	}
+	items, err := List(db, Filter{Groups: groups, ShowAll: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]string{}
+	for _, it := range items {
+		byID[it.SessionID] = it.Group
+	}
+	if byID["claude:p:work"] != "work" {
+		t.Errorf("~/code session group = %q, want work", byID["claude:p:work"])
+	}
+	if byID["claude:p:personal"] != "personal" {
+		t.Errorf("~/personal/x session group = %q, want personal", byID["claude:p:personal"])
+	}
+	if byID["claude:p:unknown"] != "" {
+		t.Errorf("~ session group = %q, want empty (Unknown)", byID["claude:p:unknown"])
+	}
+	if byID["claude:p:nocwd"] != "" {
+		t.Errorf("nil-cwd session group = %q, want empty (Unknown)", byID["claude:p:nocwd"])
+	}
+}
+
+// TestEffectiveGroupPrefixIsPathAware covers the requirement that
+// "/code-other" must not match a group path of "/code" - the prefix test
+// must respect the path separator, not just do a byte-prefix comparison.
+func TestEffectiveGroupPrefixIsPathAware(t *testing.T) {
+	db := testDB(t)
+	seedSession(t, db, map[string]any{
+		"id": "claude:p:1", "source": "claude", "source_session_id": "1", "lineage_id": "lin1",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 100, "cwd": "/code-other/proj",
+	})
+	groups := []config.Group{{Name: "work", Paths: []string{"/code"}}}
+	items, err := List(db, Filter{Groups: groups, ShowAll: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Group != "" {
+		t.Fatalf("expected /code-other to stay Unknown (not match /code), got %+v", items)
+	}
+}
+
+// TestEffectiveGroupLongestPrefixWins covers a nested pair of group paths:
+// the more specific (longer) one must win regardless of config order.
+func TestEffectiveGroupLongestPrefixWins(t *testing.T) {
+	db := testDB(t)
+	seedSession(t, db, map[string]any{
+		"id": "claude:p:1", "source": "claude", "source_session_id": "1", "lineage_id": "lin1",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 100, "cwd": "/home/me/code/sub/deep",
+	})
+	// "code" declared first, "code/sub" second - config order must not
+	// matter, only path length.
+	groups := []config.Group{
+		{Name: "outer", Paths: []string{"/home/me/code"}},
+		{Name: "inner", Paths: []string{"/home/me/code/sub"}},
+	}
+	items, err := List(db, Filter{Groups: groups, ShowAll: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Group != "inner" {
+		t.Fatalf("expected the longer prefix (inner) to win, got %+v", items)
+	}
+}
+
+// TestEffectiveGroupManualOverrideBeatsPath covers a lineage's manual
+// group_name taking priority over the path rule, even when the path rule
+// would have claimed the session for a different group.
+func TestEffectiveGroupManualOverrideBeatsPath(t *testing.T) {
+	db := testDB(t)
+	b := db.NewBatch()
+	if err := b.BulkInsert("lineages", []string{"id", "profile", "orphaned", "group_name"}, []map[string]any{
+		{"id": "lin1", "profile": "p", "orphaned": 0, "group_name": "personal"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Run(); err != nil {
+		t.Fatal(err)
+	}
+	seedSession(t, db, map[string]any{
+		"id": "claude:p:1", "source": "claude", "source_session_id": "1", "lineage_id": "lin1",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 100, "cwd": "/home/me/code/proj",
+	})
+	groups := []config.Group{{Name: "work", Paths: []string{"/home/me/code"}}}
+	items, err := List(db, Filter{Groups: groups, ShowAll: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Group != "personal" || !items[0].GroupManual {
+		t.Fatalf("expected the manual override to win over the path rule, got %+v", items)
+	}
+}
+
+// TestEffectiveGroupPathWithGlobSpecialCharsMatchesLiterally covers the
+// requirement that the prefix test never use GLOB/LIKE: a configured path
+// containing '[' or '%' - both pattern metacharacters to those operators -
+// must still match by plain substring comparison.
+func TestEffectiveGroupPathWithGlobSpecialCharsMatchesLiterally(t *testing.T) {
+	db := testDB(t)
+	seedSession(t, db, map[string]any{
+		"id": "claude:p:1", "source": "claude", "source_session_id": "1", "lineage_id": "lin1",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 100, "cwd": "/home/me/[proj]/100%done",
+	})
+	groups := []config.Group{{Name: "work", Paths: []string{"/home/me/[proj]"}}}
+	items, err := List(db, Filter{Groups: groups, ShowAll: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Group != "work" {
+		t.Fatalf("expected a literal match against a path containing '[' and '%%', got %+v", items)
+	}
+}
+
+// TestFilterByGroupExcludesArchivedFromNamedGroupToo covers that
+// Filter.Group=<name> is non-archived, exactly like All - an archived
+// session filed under "work" must not appear under --group=work, only under
+// --group=archive.
+func TestFilterByGroupExcludesArchivedFromNamedGroupToo(t *testing.T) {
+	db := testDB(t)
+	b := db.NewBatch()
+	if err := b.BulkInsert("lineages", []string{"id", "profile", "orphaned", "group_name", "archived_at"}, []map[string]any{
+		{"id": "lin-active", "profile": "p", "orphaned": 0, "group_name": "work", "archived_at": nil},
+		{"id": "lin-archived", "profile": "p", "orphaned": 0, "group_name": "work", "archived_at": 1000},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Run(); err != nil {
+		t.Fatal(err)
+	}
+	seedSession(t, db, map[string]any{
+		"id": "claude:p:active", "source": "claude", "source_session_id": "active", "lineage_id": "lin-active",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 100,
+	})
+	seedSession(t, db, map[string]any{
+		"id": "claude:p:archived", "source": "claude", "source_session_id": "archived", "lineage_id": "lin-archived",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 200,
+	})
+	groups := []config.Group{{Name: "work", Paths: []string{"/nope"}}}
+
+	all, err := List(db, Filter{Groups: groups})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 || all[0].SessionID != "claude:p:active" {
+		t.Fatalf("All: expected only the active session, got %+v", all)
+	}
+
+	work, err := List(db, Filter{Groups: groups, Group: "work"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(work) != 1 || work[0].SessionID != "claude:p:active" {
+		t.Fatalf("--group=work: expected only the active session, got %+v", work)
+	}
+
+	archived, err := List(db, Filter{Groups: groups, Group: "archive"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(archived) != 1 || archived[0].SessionID != "claude:p:archived" {
+		t.Fatalf("--group=archive: expected only the archived session, got %+v", archived)
+	}
+}
+
+// TestFilterByGroupUnknown covers Filter.Group="unknown": non-archived
+// sessions with no effective group.
+func TestFilterByGroupUnknown(t *testing.T) {
+	db := testDB(t)
+	seedSession(t, db, map[string]any{
+		"id": "claude:p:known", "source": "claude", "source_session_id": "known", "lineage_id": "lin-known",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 100, "cwd": "/home/me/code",
+	})
+	seedSession(t, db, map[string]any{
+		"id": "claude:p:unknown", "source": "claude", "source_session_id": "unknown", "lineage_id": "lin-unknown",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 200, "cwd": "/tmp",
+	})
+	groups := []config.Group{{Name: "work", Paths: []string{"/home/me/code"}}}
+
+	items, err := List(db, Filter{Groups: groups, Group: "unknown"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].SessionID != "claude:p:unknown" {
+		t.Fatalf("--group=unknown: got %+v", items)
+	}
+}
+
+// TestConfigGroupChangeRegroupsWithoutRefresh covers that groups are
+// resolved at query time: two List calls against the very same rows, with
+// different Groups configured (as would happen if the config file were
+// edited between them), must classify the session differently - no refresh
+// or rewrite of anything already indexed is involved.
+func TestConfigGroupChangeRegroupsWithoutRefresh(t *testing.T) {
+	db := testDB(t)
+	seedSession(t, db, map[string]any{
+		"id": "claude:p:1", "source": "claude", "source_session_id": "1", "lineage_id": "lin1",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 100, "cwd": "/home/me/code",
+	})
+
+	before, err := List(db, Filter{Groups: []config.Group{{Name: "work", Paths: []string{"/home/me/code"}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(before) != 1 || before[0].Group != "work" {
+		t.Fatalf("before: got %+v, want group work", before)
+	}
+
+	after, err := List(db, Filter{Groups: []config.Group{{Name: "renamed", Paths: []string{"/home/me/code"}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != 1 || after[0].Group != "renamed" {
+		t.Fatalf("after: got %+v, want group renamed - the group must be recomputed from the new config, not cached", after)
+	}
+}
+
+// TestFilterByAgentMatchesSourceOnly covers change
+// group-sessions-in-one-index: Filter.Agent matches a session's source
+// alone, so a plain source name (e.g. "claude") matches every install of
+// it.
+func TestFilterByAgentMatchesSourceOnly(t *testing.T) {
+	db := testDB(t)
+	seedSession(t, db, map[string]any{
+		"id": "claude:claude:1", "source": "claude", "source_session_id": "1", "lineage_id": "lin1",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 100, "install": "claude",
+	})
+	seedSession(t, db, map[string]any{
+		"id": "claude:claude-personal:1", "source": "claude", "source_session_id": "1", "lineage_id": "lin2",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 200, "install": "claude-personal",
+	})
+
+	both, err := List(db, Filter{Agent: "claude"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(both) != 2 {
+		t.Fatalf("Agent=claude: expected both installs (matching s.source), got %+v", both)
+	}
+}
+
+// TestFilterByInstallMatchesOneInstallEvenWhenNameEqualsSource covers the
+// bug this follow-up fix addresses: an install's name can equal its own
+// source's name (one claude install is literally named "claude"), so
+// Filter.Install must be its own clause (s.install = v), never OR-ed with
+// Filter.Agent's source match (s.source = v) - the OR'd form made
+// Filter.Install narrow to nothing more than Filter.Agent already did,
+// because every claude session (any install) also satisfies s.source =
+// 'claude'.
+func TestFilterByInstallMatchesOneInstallEvenWhenNameEqualsSource(t *testing.T) {
+	db := testDB(t)
+	seedSession(t, db, map[string]any{
+		"id": "claude:claude:1", "source": "claude", "source_session_id": "1", "lineage_id": "lin1",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 100, "install": "claude",
+	})
+	seedSession(t, db, map[string]any{
+		"id": "claude:claude-personal:1", "source": "claude", "source_session_id": "1", "lineage_id": "lin2",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 200, "install": "claude-personal",
+	})
+
+	work, err := List(db, Filter{Install: "claude"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(work) != 1 || work[0].SessionID != "claude:claude:1" {
+		t.Fatalf("Install=claude: expected only the install named \"claude\" (not every claude session), got %+v", work)
+	}
+
+	personal, err := List(db, Filter{Install: "claude-personal"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(personal) != 1 || personal[0].SessionID != "claude:claude-personal:1" {
+		t.Fatalf("Install=claude-personal: got %+v", personal)
+	}
+}
+
+// TestListWithNoGroupsConfiguredMatchesPreChangeBehavior covers the
+// zero-config requirement: with Filter.Groups empty (no [groups.*] tables),
+// List's results - ids, order, and count - are unaffected by this change.
+// Every Item still gets an (empty) Group, but nothing about which rows come
+// back or in what order changes.
+func TestListWithNoGroupsConfiguredMatchesPreChangeBehavior(t *testing.T) {
+	db := testDB(t)
+	seedSession(t, db, map[string]any{
+		"id": "claude:p:1", "source": "claude", "source_session_id": "1", "lineage_id": "lin1",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 100, "cwd": "/home/me/code",
+	})
+	seedSession(t, db, map[string]any{
+		"id": "pi:p:1", "source": "pi", "source_session_id": "1", "lineage_id": "lin2",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 200,
+	})
+
+	items, err := List(db, Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 || items[0].SessionID != "pi:p:1" || items[1].SessionID != "claude:p:1" {
+		t.Fatalf("got %+v, want the same ids and order as before groups existed", items)
+	}
+	for _, it := range items {
+		if it.Group != "" {
+			t.Errorf("session %s: Group = %q, want empty with no groups configured", it.SessionID, it.Group)
+		}
 	}
 }
 

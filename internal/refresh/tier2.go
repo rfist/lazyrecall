@@ -11,21 +11,23 @@ import (
 	kiloadapter "github.com/rfist/lazyrecall/internal/adapter/kilo"
 	ompadapter "github.com/rfist/lazyrecall/internal/adapter/omp"
 	opencodeadapter "github.com/rfist/lazyrecall/internal/adapter/opencode"
+	"github.com/rfist/lazyrecall/internal/profile"
 	"github.com/rfist/lazyrecall/internal/transcript"
 )
 
-// tier2ForSource ingests one source's prompts for the search index (task
-// 6.4). It prefers the source's own prompt index (claude's history.jsonl,
-// omp's history table, hermes/goose/opencode's messages tables) and falls
-// back to transcript-extracted prompts, already collected during this
-// pass's tier-1 scan, for any session that index doesn't cover - most
-// notably pi, which has no prompt index at all, and antigravity, whose
-// per-conversation detail is undecodable protobuf (see that adapter's
-// package doc) so it has no prompt index and no transcript to fall back to
-// either - its sessions are simply never covered here, the same as any
-// other source's fallback-only sessions.
+// tier2ForSource ingests one (source, install) pair's prompts for the
+// search index (task 6.4). It prefers the source's own prompt index
+// (claude's history.jsonl, omp's history table, hermes/goose/opencode's
+// messages tables) and falls back to transcript-extracted prompts, already
+// collected during this pass's tier-1 scan, for any session that index
+// doesn't cover - most notably pi, which has no prompt index at all, and
+// antigravity, whose per-conversation detail is undecodable protobuf (see
+// that adapter's package doc) so it has no prompt index and no transcript
+// to fall back to either - its sessions are simply never covered here, the
+// same as any other source's fallback-only sessions.
 func (r *Refresher) tier2ForSource(
 	sourceName string,
+	p profile.Profile,
 	cursors map[string]cursorRow,
 	discovered []adapter.Discovered,
 	fallback map[string][]transcript.PromptText,
@@ -36,73 +38,73 @@ func (r *Refresher) tier2ForSource(
 
 	switch sourceName {
 	case "claude":
-		if root := r.Profile.Roots["claude"]; root != "" {
+		if root := p.Roots["claude"]; root != "" {
 			from := int64(0)
-			if c, ok := cursors[cursorKey("claude", "*")]; ok && c.ByteOffset != nil {
+			if c, ok := cursors[cursorKey("claude", "*:"+p.Name)]; ok && c.ByteOffset != nil {
 				from = *c.ByteOffset
 			}
 			prompts, newOffset, err := claudeadapter.PromptsSince(root, from)
 			if err == nil {
-				for _, p := range prompts {
-					sid := "claude:" + r.Profile.Name + ":" + p.SessionID
-					promptRecords = append(promptRecords, promptRecord(sid, p.Text))
+				for _, pr := range prompts {
+					sid := "claude:" + p.Name + ":" + pr.SessionID
+					promptRecords = append(promptRecords, promptRecord(sid, pr.Text))
 					covered[sid] = true
 				}
-				cursorRecords = append(cursorRecords, sourceCursorRecord("claude", newOffset))
+				cursorRecords = append(cursorRecords, sourceCursorRecord("claude", p.Name, newOffset))
 			}
 		}
 
 	case "omp":
-		if r.Profile.Roots["omp"] != "" {
+		if p.Roots["omp"] != "" {
 			from := int64(0)
-			if c, ok := cursors[cursorKey("omp", "*")]; ok && c.DBCursorKey != nil {
+			if c, ok := cursors[cursorKey("omp", "*:"+p.Name)]; ok && c.DBCursorKey != nil {
 				from = parseInt64(*c.DBCursorKey)
 			}
 			a := ompadapter.New(r.SQLite3Path)
-			prompts, newCursor, err := a.PromptsSince(r.Profile, from)
+			prompts, newCursor, err := a.PromptsSince(p, from)
 			if err == nil {
-				for _, p := range prompts {
-					sid := "omp:" + r.Profile.Name + ":" + p.SessionID
-					promptRecords = append(promptRecords, promptRecord(sid, p.Text))
+				for _, pr := range prompts {
+					sid := "omp:" + p.Name + ":" + pr.SessionID
+					promptRecords = append(promptRecords, promptRecord(sid, pr.Text))
 					covered[sid] = true
 				}
-				cursorRecords = append(cursorRecords, sourceCursorRecordDBKey("omp", newCursor))
+				cursorRecords = append(cursorRecords, sourceCursorRecordDBKey("omp", p.Name, newCursor))
 			}
 		}
 
 	case "hermes":
-		if r.Profile.Roots["hermes"] != "" {
+		if p.Roots["hermes"] != "" {
 			from := int64(0)
-			if c, ok := cursors[cursorKey("hermes", "*")]; ok && c.DBCursorKey != nil {
+			if c, ok := cursors[cursorKey("hermes", "*:"+p.Name)]; ok && c.DBCursorKey != nil {
 				from = parseInt64(*c.DBCursorKey)
 			}
 			a := hermesadapter.New(r.SQLite3Path)
-			prompts, newCursor, err := a.PromptsSince(r.Profile, from)
+			prompts, newCursor, err := a.PromptsSince(p, from)
 			if err == nil {
-				for _, p := range prompts {
-					sid := "hermes:" + r.Profile.Name + ":" + p.SessionID
-					promptRecords = append(promptRecords, promptRecord(sid, p.Text))
+				for _, pr := range prompts {
+					sid := "hermes:" + p.Name + ":" + pr.SessionID
+					promptRecords = append(promptRecords, promptRecord(sid, pr.Text))
 					covered[sid] = true
 				}
-				cursorRecords = append(cursorRecords, sourceCursorRecordDBKey("hermes", newCursor))
+				cursorRecords = append(cursorRecords, sourceCursorRecordDBKey("hermes", p.Name, newCursor))
 			}
 		}
 
 	case "goose":
-		if r.Profile.Roots["goose"] != "" {
+		if p.Roots["goose"] != "" {
 			from := int64(0)
-			if c, ok := cursors[cursorKey("goose", "*")]; ok && c.DBCursorKey != nil {
+			if c, ok := cursors[cursorKey("goose", "*:"+p.Name)]; ok && c.DBCursorKey != nil {
 				from = parseInt64(*c.DBCursorKey)
 			}
 			a := gooseadapter.New(r.SQLite3Path)
-			prompts, newCursor, err := a.PromptsSince(r.Profile, from)
+			prompts, newCursor, err := a.PromptsSince(p, from)
 			if err == nil {
-				for _, p := range prompts {
-					sid := "goose:" + r.Profile.Name + ":" + p.SessionID
-					promptRecords = append(promptRecords, promptRecord(sid, p.Text))
+				for _, pr := range prompts {
+					sid := "goose:" + p.Name + ":" + pr.SessionID
+					promptRecords = append(promptRecords, promptRecord(sid, pr.Text))
 					covered[sid] = true
 				}
-				cursorRecords = append(cursorRecords, sourceCursorRecordDBKey("goose", newCursor))
+				cursorRecords = append(cursorRecords, sourceCursorRecordDBKey("goose", p.Name, newCursor))
 			}
 		}
 
@@ -110,23 +112,23 @@ func (r *Refresher) tier2ForSource(
 		// One branch for both: kilo ships opencode's schema under another
 		// name, so the same query answers for either once it is told which
 		// database it is reading (see internal/adapter/kilo).
-		if r.Profile.Roots[sourceName] != "" {
+		if p.Roots[sourceName] != "" {
 			from := int64(0)
-			if c, ok := cursors[cursorKey(sourceName, "*")]; ok && c.DBCursorKey != nil {
+			if c, ok := cursors[cursorKey(sourceName, "*:"+p.Name)]; ok && c.DBCursorKey != nil {
 				from = parseInt64(*c.DBCursorKey)
 			}
 			a := opencodeadapter.New(r.SQLite3Path)
 			if sourceName == "kilo" {
 				a = kiloadapter.New(r.SQLite3Path)
 			}
-			prompts, newCursor, err := a.PromptsSince(r.Profile, from)
+			prompts, newCursor, err := a.PromptsSince(p, from)
 			if err == nil {
-				for _, p := range prompts {
-					sid := sourceName + ":" + r.Profile.Name + ":" + p.SessionID
-					promptRecords = append(promptRecords, promptRecord(sid, p.Text))
+				for _, pr := range prompts {
+					sid := sourceName + ":" + p.Name + ":" + pr.SessionID
+					promptRecords = append(promptRecords, promptRecord(sid, pr.Text))
 					covered[sid] = true
 				}
-				cursorRecords = append(cursorRecords, sourceCursorRecordDBKey(sourceName, newCursor))
+				cursorRecords = append(cursorRecords, sourceCursorRecordDBKey(sourceName, p.Name, newCursor))
 			}
 		}
 
@@ -162,16 +164,21 @@ func promptRecord(sessionID, text string) map[string]any {
 	return map[string]any{"session_id": sessionID, "kind": "prompt", "text": text}
 }
 
-func sourceCursorRecord(source string, byteOffset int64) map[string]any {
+// sourceCursorRecord and sourceCursorRecordDBKey key a source-level cursor
+// by "*:<install>" rather than a bare "*" (change group-sessions-in-one-index):
+// with every install's data now refreshed into the same index, two installs
+// of the same source (two claude roots) would otherwise share one history.jsonl
+// byte-offset cursor and each corrupt the other's incremental scan.
+func sourceCursorRecord(source, install string, byteOffset int64) map[string]any {
 	return map[string]any{
-		"source": source, "source_id": "*", "kind": "transcript_offset",
+		"source": source, "source_id": "*:" + install, "kind": "transcript_offset",
 		"byte_offset": byteOffset, "updated_at": time.Now().Unix(),
 	}
 }
 
-func sourceCursorRecordDBKey(source string, key int64) map[string]any {
+func sourceCursorRecordDBKey(source, install string, key int64) map[string]any {
 	return map[string]any{
-		"source": source, "source_id": "*", "kind": "db_key",
+		"source": source, "source_id": "*:" + install, "kind": "db_key",
 		"db_cursor_key": strconv.FormatInt(key, 10), "updated_at": time.Now().Unix(),
 	}
 }

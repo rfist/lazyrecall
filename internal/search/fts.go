@@ -8,11 +8,14 @@ import (
 
 // Search finds sessions whose prompts or topic match query (spec
 // session-search, "Search over the user's own prompts and session
-// topics"). query is matched as a literal FTS5 phrase (sqlitex.FTS5Phrase)
-// so punctuation and FTS5 query-syntax characters in what the user typed
-// are never parsed as query operators.
+// topics"). Each word of query becomes an ANDed FTS5 prefix term
+// (sqlitex.FTS5PrefixTerms), so "sketch" matches an indexed token like
+// "sketchybar" and a multi-word query matches its words in any order;
+// punctuation and FTS5 query-syntax characters in what the user typed are
+// never parsed as query operators.
 func Search(db *sqlitex.Runner, query string, f Filter) ([]Item, error) {
-	params := map[string]any{"query": sqlitex.FTS5Phrase(query)}
+	params := map[string]any{"query": sqlitex.FTS5PrefixTerms(query)}
+	branches := effectiveGroupParams(params, f.Groups)
 	_, clauses := whereClauseFromFilter(f, params)
 	pf, err := db.WriteParams(params)
 	if err != nil {
@@ -20,9 +23,10 @@ func Search(db *sqlitex.Runner, query string, f Filter) ([]Item, error) {
 	}
 	defer pf.Close()
 
-	predicate := buildPredicate(pf, clauses)
+	groupExpr := effectiveGroupExpr(pf, branches)
+	predicate := buildPredicate(pf, clauses, groupExpr)
 	q := fmt.Sprintf(`
-SELECT %s,
+SELECT %s, %s AS effective_group,
 	(SELECT group_concat(tag, char(31)) FROM tags WHERE tags.lineage_id = s.lineage_id) AS tags,
 	snippet(prompt_fts, 2, '>>>', '<<<', ' ... ', 10) AS snippet,
 	bm25(prompt_fts) AS rank
@@ -30,7 +34,7 @@ FROM prompt_fts
 JOIN sessions s ON s.id = prompt_fts.session_id
 LEFT JOIN lineages l ON l.id = s.lineage_id
 WHERE prompt_fts MATCH %s AND %s
-ORDER BY s.last_activity_at DESC, rank;`, itemColumns, pf.Ref("query"), predicate)
+ORDER BY s.last_activity_at DESC, rank;`, itemColumns, groupExpr, pf.Ref("query"), predicate)
 
 	var rows []struct {
 		itemRow
@@ -50,6 +54,49 @@ ORDER BY s.last_activity_at DESC, rank;`, itemColumns, pf.Ref("query"), predicat
 		it := row.itemRow.toItem()
 		it.MatchSnippet = row.Snippet
 		items = append(items, it)
+	}
+	return items, nil
+}
+
+// SearchForFacets is Search's counterpart to ListForFacets: every prompt/
+// topic match for query, regardless of the selected group and regardless of
+// archive state, for a Groups panel narrowed by an active search phrase to
+// compute its counts from client-side (change group-sessions-in-one-index,
+// P1 fix #4). See ListForFacets' doc comment for why f.Group is ignored and
+// archived sessions are always included.
+func SearchForFacets(db *sqlitex.Runner, query string, f Filter) ([]Item, error) {
+	params := map[string]any{"query": sqlitex.FTS5PrefixTerms(query)}
+	branches := effectiveGroupParams(params, f.Groups)
+	clauses := facetSupersetClauses(f, params)
+	pf, err := db.WriteParams(params)
+	if err != nil {
+		return nil, err
+	}
+	defer pf.Close()
+
+	groupExpr := effectiveGroupExpr(pf, branches)
+	predicate := buildPredicate(pf, clauses, groupExpr)
+	q := fmt.Sprintf(`
+SELECT %s, %s AS effective_group,
+	(SELECT group_concat(tag, char(31)) FROM tags WHERE tags.lineage_id = s.lineage_id) AS tags
+FROM prompt_fts
+JOIN sessions s ON s.id = prompt_fts.session_id
+LEFT JOIN lineages l ON l.id = s.lineage_id
+WHERE prompt_fts MATCH %s AND %s;`, itemColumns, groupExpr, pf.Ref("query"), predicate)
+
+	var rows []itemRow
+	if err := db.Query(q, &rows); err != nil {
+		return nil, fmt.Errorf("search: querying prompt index for facet counts: %w", err)
+	}
+
+	seen := map[string]bool{}
+	var items []Item
+	for _, row := range rows {
+		if seen[row.ID] {
+			continue // a session can have more than one matching prompt; count it once
+		}
+		seen[row.ID] = true
+		items = append(items, row.toItem())
 	}
 	return items, nil
 }
@@ -74,7 +121,8 @@ func SearchWithHidden(db *sqlitex.Runner, query string, f Filter) (items []Item,
 // predicate. COUNT(DISTINCT s.id) mirrors Search's de-duplication, so a
 // session with several matching prompts contributes one candidate.
 func countSearchHits(db *sqlitex.Runner, query string, f Filter) (int, error) {
-	params := map[string]any{"query": sqlitex.FTS5Phrase(query)}
+	params := map[string]any{"query": sqlitex.FTS5PrefixTerms(query)}
+	branches := effectiveGroupParams(params, f.Groups)
 	clauses := baseClausesFromFilter(f, params)
 	pf, err := db.WriteParams(params)
 	if err != nil {
@@ -82,7 +130,8 @@ func countSearchHits(db *sqlitex.Runner, query string, f Filter) (int, error) {
 	}
 	defer pf.Close()
 
-	predicate := buildPredicate(pf, clauses)
+	groupExpr := effectiveGroupExpr(pf, branches)
+	predicate := buildPredicate(pf, clauses, groupExpr)
 	q := fmt.Sprintf(`
 SELECT COUNT(DISTINCT s.id) AS n
 FROM prompt_fts
