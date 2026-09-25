@@ -39,6 +39,12 @@ func TestLoadDefaultsWhenNoFileExists(t *testing.T) {
 	if cfg.Browse.ShowArchived {
 		t.Error("Browse.ShowArchived = true, want false")
 	}
+	if !cfg.Browse.DateHeaders {
+		t.Error("Browse.DateHeaders = false, want true")
+	}
+	if cfg.Origins["browse.date_headers"] != OriginDefault {
+		t.Errorf("Origins[browse.date_headers] = %q, want %q", cfg.Origins["browse.date_headers"], OriginDefault)
+	}
 
 	// Default claude roots expand to the pinned home, personal first, the
 	// order candidateClaudeRoots in internal/profile probes them.
@@ -448,6 +454,74 @@ func TestInvalidDefaultGroupIsConfigError(t *testing.T) {
 	}
 }
 
+// TestDateHeadersDefaultsTrueAndFileCanTurnItOff covers change
+// date-separator-rows: browse.date_headers defaults to true unlike every
+// other Browse bool, which means Load must be able to tell "the file never
+// mentioned it" apart from "the file set it to false" - both decode to the
+// same Go zero value, so this is a regression test for md.IsDefined actually
+// being consulted rather than the decoded bool being trusted on its own (the
+// same risk browse.show_archived's default of false never exposes, since
+// false is that field's zero value either way).
+func TestDateHeadersDefaultsTrueAndFileCanTurnItOff(t *testing.T) {
+	// No file at all: true, attributed to the default.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("LAZYRECALL_CONFIG", filepath.Join(t.TempDir(), "missing.toml"))
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Browse.DateHeaders {
+		t.Error("no config file: Browse.DateHeaders = false, want true")
+	}
+
+	// A file that sets an unrelated browse key must still leave
+	// date_headers true and default-attributed - the field's default
+	// survives a [browse] table that never mentions it, the same as any
+	// other unmentioned key in a table the file partially populates.
+	path := writeConfig(t, "[browse]\nshow_archived = true\n")
+	t.Setenv("LAZYRECALL_CONFIG", path)
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Browse.DateHeaders {
+		t.Error("[browse] with show_archived only: Browse.DateHeaders = false, want true")
+	}
+	if cfg.Origins["browse.date_headers"] != OriginDefault {
+		t.Errorf("Origins[browse.date_headers] = %q, want %q", cfg.Origins["browse.date_headers"], OriginDefault)
+	}
+
+	// An explicit `date_headers = false` must actually turn it off.
+	path = writeConfig(t, "[browse]\ndate_headers = false\n")
+	t.Setenv("LAZYRECALL_CONFIG", path)
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Browse.DateHeaders {
+		t.Error("date_headers = false: Browse.DateHeaders = true, want false")
+	}
+	if cfg.Origins["browse.date_headers"] != OriginFile {
+		t.Errorf("Origins[browse.date_headers] = %q, want %q", cfg.Origins["browse.date_headers"], OriginFile)
+	}
+
+	// An explicit `date_headers = true` is the same as the default, but must
+	// still be attributed to the file.
+	path = writeConfig(t, "[browse]\ndate_headers = true\n")
+	t.Setenv("LAZYRECALL_CONFIG", path)
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Browse.DateHeaders {
+		t.Error("date_headers = true: Browse.DateHeaders = false, want true")
+	}
+	if cfg.Origins["browse.date_headers"] != OriginFile {
+		t.Errorf("Origins[browse.date_headers] = %q, want %q", cfg.Origins["browse.date_headers"], OriginFile)
+	}
+}
+
 // TestDefaultGroupAcceptsEveryValidValue covers every value
 // browse.default_group may take: empty and its explicit spelling "all" (both
 // mean no group filter and normalize to ""), the two built-in views, and a
@@ -474,6 +548,66 @@ func TestDefaultGroupAcceptsEveryValidValue(t *testing.T) {
 		if cfg.Browse.DefaultGroup != c.want {
 			t.Errorf("default_group = %q: Browse.DefaultGroup = %q, want %q", c.value, cfg.Browse.DefaultGroup, c.want)
 		}
+	}
+}
+
+// TestTranscriptModeDefaultsToClean covers change clean-transcript-mode:
+// with no config file, browse.transcript is "clean" - the reading view the
+// feature exists for - not the technical "full" view the Transcript tab
+// rendered before the toggle existed.
+func TestTranscriptModeDefaultsToClean(t *testing.T) {
+	t.Setenv("LAZYRECALL_CONFIG", filepath.Join(t.TempDir(), "absent.toml"))
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Browse.Transcript != "clean" {
+		t.Errorf("Browse.Transcript = %q, want clean", cfg.Browse.Transcript)
+	}
+	if cfg.Origins["browse.transcript"] != OriginDefault {
+		t.Errorf("Origins[browse.transcript] = %q, want %q", cfg.Origins["browse.transcript"], OriginDefault)
+	}
+}
+
+// TestTranscriptModeAcceptsBothValidValues covers the two renderings
+// browse.transcript may name; each loads without error, keeps its own
+// spelling (unlike browse.default_group, neither value normalizes to
+// another), and is recorded as file-origin.
+func TestTranscriptModeAcceptsBothValidValues(t *testing.T) {
+	for _, value := range []string{"clean", "full"} {
+		path := writeConfig(t, fmt.Sprintf("[browse]\ntranscript = %q\n", value))
+		t.Setenv("LAZYRECALL_CONFIG", path)
+
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("transcript = %q: unexpected error: %v", value, err)
+		}
+		if cfg.Browse.Transcript != value {
+			t.Errorf("transcript = %q: Browse.Transcript = %q, want %q", value, cfg.Browse.Transcript, value)
+		}
+		if cfg.Origins["browse.transcript"] != OriginFile {
+			t.Errorf("transcript = %q: Origins[browse.transcript] = %q, want %q", value, cfg.Origins["browse.transcript"], OriginFile)
+		}
+	}
+}
+
+// TestInvalidTranscriptModeIsConfigError mirrors
+// TestInvalidDefaultGroupIsConfigError: a typo'd browse.transcript must be a
+// hard error naming the file and the value, not a silent fall-through to
+// clean or full.
+func TestInvalidTranscriptModeIsConfigError(t *testing.T) {
+	path := writeConfig(t, "[browse]\ntranscript = \"tidy\"\n")
+	t.Setenv("LAZYRECALL_CONFIG", path)
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected a config error for an invalid transcript mode, got nil")
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Errorf("error %q does not name the config file", err.Error())
+	}
+	if !strings.Contains(err.Error(), "tidy") {
+		t.Errorf("error %q does not name the offending value", err.Error())
 	}
 }
 

@@ -41,12 +41,13 @@ lazyrecall                  open the interactive browser
 lazyrecall list      [--agent=NAME] [--client=NAME] [--repo=PATH] [--tag=NAME] [--group=NAME] [--since=DAYS] [--all] [--json]
 lazyrecall search    QUERY [--agent=NAME] [--client=NAME] [--repo=PATH] [--tag=NAME] [--group=NAME] [--all] [--json]
 lazyrecall review    [--group=NAME] [--all] [--json]
-lazyrecall resume    [SESSION_ID]
+lazyrecall resume    [SESSION_ID|PREFIX|.] [--last] [--repo=PATH] [--agent=NAME] [--client=NAME] [--tag=NAME] [--group=NAME]
 lazyrecall comment   add SESSION_ID TEXT... | list SESSION_ID | rm COMMENT_ID
 lazyrecall tag       add SESSION_ID TAG | rm SESSION_ID TAG | list
 lazyrecall archive   SESSION_ID | list
 lazyrecall unarchive SESSION_ID
 lazyrecall group     SESSION_ID NAME | SESSION_ID archive | SESSION_ID --auto
+lazyrecall name      SESSION_ID TEXT... | SESSION_ID --clear
 lazyrecall refresh   [--full]
 lazyrecall browse    [QUERY] [--agent=NAME] [--client=NAME] [--repo=PATH] [--tag=NAME] [--group=NAME] [--all]
 lazyrecall groups    [--json]
@@ -57,6 +58,12 @@ lazyrecall version, --version, -v
 A session held somewhere other than the agent's own terminal - a Neovim CodeCompanion chat, say, which reaches Claude Code over ACP - is listed as `[claude·acp]` and selected by `--client=acp`.
 
 `--group` narrows to one view of a session's group (see [Groups](#groups) below, and `lazyrecall groups` for the configured names on this machine): a configured group's name, `archive` for every archived session, or `unknown` for sessions no group rule or manual choice has claimed. With no `--group`, a listing shows every non-archived session regardless of group - the same as before groups existed, and the same as it looks with no `[groups.*]` configured at all.
+
+`lazyrecall resume` takes a session two ways beyond the interactive picker. A `SESSION_ID` is a short handle (`3`), a full composite identifier, or an unambiguous prefix of at least 4 characters of either - `9f2a` resumes the same session `claude:cc:9f2a1b3c-...` does, as long as no other session's id or prefix starts the same way; a prefix that matches more than one session prints a short list of candidates instead of guessing, and this applies everywhere a session id is accepted (`comment`, `tag`, `archive`, `unarchive`, `group`, `resume`), not just here. `.` resumes the most recently active session in the current directory's own repository directly, with no picker - matched the same literal way `--repo=PATH` is, against a session's own recorded repository or working directory, never a path lazyrecall resolves or expands itself. `--last` resumes the most recently active session of the current listing directly, with no picker either; combined with `--repo=PATH` (and `--agent`/`--client`/`--tag`/`--group`), it resumes the newest session matching those filters. With no `SESSION_ID` and no `--last`, `lazyrecall resume` opens the numbered picker, narrowed by whichever of those filters were given.
+
+`lazyrecall name` sets lazyrecall's own name for a session, held separately from anything a source tool records - Claude Code's own rename (`sessions.name`) is untouched and still shown alongside it when the two differ. It is an annotation like a tag or a comment: it lives on the durable lineage, so it survives an index rebuild and moves with a session that continues under a new identifier. Once set, it takes over the row and Detail tab's name slot, ahead of the source-recorded name and the topic. `lazyrecall name SESSION_ID --clear` removes it, and the browser's `r` key does the same thing interactively (see [Key bindings](#key-bindings) below).
+
+A session carrying comments shows a small `✎N` marker on its row (e.g. `✎2` for two comments) - a hint that there is more to read on the Detail or Comments tab. On a row too narrow for everything, the topic is shortened first to keep it; the marker only gives way once keeping it would leave too little of the topic to recognize the session by.
 
 ## Key bindings
 
@@ -72,6 +79,7 @@ A session held somewhere other than the agent's own terminal - a Neovim CodeComp
 | `esc` | Clear what this panel is filtering by |
 | `[` / `]` | Previous / next tab in the detail pane (Detail, Prompts, Transcript, Comments) |
 | `n` / `N` | On the Transcript tab, scroll to the next / previous occurrence of the search phrase |
+| `t` | On the Transcript tab, toggle between the clean question/answer view and the full technical transcript |
 | `d` | Take the tag under the cursor off the selected session (Tags panel) |
 | `/` | Keep only the focused panel's rows containing what you type |
 | `s` | Full-text search over your own prompts |
@@ -81,20 +89,23 @@ A session held somewhere other than the agent's own terminal - a Neovim CodeComp
 | `R` | Refresh the index |
 | `m` / `M` | Add / remove a tag on the selected session (`d` in the Tags panel is usually easier) |
 | `c` / `C` | Add / remove a comment on the selected session |
+| `r` | Set or clear lazyrecall's own name for the selected session (blank input clears it) |
 | `a` | Archive / unarchive the selected session |
 | `.` | Toggle showing sessions the hide rules and the archive flag suppress |
 | `?` | Show this list |
 | `q`, `Ctrl-C` | Quit |
 
+The Sessions panel groups its rows under dim separators - `── Today ──`, `── Yesterday ──`, `── Last 7 days ──`, `── Last 30 days ──`, `── Older ──`, and `── Unknown date ──` for a session with no recorded activity time - based on each session's last activity in local time, with a separator only for a bucket that actually has a session in it. They only ever appear while the list is sorted newest-first, which is every ordinary view (the plain listing, the `/` row filter, and `s` full-text search all keep that order); moving, resuming, and everything else about the list is unaffected either way, since the separators are not rows you can select. Turn them off with `browse.date_headers = false` in the config file (see [Configuration](#configuration)).
+
 ## The detail pane
 
 The right-hand pane has four tabs, reached with `[` and `]`.
 
-**Detail** is the session's metadata: its identifier and handle, the agent and the client it was driven through, the install it ran under, working directory and branch, end state, last activity, name, topic, group, and tags. The install line names the account, e.g. `install: ccp (~/.claude-personal)`. The group line appears only when groups are configured (see [Groups](#groups) below) and says why the session landed where it did: `group: work (set manually)`, `group: work (path ~/code)`, or `group: unknown`.
+**Detail** is the session's metadata: its identifier and handle, the agent and the client it was driven through, the install it ran under, working directory and branch, end state, last activity, name, topic, group, tags, and a preview of the most recent comments. The install line names the account, e.g. `install: ccp (~/.claude-personal)`. The group line appears only when groups are configured (see [Groups](#groups) below) and says why the session landed where it did: `group: work (set manually)`, `group: work (path ~/code)`, or `group: unknown`. The name line shows the effective name - lazyrecall's own (`r`, or `lazyrecall name`) when one is set, otherwise the name a source tool recorded; when both exist and differ, the source-recorded one gets its own `agent name:` line underneath so you can see what a session was renamed away from. The comments section shows the 3 most recent comments in the same format as the Comments tab, `(none)` when there are none, and `(+N more on the Comments tab)` when there are more than 3 - the Comments tab itself always shows every one of them.
 
 **Prompts** is what you actually typed in that session, which is usually the only part of it you remember.
 
-**Transcript** is the conversation itself - your turns, the agent's replies, the tools it called, and any compaction boundaries - read when you select the session. It exists so you can tell whether a session is the one you meant *before* resuming it, since resuming takes over the terminal and moves you into the session's working directory. The end of the conversation is what it keeps: how a session started is already answered by Prompts, and what you need before resuming is where it was left. When there is a search phrase in play, every occurrence is highlighted and `n` / `N` step through them.
+**Transcript** is the conversation itself - your turns, the agent's replies, the tools it called, and any compaction boundaries - read when you select the session. It exists so you can tell whether a session is the one you meant *before* resuming it, since resuming takes over the terminal and moves you into the session's working directory. The end of the conversation is what it keeps: how a session started is already answered by Prompts, and what you need before resuming is where it was left. When there is a search phrase in play, every occurrence is highlighted and `n` / `N` step through them. The tab opens in **clean** mode by default (`browse.transcript` below): tool calls and compaction boundaries are hidden, and the replies left adjacent once they are gone are merged into one block, so a session reads as question/answer instead of interleaved with everything it did along the way. Press `t` to switch to **full** mode, which shows every turn exactly as it always has; the tab's top border always names the active mode and the key that changes it. The mode you land on persists for as long as the browser stays open, across every session you look at.
 
 It works for every source but one, from whichever place that source keeps its conversation. `claude`, `pi` and `omp` write transcript files, which are read directly. `hermes`, `goose`, `opencode` and `kilo` write no files at all, but the conversation is in the same database lazyrecall already reads for the session list, so it is read back from there - no agent is ever invoked to fetch it. `antigravity` is the exception: its per-conversation detail is protobuf with no available schema, so the tab says the format cannot be decoded rather than reporting an error. A transcript file the agent has since cleaned up is reported in the same spirit.
 
@@ -113,7 +124,7 @@ It works for every source but one, from whichever place that source keeps its co
 | `kilo` | SQLite at `~/.local/share/kilo/kilo.db` | niche |
 | `antigravity` (Antigravity CLI, `agy`) | SQLite at `~/.gemini/antigravity-cli/conversation_summaries.db`; listing only, not full-text searchable - see note below | niche |
 
-Plainly: if you use Claude Code, `claude` is the one you will actually have; the rest are niche tools most people will not have installed at all. Each source is a set of roots to scan plus an adapter; new sources are added via the `[sources]` config table (see [Configuration](#configuration)) and an adapter in the code.
+Plainly: if you use Claude Code, `claude` is the one you will actually have; the rest are niche tools most people will not have installed at all. Each source is a set of roots to scan plus an adapter; new sources are added via the `[sources]` config table (see [Configuration](#configuration)) and [an adapter in the code](docs/adding-a-source.md).
 
 `goose`, `opencode`, `kilo`, and `antigravity` keep everything in one SQLite database rather than per-session transcript files, the same shape `hermes` already used - so they need no transcript parser, just a query. `kilo` ships `opencode`'s schema and `--session` flag verbatim under its own name, so one adapter serves both. `antigravity` is the exception worth knowing about: its per-conversation detail is stored as protobuf with no available schema to decode, so its sessions show up with a topic, working directory, and end time like everything else, but `s` (full-text prompt search) will never find anything inside them - only their title/preview, which `/` (the row filter) already covers.
 
@@ -137,6 +148,8 @@ Configuration is optional and lives at `~/.config/lazyrecall/config.toml` (`$LAZ
 | `hide.paths` | `[]` |
 | `browse.show_archived` | `false` |
 | `browse.default_group` | `""` (All); also accepts `all`, `archive`, `unknown`, or a configured group's name - anything else is a config error naming the file and the bad value |
+| `browse.transcript` | `"clean"`; also accepts `"full"` - anything else is a config error naming the file and the bad value |
+| `browse.date_headers` | `true` |
 
 `resume` is an argv template in which `{id}` is replaced with the session id; `env_var` names the environment variable set to the install's root when resuming; `single_install` marks a source that can only ever have one install, which is then named after the source itself (`omp`, `pi`, ...), while a source that can have several installs (`claude`) names each one after its root directory (`claude`, `claude-personal`).
 

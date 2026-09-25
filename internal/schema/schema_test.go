@@ -653,6 +653,206 @@ INSERT INTO sessions (id, source, source_session_id, lineage_id, end_state, orig
 	}
 }
 
+// TestFreshDatabaseHasCustomNameColumn covers the follow-up to change
+// show-session-names (that change's own non-goal deferred in-lazyrecall
+// naming as "a separate, annotation-shaped capability"): a fresh install
+// at the current schema version must have lineages.custom_name.
+func TestFreshDatabaseHasCustomNameColumn(t *testing.T) {
+	r := testRunner(t)
+	if _, err := Open(r); err != nil {
+		t.Fatal(err)
+	}
+	var cols []struct {
+		Name string `json:"name"`
+	}
+	if err := r.Query(`PRAGMA table_info(lineages);`, &cols); err != nil {
+		t.Fatal(err)
+	}
+	if !hasColumn(cols, "custom_name") {
+		t.Errorf("expected lineages.custom_name to exist on a fresh database, columns: %+v", cols)
+	}
+}
+
+// TestV9ToV10MigrationAddsCustomNameKeepsData covers an existing database
+// at schema version 9 (with lineages, comments, tags, handle, archived_at
+// and group_name already populated): on the next Open it must gain
+// lineages.custom_name (NULL, migrated forward like group_name was at v8)
+// while every existing annotation stays intact and the disposable index is
+// discarded and rebuilt as usual.
+// TestV9ToV10MigrationAddsCustomNameKeepsData covers the fix that made v10
+// annotation-only (annotationOnly[10]): unlike every migration test above
+// it, which built a v-shaped `sessions` table by hand and expected it gone
+// after Open (the index used to be unconditionally dropped and rebuilt on
+// any version bump), this one seeds the REAL index tables via indexDDL -
+// the v9 and v10 index shapes are identical, since v10 touches only
+// lineages - with rows in sessions, prompt_fts, and cursors, and asserts
+// they are all still there after migrating. A session's row is the only
+// record of it once its transcript is gone (Claude Code deletes transcripts
+// after 30 days), so dropping the index here would permanently erase such
+// sessions for no reason connected to what this migration actually
+// changes - the exact regression a coordinator review caught before this
+// change shipped.
+func TestV9ToV10MigrationAddsCustomNameKeepsData(t *testing.T) {
+	r := testRunner(t)
+
+	v9DDL := `
+CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+INSERT INTO schema_meta (key, value) VALUES ('schema_version', '9');
+CREATE TABLE lineages (id TEXT PRIMARY KEY, profile TEXT NOT NULL, orphaned INTEGER NOT NULL DEFAULT 0, handle INTEGER, archived_at INTEGER, group_name TEXT);
+CREATE UNIQUE INDEX idx_lineages_handle ON lineages(handle);
+CREATE TABLE comments (id INTEGER PRIMARY KEY AUTOINCREMENT, lineage_id TEXT NOT NULL, body TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+CREATE INDEX idx_comments_lineage ON comments(lineage_id);
+CREATE TABLE tags (lineage_id TEXT NOT NULL, tag TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (lineage_id, tag));
+CREATE INDEX idx_tags_tag ON tags(tag);
+` + indexDDL + `
+INSERT INTO lineages (id, profile, orphaned, handle, archived_at, group_name) VALUES ('lin_1', 'p', 0, 5, NULL, 'work');
+INSERT INTO comments (lineage_id, body, created_at, updated_at) VALUES ('lin_1', 'keep me', 1, 1);
+INSERT INTO tags (lineage_id, tag, created_at) VALUES ('lin_1', 'urgent', 1);
+INSERT INTO sessions (id, source, source_session_id, lineage_id, end_state, last_activity_at) VALUES ('s1', 'claude', 's1', 'lin_1', 'completed', 12345);
+INSERT INTO prompt_fts (session_id, kind, text) VALUES ('s1', 'prompt', 'do the thing');
+INSERT INTO cursors (source, source_id, kind, updated_at) VALUES ('claude', 's1', 'transcript_offset', 999);
+`
+	if err := r.Exec(v9DDL); err != nil {
+		t.Fatalf("seeding v9 database: %v", err)
+	}
+
+	v, err := Open(r)
+	if err != nil {
+		t.Fatalf("Open (migrating v9 -> current): %v", err)
+	}
+	if v != CurrentVersion {
+		t.Fatalf("got version %d, want %d", v, CurrentVersion)
+	}
+
+	var lineageCols []struct {
+		Name string `json:"name"`
+	}
+	if err := r.Query(`PRAGMA table_info(lineages);`, &lineageCols); err != nil {
+		t.Fatal(err)
+	}
+	if !hasColumn(lineageCols, "custom_name") {
+		t.Errorf("expected lineages.custom_name to exist after migration, columns: %+v", lineageCols)
+	}
+
+	// The whole point of making v10 annotation-only: the seeded index rows
+	// (sessions, prompt_fts, cursors) must survive a v9 -> v10 migration
+	// untouched, since nothing about this migration needs them rebuilt.
+	var sessions []struct {
+		ID string `json:"id"`
+	}
+	if err := r.Query(`SELECT id FROM sessions;`, &sessions); err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || sessions[0].ID != "s1" {
+		t.Errorf("expected the seeded session to survive an annotation-only migration, got %+v", sessions)
+	}
+
+	var prompts []struct {
+		Text string `json:"text"`
+	}
+	if err := r.Query(`SELECT text FROM prompt_fts WHERE session_id = 's1';`, &prompts); err != nil {
+		t.Fatal(err)
+	}
+	if len(prompts) != 1 || prompts[0].Text != "do the thing" {
+		t.Errorf("expected the seeded prompt to survive an annotation-only migration, got %+v", prompts)
+	}
+
+	var cursors []struct {
+		SourceID string `json:"source_id"`
+	}
+	if err := r.Query(`SELECT source_id FROM cursors;`, &cursors); err != nil {
+		t.Fatal(err)
+	}
+	if len(cursors) != 1 || cursors[0].SourceID != "s1" {
+		t.Errorf("expected the seeded cursor to survive an annotation-only migration, got %+v", cursors)
+	}
+
+	// Every annotation seeded at v9 must be intact, and custom_name on the
+	// pre-existing lineage must default to NULL rather than being
+	// backfilled to anything.
+	var lineage []struct {
+		Handle     int     `json:"handle"`
+		GroupName  *string `json:"group_name"`
+		CustomName *string `json:"custom_name"`
+	}
+	if err := r.Query(`SELECT handle, group_name, custom_name FROM lineages WHERE id = 'lin_1';`, &lineage); err != nil {
+		t.Fatal(err)
+	}
+	if len(lineage) != 1 || lineage[0].Handle != 5 || lineage[0].GroupName == nil || *lineage[0].GroupName != "work" || lineage[0].CustomName != nil {
+		t.Errorf("expected the lineage (handle, group_name, custom_name) to survive migration, got %+v", lineage)
+	}
+
+	var comments []struct {
+		Body string `json:"body"`
+	}
+	if err := r.Query(`SELECT body FROM comments;`, &comments); err != nil {
+		t.Fatal(err)
+	}
+	if len(comments) != 1 || comments[0].Body != "keep me" {
+		t.Errorf("expected the comment to survive migration, got %+v", comments)
+	}
+
+	var tags []struct {
+		Tag string `json:"tag"`
+	}
+	if err := r.Query(`SELECT tag FROM tags;`, &tags); err != nil {
+		t.Fatal(err)
+	}
+	if len(tags) != 1 || tags[0].Tag != "urgent" {
+		t.Errorf("expected the tag to survive migration, got %+v", tags)
+	}
+}
+
+// TestCrossingANonAnnotationOnlyVersionStillRebuildsTheIndex covers the
+// other half of the annotationOnly rule: it is "skip the rebuild only when
+// EVERY version being crossed is annotation-only", not "skip it if any one
+// of them is". Simulated here with the test hook every other version-bump
+// test in this file uses (temporarily raising CurrentVersion) to stand in
+// for a hypothetical next version that isn't marked annotationOnly: crossing
+// it alongside v10 must still discard and rebuild the index.
+func TestCrossingANonAnnotationOnlyVersionStillRebuildsTheIndex(t *testing.T) {
+	r := testRunner(t)
+
+	v9DDL := `
+CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+INSERT INTO schema_meta (key, value) VALUES ('schema_version', '9');
+CREATE TABLE lineages (id TEXT PRIMARY KEY, profile TEXT NOT NULL, orphaned INTEGER NOT NULL DEFAULT 0, handle INTEGER, archived_at INTEGER, group_name TEXT);
+CREATE UNIQUE INDEX idx_lineages_handle ON lineages(handle);
+CREATE TABLE comments (id INTEGER PRIMARY KEY AUTOINCREMENT, lineage_id TEXT NOT NULL, body TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+CREATE INDEX idx_comments_lineage ON comments(lineage_id);
+CREATE TABLE tags (lineage_id TEXT NOT NULL, tag TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (lineage_id, tag));
+CREATE INDEX idx_tags_tag ON tags(tag);
+` + indexDDL + `
+INSERT INTO lineages (id, profile, orphaned, handle) VALUES ('lin_1', 'p', 0, 1);
+INSERT INTO sessions (id, source, source_session_id, lineage_id, end_state) VALUES ('s1', 'claude', 's1', 'lin_1', 'completed');
+`
+	if err := r.Exec(v9DDL); err != nil {
+		t.Fatalf("seeding v9 database: %v", err)
+	}
+
+	// CurrentVersion is 10 in this build (annotationOnly); bumping it one
+	// further simulates crossing a hypothetical v11 that is NOT
+	// annotation-only - annotationOnly has no entry for it, so it defaults
+	// to "needs a rebuild" exactly like every pre-v10 version did.
+	orig := CurrentVersion
+	CurrentVersion = orig + 1
+	defer func() { CurrentVersion = orig }()
+
+	if _, err := Open(r); err != nil {
+		t.Fatalf("Open (migrating v9 -> v%d): %v", CurrentVersion, err)
+	}
+
+	var sessions []struct {
+		ID string `json:"id"`
+	}
+	if err := r.Query(`SELECT id FROM sessions;`, &sessions); err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 0 {
+		t.Errorf("expected the index to be rebuilt when the jump also crosses a non-annotation-only version, got %d rows", len(sessions))
+	}
+}
+
 func hasColumn(cols []struct {
 	Name string `json:"name"`
 }, name string) bool {

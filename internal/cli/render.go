@@ -28,6 +28,7 @@ type jsonItem struct {
 	LastActivityAt *string  `json:"last_activity_at,omitempty"`
 	Topic          *string  `json:"topic,omitempty"`
 	Name           *string  `json:"name,omitempty"`
+	CustomName     *string  `json:"custom_name,omitempty"`
 	LastPrompt     *string  `json:"last_prompt,omitempty"`
 	EndState       string   `json:"end_state"`
 	Origin         string   `json:"origin,omitempty"`
@@ -37,6 +38,7 @@ type jsonItem struct {
 	Resumable      bool     `json:"resumable"`
 	Archived       bool     `json:"archived,omitempty"`
 	Tags           []string `json:"tags,omitempty"`
+	CommentCount   int      `json:"comment_count,omitempty"`
 	MatchSnippet   string   `json:"match_snippet,omitempty"`
 }
 
@@ -44,11 +46,11 @@ func toJSONItem(it search.Item) jsonItem {
 	j := jsonItem{
 		SessionID: it.SessionID, Source: it.Source, LineageID: it.LineageID, Handle: it.Handle,
 		CWD: it.CWD, GitBranch: it.GitBranch, GitRepoRoot: it.GitRepoRoot,
-		Topic: it.Topic, Name: it.Name, LastPrompt: it.LastPrompt, EndState: string(it.EndState),
+		Topic: it.Topic, Name: it.Name, CustomName: it.CustomName, LastPrompt: it.LastPrompt, EndState: string(it.EndState),
 		Origin:    string(it.Origin),
 		Client:    it.Client,
 		DirExists: it.DirExists, MessageCount: it.MessageCount, Resumable: it.Resumable,
-		Archived: it.Archived, Tags: it.Tags, MatchSnippet: it.MatchSnippet,
+		Archived: it.Archived, Tags: it.Tags, CommentCount: it.CommentCount, MatchSnippet: it.MatchSnippet,
 	}
 	if it.StartedAt != nil {
 		s := it.StartedAt.Format(time.RFC3339)
@@ -106,6 +108,38 @@ func WriteItemsHuman(w io.Writer, items []search.Item, emptyMessage string, opts
 			// supplementary line stays one line too.
 			fmt.Fprintf(w, "      %s\n", sanitizeSingleLine(it.MatchSnippet))
 		}
+	}
+}
+
+// maxAmbiguousCandidates caps how many candidate rows RenderAmbiguous prints
+// before collapsing the rest into one "and N more" line - enough to show a
+// handful of near-matches without letting a very short, very common prefix
+// (right down at search.minPrefixLength) dump a large fraction of the index
+// onto the terminal.
+const maxAmbiguousCandidates = 10
+
+// RenderAmbiguous writes a *search.AmbiguousError as a short, human-readable
+// report: the identifier that was ambiguous, how many sessions it matched,
+// and up to maxAmbiguousCandidates of them as rows (RenderRow - the same
+// rendering list/search/review/the picker all use), so the reader can copy
+// a longer prefix straight off one of the printed rows. This is the one
+// place every verb that resolves an identifier (comment, tag, archive,
+// unarchive, group, resume) reports an ambiguous prefix, so they can never
+// drift out of sync with each other (task: resume shortcuts and unique id
+// prefixes).
+func RenderAmbiguous(w io.Writer, err *search.AmbiguousError, opts RenderOptions) {
+	fmt.Fprintf(w, "%q matches %d sessions; type more of the id to narrow it down:\n", err.Identifier, len(err.Candidates))
+	shown := err.Candidates
+	more := 0
+	if len(shown) > maxAmbiguousCandidates {
+		shown = shown[:maxAmbiguousCandidates]
+		more = len(err.Candidates) - maxAmbiguousCandidates
+	}
+	for _, it := range shown {
+		fmt.Fprintf(w, "  %s\n", RenderRow(it, opts))
+	}
+	if more > 0 {
+		fmt.Fprintf(w, "  ...and %d more\n", more)
 	}
 }
 

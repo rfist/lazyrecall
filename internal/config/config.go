@@ -75,6 +75,25 @@ type Browse struct {
 	// not a path - the paths behind a name can change without this value
 	// going stale.
 	DefaultGroup string `toml:"default_group"`
+
+	// Transcript is which rendering the Transcript tab opens in: "clean"
+	// (the default) hides KindToolUse and KindCompactionBoundary turns and
+	// merges the runs of KindAssistantText turns that removing them leaves
+	// adjacent into one block, so a session reads as question/answer
+	// instead of interleaved with every tool call; "full" renders every
+	// turn Conversation kept, exactly as the tab has always looked (change
+	// clean-transcript-mode). The `t` key flips between them for the
+	// running browser - this only decides what a freshly opened one starts
+	// on.
+	Transcript string `toml:"transcript"`
+	// DateHeaders turns the Sessions panel's date separator rows ("── Today
+	// ──", "── Yesterday ──", ...) on or off. It defaults to true, unlike
+	// every other Browse field, which is why Load checks md.IsDefined rather
+	// than trusting the decoded bool: a file that never mentions
+	// `date_headers` must still end up true, and a decoded zero value (false)
+	// cannot be told apart from an explicit `date_headers = false` on its
+	// own.
+	DateHeaders bool `toml:"date_headers"`
 }
 
 // Group is one configured way of sorting sessions by working directory,
@@ -254,7 +273,7 @@ func defaultConfig() Config {
 			MinMessages:    0,
 			Paths:          []string{},
 		},
-		Browse: Browse{ShowArchived: false, DefaultGroup: ""},
+		Browse: Browse{ShowArchived: false, DefaultGroup: "", Transcript: "clean", DateHeaders: true},
 		// Groups is nil by default: no config means no groups, and every
 		// session resolves to Unknown (which the browser and CLI treat as
 		// "today's behavior", not as a new state to display).
@@ -274,6 +293,8 @@ func defaultOrigins(sources map[string]Source) map[string]Origin {
 		"hide.paths":           OriginDefault,
 		"browse.show_archived": OriginDefault,
 		"browse.default_group": OriginDefault,
+		"browse.transcript":    OriginDefault,
+		"browse.date_headers":  OriginDefault,
 		"labels":               OriginDefault,
 	}
 	for name := range sources {
@@ -357,6 +378,14 @@ func Load() (Config, error) {
 	if md.IsDefined("browse", "default_group") {
 		cfg.Browse.DefaultGroup = file.Browse.DefaultGroup
 		cfg.Origins["browse.default_group"] = OriginFile
+	}
+	if md.IsDefined("browse", "transcript") {
+		cfg.Browse.Transcript = file.Browse.Transcript
+		cfg.Origins["browse.transcript"] = OriginFile
+	}
+	if md.IsDefined("browse", "date_headers") {
+		cfg.Browse.DateHeaders = file.Browse.DateHeaders
+		cfg.Origins["browse.date_headers"] = OriginFile
 	}
 
 	for name, s := range file.Sources {
@@ -461,6 +490,14 @@ func Load() (Config, error) {
 	if err := validateDefaultGroup(cfg.Browse.DefaultGroup, cfg.Groups); err != nil {
 		return Config{}, fmt.Errorf("config %s: %w", path, err)
 	}
+	// browse.transcript gets the same treatment as browse.default_group
+	// just above: checked once here, right after it is set, so every
+	// caller that loads config sees the mistake instead of the browser
+	// silently falling back to whichever mode a switch statement's default
+	// case happens to pick.
+	if err := validateTranscriptMode(cfg.Browse.Transcript); err != nil {
+		return Config{}, fmt.Errorf("config %s: %w", path, err)
+	}
 	// "all" and "" both mean "no group filter" - Filter.Group's zero value
 	// already carries that meaning everywhere it is consumed (search.Filter,
 	// cmd/lazyrecall's groupLabel), and a config author writing the explicit
@@ -500,6 +537,19 @@ func validateDefaultGroup(name string, groups []Group) error {
 		valid = append(valid, g.Name)
 	}
 	return fmt.Errorf("browse.default_group %q: valid values are: %s", name, strings.Join(valid, ", "))
+}
+
+// validateTranscriptMode checks browse.transcript against the only two
+// renderings the Transcript tab has (see Browse.Transcript): anything else
+// is a typo, and a typo silently falling back to one of the two would be a
+// harder mistake to notice than a hard error naming the file and the value,
+// the same choice validateDefaultGroup makes for browse.default_group.
+func validateTranscriptMode(value string) error {
+	switch value {
+	case "clean", "full":
+		return nil
+	}
+	return fmt.Errorf("browse.transcript %q: valid values are: clean, full", value)
 }
 
 // Set records that the caller overrode one dotted key and marks where that

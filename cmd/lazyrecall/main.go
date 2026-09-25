@@ -7,6 +7,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -95,6 +96,8 @@ func run(args []string) error {
 		return cmdUnarchive(global, noRefresh, rest)
 	case "group":
 		return cmdGroup(global, noRefresh, rest)
+	case "name":
+		return cmdName(global, noRefresh, rest)
 	case "refresh":
 		return cmdRefresh(global, rest)
 	case "groups":
@@ -123,29 +126,40 @@ Usage:
   lazyrecall list      [--agent=NAME] [--client=NAME] [--repo=PATH] [--tag=NAME] [--group=NAME] [--since=DAYS] [--all] [--json]
   lazyrecall search    QUERY [--agent=NAME] [--client=NAME] [--repo=PATH] [--tag=NAME] [--group=NAME] [--all] [--json]
   lazyrecall review    [--group=NAME] [--all] [--json]
-  lazyrecall resume    [SESSION_ID]
+  lazyrecall resume    [SESSION_ID|PREFIX|.] [--last] [--repo=PATH] [--agent=NAME] [--client=NAME] [--tag=NAME] [--group=NAME]
   lazyrecall comment   add SESSION_ID TEXT... | list SESSION_ID | rm COMMENT_ID
   lazyrecall tag       add SESSION_ID TAG | rm SESSION_ID TAG | list
   lazyrecall archive   SESSION_ID | list
   lazyrecall unarchive SESSION_ID
   lazyrecall group     SESSION_ID NAME | SESSION_ID archive | SESSION_ID --auto
+  lazyrecall name      SESSION_ID TEXT... | SESSION_ID --clear
   lazyrecall refresh   [--full]
   lazyrecall browse    [QUERY] [--agent=NAME] [--client=NAME] [--repo=PATH] [--tag=NAME] [--group=NAME] [--all]
   lazyrecall groups    [--json]
   lazyrecall config    path|init|show
   lazyrecall version, --version, -v
 
-With no SESSION_ID, "lazyrecall resume" opens a numbered picker to choose from.
-Resuming runs the agent directly in this terminal - nothing else needs to be
-installed.
+With no SESSION_ID, "lazyrecall resume" opens a numbered picker to choose from
+(narrowed to --repo/--agent/--client/--tag/--group when given). Resuming runs
+the agent directly in this terminal - nothing else needs to be installed.
+
+SESSION_ID accepts a session's short handle (e.g. "3"), its full composite
+identifier, or an unambiguous prefix (at least 4 characters) of either -
+"claude:cc:9f2" resolves the same session "9f2" does, as long as only one
+session starts with it; a prefix matching more than one session is reported
+with a short list of candidates instead of guessing.
+
+"." resumes the most recently active session in the current directory's own
+repository (matched exactly like "lazyrecall list --repo=PATH" matches -
+literally, against a session's own recorded repository or working directory,
+not a path lazyrecall resolves or expands itself) - directly, with no picker.
+--last resumes the most recently active session of the default listing (or,
+combined with --repo, of that repository) directly, with no picker either.
 
 The browser - "lazyrecall" with no arguments, or "lazyrecall browse" - opens on
 the most recent sessions from every install and stays open: narrow by agent,
 repository, tag, or group from the side panels, read and edit comments/tags,
 and resume a session without leaving it.
-
-SESSION_ID accepts either a session's short handle (e.g. "3") or its full
-composite identifier.
 
 --group narrows to one view of a session's group (see "lazyrecall groups" for
 the configured names): a configured group's name, "archive" for every
@@ -345,6 +359,36 @@ func groupLabel(f search.Filter) string {
 	return f.Group
 }
 
+// resolveItem resolves arg to the session it names through
+// search.ItemForIdentifier - the single path every verb that takes a
+// session identifier (comment, tag, archive, unarchive, group, resume)
+// goes through (task: resume shortcuts and unique id prefixes), so handle
+// lookup, exact-id lookup, and unique-prefix matching - and what happens
+// when a prefix matches more than one session - can never drift apart
+// between commands. A *search.AmbiguousError has its candidate rows
+// printed to stderr through cli.RenderAmbiguous before being returned, so
+// every caller's ordinary "return err" already reports which sessions
+// matched, in the same shape list/search/review render a row in; a
+// well-formed identifier that resolves to nothing is reported with the
+// same wording regardless of which verb sent the user here.
+func resolveItem(db *sqlitex.Runner, cfg config.Config, arg string) (search.Item, error) {
+	item, ok, err := search.ItemForIdentifier(db, arg, cfg.Groups)
+	if err != nil {
+		var amb *search.AmbiguousError
+		if errors.As(err, &amb) {
+			opts := cli.DetermineOptions(os.Stderr)
+			opts.InstallLabels = installLabelsForCLI(cfg)
+			opts.GroupColors = cli.GroupColors(cfg.Groups, cfg.ArchiveColor, cfg.UnknownColor)
+			cli.RenderAmbiguous(os.Stderr, amb, opts)
+		}
+		return search.Item{}, err
+	}
+	if !ok {
+		return search.Item{}, fmt.Errorf("%q does not resolve to any session", arg)
+	}
+	return item, nil
+}
+
 func cmdList(global *flag.FlagSet, jsonFlag, allFlag, noRefresh *bool, args []string) error {
 	ff := parseFilterFlags(global)
 	if _, err := parseInterleaved(global, args); err != nil {
@@ -446,6 +490,8 @@ func cmdReview(global *flag.FlagSet, jsonFlag, allFlag, noRefresh *bool, args []
 }
 
 func cmdResume(global *flag.FlagSet, jsonFlag, noRefresh *bool, args []string) error {
+	ff := parseFilterFlags(global)
+	last := global.Bool("last", false, "resume the most recently active session directly, with no picker")
 	rest, err := parseInterleaved(global, args)
 	if err != nil {
 		return err
@@ -461,37 +507,77 @@ func cmdResume(global *flag.FlagSet, jsonFlag, noRefresh *bool, args []string) e
 	}
 
 	var target search.Item
-	if len(rest) > 0 {
-		// Accepts either the short handle or the fully-qualified session
-		// identifier (spec session-search, "Short session handle";
-		// design.md decision 4) - disambiguated purely by shape, so a
-		// handle that resolves to nothing is reported rather than
-		// silently falling through to act on some other session.
-		item, found, err := search.ItemForIdentifier(db, rest[0], cfg.Groups)
+	dot := len(rest) > 0 && rest[0] == "."
+	if len(rest) > 0 && !dot {
+		// A short handle, a fully-qualified composite id, or an unambiguous
+		// prefix of either (spec session-search, "Short session handle";
+		// design.md decision 4; task: resume shortcuts and unique id
+		// prefixes) - resolved the same way every other identifier-taking
+		// verb resolves one (resolveItem), so a handle/id/prefix that
+		// resolves to nothing, or a prefix that resolves to several
+		// sessions, is reported identically no matter which command it was
+		// typed to.
+		item, err := resolveItem(db, cfg, rest[0])
 		if err != nil {
 			return err
-		}
-		if !found {
-			return fmt.Errorf("%q does not resolve to any session", rest[0])
 		}
 		target = item
 	} else {
-		items, err := search.List(db, search.Filter{Groups: cfg.Groups})
+		// No identifier, or "." - both list sessions through exactly the
+		// filter `lazyrecall list` applies (buildFilter plus cfg.Hide), so
+		// "resume --repo=PATH" and "resume ." narrow the same way "list
+		// --repo=PATH" does. "." itself names the current directory's own
+		// repository, not a session: resolved to an absolute path first
+		// (task: resume shortcuts and unique id prefixes), then matched
+		// exactly the way --repo=PATH is already matched (Filter.Repo, a
+		// literal comparison against a session's own recorded
+		// git_common_root/cwd - see buildPredicate's "repo" clause - never a
+		// path lazyrecall itself resolves, expands, or asks git about).
+		f, err := buildFilter(cfg, ff)
 		if err != nil {
 			return err
 		}
+		f.Hide = cfg.Hide
+		if dot {
+			cwd, err := os.Getwd()
+			if err != nil {
+				return fmt.Errorf("resolving current directory: %w", err)
+			}
+			f.Repo = cwd
+		}
+
+		items, err := search.List(db, f)
+		if err != nil {
+			return err
+		}
+		// "." and --last both resume directly with no picker (spec: "resume
+		// shortcuts and unique id prefixes") - "." because there is nothing
+		// to choose from but this one repository's own history, --last
+		// because the flag says so explicitly - so finding nothing to
+		// resume is reported as a failure (non-zero exit), unlike the
+		// ordinary empty picker below, which has always exited 0.
+		noPicker := *last || dot
 		if len(items) == 0 {
-			fmt.Println(search.EmptyMessage(search.Filter{}, ""))
+			if noPicker {
+				return errors.New(search.EmptyMessage(f, ""))
+			}
+			fmt.Println(search.EmptyMessage(f, ""))
 			return nil
 		}
-		chosen, ok, err := cli.Pick(items, os.Stdin, os.Stdout)
-		if err != nil {
-			return err
+		if noPicker {
+			// search.List orders most-recently-active first, so the first
+			// row already is the "most recent session" --last/"." promise.
+			target = items[0]
+		} else {
+			chosen, ok, err := cli.Pick(items, os.Stdin, os.Stdout)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return nil
+			}
+			target = chosen
 		}
-		if !ok {
-			return nil
-		}
-		target = chosen
 	}
 
 	// Resume replaces this process with the agent on success (change
@@ -590,6 +676,10 @@ func cmdComment(global *flag.FlagSet, noRefresh *bool, args []string) error {
 	if len(rest) == 0 {
 		return fmt.Errorf("usage: lazyrecall comment add|list|rm ...")
 	}
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
 	db, err := openDB(*noRefresh, false)
 	if err != nil {
 		return err
@@ -600,20 +690,20 @@ func cmdComment(global *flag.FlagSet, noRefresh *bool, args []string) error {
 		if len(rest) < 3 {
 			return fmt.Errorf("usage: lazyrecall comment add SESSION_ID TEXT...")
 		}
-		lineage, err := annotate.LineageForIdentifier(db, rest[1])
+		item, err := resolveItem(db, cfg, rest[1])
 		if err != nil {
 			return err
 		}
-		return annotate.AddComment(db, lineage, strings.Join(rest[2:], " "))
+		return annotate.AddComment(db, item.LineageID, strings.Join(rest[2:], " "))
 	case "list":
 		if len(rest) < 2 {
 			return fmt.Errorf("usage: lazyrecall comment list SESSION_ID")
 		}
-		lineage, err := annotate.LineageForIdentifier(db, rest[1])
+		item, err := resolveItem(db, cfg, rest[1])
 		if err != nil {
 			return err
 		}
-		comments, err := annotate.CommentsForLineage(db, lineage)
+		comments, err := annotate.CommentsForLineage(db, item.LineageID)
 		if err != nil {
 			return err
 		}
@@ -646,6 +736,10 @@ func cmdTag(global *flag.FlagSet, noRefresh *bool, args []string) error {
 	if len(rest) == 0 {
 		return fmt.Errorf("usage: lazyrecall tag add|rm|list ...")
 	}
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
 	db, err := openDB(*noRefresh, false)
 	if err != nil {
 		return err
@@ -656,20 +750,20 @@ func cmdTag(global *flag.FlagSet, noRefresh *bool, args []string) error {
 		if len(rest) < 3 {
 			return fmt.Errorf("usage: lazyrecall tag add SESSION_ID TAG")
 		}
-		lineage, err := annotate.LineageForIdentifier(db, rest[1])
+		item, err := resolveItem(db, cfg, rest[1])
 		if err != nil {
 			return err
 		}
-		return annotate.AddTag(db, lineage, rest[2])
+		return annotate.AddTag(db, item.LineageID, rest[2])
 	case "rm":
 		if len(rest) < 3 {
 			return fmt.Errorf("usage: lazyrecall tag rm SESSION_ID TAG")
 		}
-		lineage, err := annotate.LineageForIdentifier(db, rest[1])
+		item, err := resolveItem(db, cfg, rest[1])
 		if err != nil {
 			return err
 		}
-		return annotate.RemoveTag(db, lineage, rest[2])
+		return annotate.RemoveTag(db, item.LineageID, rest[2])
 	case "list":
 		tags, err := annotate.AllTags(db)
 		if err != nil {
@@ -718,14 +812,14 @@ func cmdArchive(global *flag.FlagSet, noRefresh *bool, args []string) error {
 		return outputItems(items, false, 0, "No archived sessions.", "archive", installLabelsForCLI(cfg), cfg.Groups, cfg.ArchiveColor, cfg.UnknownColor)
 	}
 
-	// SESSION_ID accepts the short handle exactly like every other
-	// command (annotate.LineageForIdentifier), so "archive 3" names the
-	// same session "comment add 3 ..." does.
-	lineage, err := annotate.LineageForIdentifier(db, rest[0])
+	// SESSION_ID accepts the short handle, the full id, or an unambiguous
+	// prefix of either, exactly like every other command (resolveItem), so
+	// "archive 3" names the same session "comment add 3 ..." does.
+	item, err := resolveItem(db, cfg, rest[0])
 	if err != nil {
 		return err
 	}
-	return annotate.Archive(db, lineage)
+	return annotate.Archive(db, item.LineageID)
 }
 
 // cmdUnarchive implements `lazyrecall unarchive SESSION_ID`, returning an
@@ -738,22 +832,27 @@ func cmdUnarchive(global *flag.FlagSet, noRefresh *bool, args []string) error {
 	if len(rest) == 0 {
 		return fmt.Errorf("usage: lazyrecall unarchive SESSION_ID")
 	}
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
 	db, err := openDB(*noRefresh, false)
 	if err != nil {
 		return err
 	}
-	lineage, err := annotate.LineageForIdentifier(db, rest[0])
+	item, err := resolveItem(db, cfg, rest[0])
 	if err != nil {
 		return err
 	}
-	return annotate.Unarchive(db, lineage)
+	return annotate.Unarchive(db, item.LineageID)
 }
 
 // cmdGroup implements `lazyrecall group SESSION_ID NAME`, `lazyrecall group
 // SESSION_ID archive`, and `lazyrecall group SESSION_ID --auto` (change
 // group-sessions-in-one-index) - the CLI surface for annotate.SetGroup,
 // which also backs the browser's `p` popup in Stage E. SESSION_ID accepts
-// the short handle exactly like every other annotation command.
+// the short handle, the full id, or an unambiguous prefix of either,
+// exactly like every other annotation command (resolveItem).
 func cmdGroup(global *flag.FlagSet, noRefresh *bool, args []string) error {
 	auto := global.Bool("auto", false, "clear the manual override, returning to the automatic path-based group")
 	rest, err := parseInterleaved(global, args)
@@ -771,7 +870,7 @@ func cmdGroup(global *flag.FlagSet, noRefresh *bool, args []string) error {
 	if err != nil {
 		return err
 	}
-	lineage, err := annotate.LineageForIdentifier(db, rest[0])
+	item, err := resolveItem(db, cfg, rest[0])
 	if err != nil {
 		return err
 	}
@@ -782,10 +881,57 @@ func cmdGroup(global *flag.FlagSet, noRefresh *bool, args []string) error {
 		choice = rest[1]
 		label = choice
 	}
-	if err := annotate.SetGroup(db, cfg, lineage, choice); err != nil {
+	if err := annotate.SetGroup(db, cfg, item.LineageID, choice); err != nil {
 		return err
 	}
 	fmt.Printf("lin %s -> %s\n", rest[0], label)
+	return nil
+}
+
+// cmdName implements `lazyrecall name SESSION_ID TEXT...` and `lazyrecall
+// name SESSION_ID --clear` - the CLI surface for annotate.SetName, which
+// also backs the browser's `r` rename action. This is lazyrecall's own
+// name, distinct from sessions.name (Claude Code's own rename, surfaced as
+// search.Item.Name): it lives on the durable lineage (change
+// show-session-names' own non-goal, "a Recall-assigned name would live on
+// the durable lineage, not on the disposable index" - this is that
+// follow-up). SESSION_ID is resolved with search.ItemForIdentifier, the
+// same way `comment`/`tag`/`group` resolve a session identifier, to get at
+// the lineage id SetName writes to.
+func cmdName(global *flag.FlagSet, noRefresh *bool, args []string) error {
+	clear := global.Bool("clear", false, "clear the session's lazyrecall-assigned name")
+	rest, err := parseInterleaved(global, args)
+	if err != nil {
+		return err
+	}
+	if len(rest) == 0 || (!*clear && len(rest) < 2) {
+		return fmt.Errorf("usage: lazyrecall name SESSION_ID TEXT...|--clear")
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	db, err := openDB(*noRefresh, false)
+	if err != nil {
+		return err
+	}
+	item, err := resolveItem(db, cfg, rest[0])
+	if err != nil {
+		return err
+	}
+
+	name := ""
+	if !*clear {
+		name = strings.Join(rest[1:], " ")
+	}
+	if err := annotate.SetName(db, item.LineageID, name); err != nil {
+		return err
+	}
+	if name == "" {
+		fmt.Printf("%s -> (cleared)\n", rest[0])
+	} else {
+		fmt.Printf("%s -> %s\n", rest[0], name)
+	}
 	return nil
 }
 
@@ -1000,6 +1146,8 @@ func showConfig(cfg config.Config) error {
 		"hide.paths":           cfg.Hide.Paths,
 		"browse.show_archived": cfg.Browse.ShowArchived,
 		"browse.default_group": cfg.Browse.DefaultGroup,
+		"browse.transcript":    cfg.Browse.Transcript,
+		"browse.date_headers":  cfg.Browse.DateHeaders,
 		"labels":               cfg.Labels,
 	}
 	names := make([]string, 0, len(cfg.Sources))
@@ -1142,6 +1290,8 @@ const defaultConfigFile = `# LazyRecall configuration (lazyrecall config).
 # [browse]
 # show_archived = false
 # default_group = ""
+# transcript = "clean"
+# date_headers = true
 `
 
 // outputItems writes a listing either as JSON - an envelope naming the
@@ -1271,8 +1421,10 @@ func cmdBrowse(global *flag.FlagSet, allFlag, noRefresh *bool, args []string) er
 		Hide:          cfg.Hide,
 		Group:         group,
 		Groups:        cfg.Groups,
+		DateHeaders:   cfg.Browse.DateHeaders,
 		ArchiveColor:  cfg.ArchiveColor,
 		UnknownColor:  cfg.UnknownColor,
+		Transcript:    cfg.Browse.Transcript,
 		Installs:      discoverInstallsForBrowser,
 		InstallLabels: labels,
 	})

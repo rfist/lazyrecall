@@ -89,7 +89,16 @@ type Item struct {
 	Topic          *string
 	// Name is the session name the user set inside the source tool, when
 	// there is one. Display prefers it over Topic (see cli.RenderRow).
-	Name       *string
+	Name *string
+	// CustomName is the name the user assigned from inside lazyrecall
+	// itself (the browser's rename action, or `lazyrecall name`) - as
+	// distinct from Name, which a source tool recorded (Claude Code's
+	// rename). It lives on the durable lineages table (lineages.
+	// custom_name), so it survives an index rebuild; a session with no
+	// custom name reads back nil, never an empty string. Display prefers it
+	// over Name, which in turn is preferred over Topic (see
+	// cli.RenderRow / rowText).
+	CustomName *string
 	LastPrompt *string
 	EndState   session.EndState
 	// Origin is who drove the session, always a member of the closed set
@@ -116,6 +125,13 @@ type Item struct {
 	SourceSessionID string
 	Resumable       bool
 	Tags            []string
+	// CommentCount is how many comments are attached to this session's
+	// lineage - a correlated COUNT(*) computed at query time, never cached
+	// on a row, so it is always current with the comments table. The row
+	// renderer uses it to show a compact marker (RenderRow) only when it is
+	// greater than zero; the Detail tab uses it to say how many more
+	// comments exist beyond the handful it previews.
+	CommentCount int
 	// Archived is true when the user archived the session (change
 	// add-archive-facility). The flag lives on lineages, so it survives a
 	// full index rebuild; it is shown by `archive list` and tagged on the
@@ -168,8 +184,9 @@ func (it Item) GroupKey() (key string, isRepo bool) {
 const itemFrom = `sessions s LEFT JOIN lineages l ON l.id = s.lineage_id`
 
 var itemColumns = `s.id, s.source, s.lineage_id, l.handle, s.cwd, s.git_branch, s.git_repo_root, s.git_common_root,
-	s.started_at, s.last_activity_at, s.topic, s.name, s.last_prompt, s.end_state, s.origin, s.client, s.dir_exists, s.message_count, s.transcript_path, s.source_session_id, s.resumable,
-	l.archived_at IS NOT NULL AS archived, s.install, l.group_name IS NOT NULL AS group_manual`
+	s.started_at, s.last_activity_at, s.topic, s.name, l.custom_name, s.last_prompt, s.end_state, s.origin, s.client, s.dir_exists, s.message_count, s.transcript_path, s.source_session_id, s.resumable,
+	l.archived_at IS NOT NULL AS archived, s.install, l.group_name IS NOT NULL AS group_manual,
+	(SELECT COUNT(*) FROM comments WHERE comments.lineage_id = s.lineage_id) AS comment_count`
 
 type itemRow struct {
 	ID              string  `json:"id"`
@@ -184,6 +201,7 @@ type itemRow struct {
 	LastActivityAt  *int64  `json:"last_activity_at"`
 	Topic           *string `json:"topic"`
 	Name            *string `json:"name"`
+	CustomName      *string `json:"custom_name"`
 	LastPrompt      *string `json:"last_prompt"`
 	EndState        string  `json:"end_state"`
 	Origin          string  `json:"origin"`
@@ -196,6 +214,7 @@ type itemRow struct {
 	Archived        int64   `json:"archived"`
 	Install         *string `json:"install"`
 	GroupManual     int64   `json:"group_manual"`
+	CommentCount    int64   `json:"comment_count"`
 	// EffectiveGroup is not part of itemColumns - it depends on the ParamFile
 	// and configured groups, so every query appends it to the SELECT list
 	// itself (see effectiveGroupExpr) under this same alias.
@@ -221,6 +240,7 @@ func (row itemRow) toItem() Item {
 		GitCommonRoot:   row.GitCommonRoot,
 		Topic:           row.Topic,
 		Name:            row.Name,
+		CustomName:      row.CustomName,
 		LastPrompt:      row.LastPrompt,
 		EndState:        session.EndState(row.EndState),
 		Origin:          origin,
@@ -231,6 +251,7 @@ func (row itemRow) toItem() Item {
 		Resumable:       row.Resumable != 0,
 		Archived:        row.Archived != 0,
 		GroupManual:     row.GroupManual != 0,
+		CommentCount:    int(row.CommentCount),
 	}
 	if row.Handle != nil {
 		it.Handle = *row.Handle

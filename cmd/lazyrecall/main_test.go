@@ -909,6 +909,109 @@ func TestGroupCommandRoundTrip(t *testing.T) {
 	}
 }
 
+// TestNameCommandRoundTrip covers `lazyrecall name SESSION_ID TEXT...` and
+// `lazyrecall name SESSION_ID --clear` end to end: resolving the short
+// handle, writing lineages.custom_name through annotate.SetName exactly as
+// annotate's own unit tests establish, and clearing it again. This is
+// lazyrecall's own name, distinct from sessions.name (a source tool's own
+// rename, which `name` never touches).
+func TestNameCommandRoundTrip(t *testing.T) {
+	install, db := setupGroupTestEnv(t, "")
+	b := db.NewBatch()
+	if err := b.BulkInsert("lineages", []string{"id", "profile", "orphaned", "handle"}, []map[string]any{
+		{"id": "lin1", "profile": install, "orphaned": 0, "handle": 5},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.BulkInsert("sessions", []string{"id", "source", "source_session_id", "lineage_id", "end_state", "resumable"}, []map[string]any{
+		{"id": "claude:" + install + ":s1", "source": "claude", "source_session_id": "s1", "lineage_id": "lin1", "end_state": "completed", "resumable": 1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Run(); err != nil {
+		t.Fatal(err)
+	}
+
+	readCustomName := func() *string {
+		t.Helper()
+		var rows []struct {
+			CustomName *string `json:"custom_name"`
+		}
+		if err := db.Query("SELECT custom_name FROM lineages WHERE id = 'lin1';", &rows); err != nil {
+			t.Fatal(err)
+		}
+		if len(rows) != 1 {
+			t.Fatalf("expected exactly one lineage row, got %d", len(rows))
+		}
+		return rows[0].CustomName
+	}
+
+	out, runErr := runCaptured(t, []string{"name", "--no-refresh", "5", "the", "retry", "loop"})
+	if runErr != nil {
+		t.Fatalf("run(name 5 the retry loop): %v", runErr)
+	}
+	if !strings.Contains(out, "5") || !strings.Contains(out, "the retry loop") {
+		t.Errorf("expected the command to print what was set, got %q", out)
+	}
+	if got := readCustomName(); got == nil || *got != "the retry loop" {
+		t.Errorf("after 'name 5 the retry loop': custom_name = %v, want \"the retry loop\"", got)
+	}
+
+	if _, runErr := runCaptured(t, []string{"name", "--no-refresh", "5", "--clear"}); runErr != nil {
+		t.Fatalf("run(name 5 --clear): %v", runErr)
+	}
+	if got := readCustomName(); got != nil {
+		t.Errorf("after 'name 5 --clear': custom_name = %v, want nil", got)
+	}
+}
+
+// TestNameCommandAcceptsFullyQualifiedIdentifier covers resolving SESSION_ID
+// via search.ItemForIdentifier's other form - the full composite id, not
+// just the short handle - mirroring how comment/tag/group accept either.
+func TestNameCommandAcceptsFullyQualifiedIdentifier(t *testing.T) {
+	install, db := setupGroupTestEnv(t, "")
+	b := db.NewBatch()
+	if err := b.BulkInsert("lineages", []string{"id", "profile", "orphaned"}, []map[string]any{
+		{"id": "lin1", "profile": install, "orphaned": 0},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sessionID := "claude:" + install + ":s1"
+	if err := b.BulkInsert("sessions", []string{"id", "source", "source_session_id", "lineage_id", "end_state", "resumable"}, []map[string]any{
+		{"id": sessionID, "source": "claude", "source_session_id": "s1", "lineage_id": "lin1", "end_state": "completed", "resumable": 1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Run(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, runErr := runCaptured(t, []string{"name", "--no-refresh", sessionID, "retry-loop"}); runErr != nil {
+		t.Fatalf("run(name %s retry-loop): %v", sessionID, runErr)
+	}
+	var rows []struct {
+		CustomName *string `json:"custom_name"`
+	}
+	if err := db.Query("SELECT custom_name FROM lineages WHERE id = 'lin1';", &rows); err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].CustomName == nil || *rows[0].CustomName != "retry-loop" {
+		t.Errorf("custom_name = %+v, want retry-loop", rows)
+	}
+}
+
+// TestNameCommandUnresolvedIdentifierErrors covers an identifier that does
+// not resolve to any session: the command must report that rather than
+// silently doing nothing (the same contract every other handle-accepting
+// command has).
+func TestNameCommandUnresolvedIdentifierErrors(t *testing.T) {
+	setupGroupTestEnv(t, "")
+
+	if _, runErr := runCaptured(t, []string{"name", "--no-refresh", "999", "a name"}); runErr == nil {
+		t.Fatal("expected an error for a handle that does not resolve to any session")
+	}
+}
+
 // TestListJSONEnvelopeShape covers the restored JSON envelope
 // ({"group": ..., "items": [...]}, change group-sessions-in-one-index) for
 // `list --json`: the top-level shape, not just the item array Stage B left
@@ -1154,5 +1257,243 @@ func TestAgentFlagResolvesInstallsWithNoLabelsConfigured(t *testing.T) {
 	}
 	if got := sessionIDs(t, "claude-personal"); !reflect.DeepEqual(got, []string{"claude:claude-personal:1"}) {
 		t.Errorf("--agent=claude-personal with no labels configured: got %v, want only that install", got)
+	}
+}
+
+// The following cover task "resume shortcuts and unique id prefixes":
+// `resume --last`, `resume .`, `resume --repo=PATH`, an ambiguous prefix,
+// and an identifier that resolves to nothing. Every seeded session here has
+// dir_exists=0 (and no git_repo_root), so resume.Resume's own
+// "DirectoryMissing" outcome fires and returns before it would ever resolve
+// a program, chdir, or exec anything (internal/resume.Resume checks
+// DirExists before ProfileUnresolved, before agentCommand, before
+// exec.LookPath) - real end-to-end coverage of which session cmdResume
+// selected, with no stub needed and no risk of actually invoking an agent.
+// The outcome message echoes back the session's own CWD, which is how each
+// test tells which session was chosen.
+
+// seedResumeCandidate inserts one never-actually-resumed session: resumable,
+// but with a missing working directory, so Resume reports DirectoryMissing
+// (naming cwd in its message) instead of ever touching exec.LookPath or
+// execAgent. source is deliberately "pi" (no configured EnvVar), so
+// resumeSource's profile-environment lookup succeeds trivially with no
+// installation discovery needed - irrelevant here anyway, since
+// DirectoryMissing is decided first.
+func seedResumeCandidate(t *testing.T, db *sqlitex.Runner, id, lineageID, cwd, gitCommonRoot string, lastActivityAt int64) {
+	t.Helper()
+	rec := map[string]any{
+		"id": id, "source": "pi", "source_session_id": id, "lineage_id": lineageID,
+		"end_state": "completed", "resumable": 1, "origin": "interactive",
+		"cwd": cwd, "dir_exists": 0, "last_activity_at": lastActivityAt,
+	}
+	if gitCommonRoot != "" {
+		rec["git_common_root"] = gitCommonRoot
+	}
+	b := db.NewBatch()
+	if err := b.BulkInsert("sessions", keysOf(rec), []map[string]any{rec}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Run(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func keysOf(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+// TestResumeLastFlagPicksMostRecentDefaultListing covers `resume --last`:
+// the most recent session of the same default listing `lazyrecall list`
+// applies with no flags (non-archived, hide rules applied), with no picker.
+func TestResumeLastFlagPicksMostRecentDefaultListing(t *testing.T) {
+	_, db := setupGroupTestEnv(t, "")
+	seedResumeCandidate(t, db, "pi:p:older", "lin-older", "/only-older", "", 100)
+	seedResumeCandidate(t, db, "pi:p:newer", "lin-newer", "/only-newer", "", 900)
+
+	out, runErr := runCaptured(t, []string{"resume", "--no-refresh", "--last"})
+	if runErr != nil {
+		t.Fatalf("run(resume --last): %v", runErr)
+	}
+	if !strings.Contains(out, "/only-newer") {
+		t.Errorf("expected the most recently active session to be chosen, got:\n%s", out)
+	}
+	if strings.Contains(out, "/only-older") {
+		t.Errorf("expected the older session not to be chosen, got:\n%s", out)
+	}
+}
+
+// TestResumeLastFlagNoSessionsExitsNonZero covers that --last, unlike the
+// ordinary empty picker, reports failure (non-zero exit) when there is
+// nothing to resume - --last promises to resume something directly, and an
+// empty index cannot honour that promise silently.
+func TestResumeLastFlagNoSessionsExitsNonZero(t *testing.T) {
+	setupGroupTestEnv(t, "")
+
+	_, runErr := runCaptured(t, []string{"resume", "--no-refresh", "--last"})
+	if runErr == nil {
+		t.Fatal("expected a non-zero exit when --last has no session to resume")
+	}
+}
+
+// TestResumeDotResumesMostRecentSessionInCurrentRepo covers `resume .`:
+// resolved to the current directory's own absolute path first, then matched
+// exactly the way `list --repo=PATH` matches (literal comparison against a
+// session's own recorded git_common_root, falling back to cwd) - narrowing
+// out a session recorded elsewhere even though it is more recently active,
+// and picking the newer of two sessions within the matching repo.
+func TestResumeDotResumesMostRecentSessionInCurrentRepo(t *testing.T) {
+	_, db := setupGroupTestEnv(t, "")
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedResumeCandidate(t, db, "pi:p:here", "lin-here", cwd, "", 100)
+	seedResumeCandidate(t, db, "pi:p:elsewhere", "lin-elsewhere", "/elsewhere/repo", "", 900)
+
+	out, runErr := runCaptured(t, []string{"resume", "--no-refresh", "."})
+	if runErr != nil {
+		t.Fatalf("run(resume .): %v", runErr)
+	}
+	if !strings.Contains(out, cwd) {
+		t.Errorf("expected the session recorded in the current directory to be chosen, got:\n%s", out)
+	}
+	if strings.Contains(out, "/elsewhere/repo") {
+		t.Errorf("expected the more-recent-but-elsewhere session not to be chosen, got:\n%s", out)
+	}
+}
+
+// TestResumeDotNoMatchExitsNonZero covers "If nothing matches, print a
+// clear message and exit non-zero" for `resume .`.
+func TestResumeDotNoMatchExitsNonZero(t *testing.T) {
+	_, db := setupGroupTestEnv(t, "")
+	seedResumeCandidate(t, db, "pi:p:elsewhere", "lin-elsewhere", "/elsewhere/repo", "", 100)
+
+	out, runErr := runCaptured(t, []string{"resume", "--no-refresh", "."})
+	if runErr == nil {
+		t.Fatalf("expected a non-zero exit when \".\" matches no session, got output:\n%s", out)
+	}
+}
+
+// TestResumeRepoFlagOpensPickerNarrowedToRepo covers `resume --repo=PATH`
+// with no --last: a picker (the numbered list, cli.Pick), narrowed to that
+// repo. Stdin is redirected to immediate EOF, so Pick reports no choice was
+// made (ok=false) without hanging or resuming anything - what is asserted
+// here is only which sessions were offered.
+func TestResumeRepoFlagOpensPickerNarrowedToRepo(t *testing.T) {
+	_, db := setupGroupTestEnv(t, "")
+	seedResumeCandidate(t, db, "pi:p:in-repo", "lin-in-repo", "/repo/proj", "/repo/proj", 100)
+	seedResumeCandidate(t, db, "pi:p:other", "lin-other", "/elsewhere", "", 200)
+
+	oldStdin := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.Close() // immediate EOF: Pick reads nothing and reports ok=false
+	os.Stdin = r
+	t.Cleanup(func() { os.Stdin = oldStdin })
+
+	out, runErr := runCaptured(t, []string{"resume", "--no-refresh", "--repo=/repo/proj"})
+	if runErr != nil {
+		t.Fatalf("run(resume --repo=/repo/proj): %v", runErr)
+	}
+	if !strings.Contains(out, "/repo/proj") {
+		t.Errorf("expected the in-repo session to be offered in the picker, got:\n%s", out)
+	}
+	if strings.Contains(out, "/elsewhere") {
+		t.Errorf("expected the picker to be narrowed to the repo, got:\n%s", out)
+	}
+}
+
+// TestResumeRepoWithLastResumesNewestInThatRepo covers `resume
+// --repo=PATH --last`: the newest session in that repo, resumed directly
+// with no picker - not merely the newest session overall.
+func TestResumeRepoWithLastResumesNewestInThatRepo(t *testing.T) {
+	_, db := setupGroupTestEnv(t, "")
+	const repo = "/repo/proj"
+	seedResumeCandidate(t, db, "pi:p:repo-old", "lin-repo-old", repo+"/old", repo, 100)
+	seedResumeCandidate(t, db, "pi:p:repo-new", "lin-repo-new", repo+"/new", repo, 500)
+	seedResumeCandidate(t, db, "pi:p:elsewhere", "lin-elsewhere", "/elsewhere", "", 900)
+
+	out, runErr := runCaptured(t, []string{"resume", "--no-refresh", "--repo=" + repo, "--last"})
+	if runErr != nil {
+		t.Fatalf("run(resume --repo=%s --last): %v", repo, runErr)
+	}
+	if !strings.Contains(out, repo+"/new") {
+		t.Errorf("expected the newest session within the repo to be chosen, got:\n%s", out)
+	}
+	if strings.Contains(out, repo+"/old") || strings.Contains(out, "/elsewhere") {
+		t.Errorf("expected only the newest in-repo session to be chosen, got:\n%s", out)
+	}
+}
+
+// TestResumeIdentifierDoesNotResolve covers the "no match" outcome for a
+// plain (non-handle, non-prefix-ambiguous) identifier: reported as an
+// error, not a silent no-op.
+func TestResumeIdentifierDoesNotResolve(t *testing.T) {
+	setupGroupTestEnv(t, "")
+
+	_, runErr := runCaptured(t, []string{"resume", "--no-refresh", "nosuchsession"})
+	if runErr == nil {
+		t.Fatal("expected an error for an identifier that resolves to nothing")
+	}
+	if !strings.Contains(runErr.Error(), "nosuchsession") {
+		t.Errorf("error %q should name the identifier that did not resolve", runErr.Error())
+	}
+}
+
+// TestResumeAmbiguousPrefixPrintsCandidatesAndExitsNonZero covers a unique
+// id prefix that matches more than one session: a short list of candidate
+// rows printed to stderr (cli.RenderAmbiguous), and a non-zero exit -
+// covering `resume`'s use of the same resolveItem/search.ItemForIdentifier
+// path every other identifier-taking verb uses.
+func TestResumeAmbiguousPrefixPrintsCandidatesAndExitsNonZero(t *testing.T) {
+	_, db := setupGroupTestEnv(t, "")
+	// Distinct cwds so the two candidates' printed rows are distinguishable
+	// - RenderRow shows neither the composite id nor the native
+	// SourceSessionID, only fields like location/topic/tags.
+	b := db.NewBatch()
+	if err := b.BulkInsert("sessions", []string{"id", "source", "source_session_id", "lineage_id", "end_state", "resumable", "origin", "last_activity_at", "cwd"}, []map[string]any{
+		{"id": "pi:p:abcd1111", "source": "pi", "source_session_id": "abcd1111", "lineage_id": "lin1", "end_state": "completed", "resumable": 1, "origin": "interactive", "last_activity_at": 100, "cwd": "/abcd/one"},
+		{"id": "pi:p:abcd2222", "source": "pi", "source_session_id": "abcd2222", "lineage_id": "lin2", "end_state": "completed", "resumable": 1, "origin": "interactive", "last_activity_at": 200, "cwd": "/abcd/two"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Run(); err != nil {
+		t.Fatal(err)
+	}
+
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	errR, errW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldOut, oldErr := os.Stdout, os.Stderr
+	os.Stdout, os.Stderr = outW, errW
+
+	runErr := run([]string{"resume", "--no-refresh", "abcd"})
+
+	outW.Close()
+	errW.Close()
+	os.Stdout, os.Stderr = oldOut, oldErr
+	io.ReadAll(outR)
+	stderr, _ := io.ReadAll(errR)
+
+	if runErr == nil {
+		t.Fatal("expected a non-zero exit for an ambiguous prefix")
+	}
+	if !strings.Contains(runErr.Error(), "abcd") {
+		t.Errorf("error %q should name the ambiguous identifier", runErr.Error())
+	}
+	got := string(stderr)
+	if !strings.Contains(got, "/abcd/one") || !strings.Contains(got, "/abcd/two") {
+		t.Errorf("expected both candidate sessions listed on stderr, got:\n%s", got)
 	}
 }

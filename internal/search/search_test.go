@@ -1,11 +1,13 @@
 package search
 
 import (
+	"errors"
 	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/rfist/lazyrecall/internal/annotate"
 	"github.com/rfist/lazyrecall/internal/config"
 	"github.com/rfist/lazyrecall/internal/schema"
 	"github.com/rfist/lazyrecall/internal/session"
@@ -460,6 +462,100 @@ func TestListIncludesHandleFromLineage(t *testing.T) {
 	}
 }
 
+// TestListIncludesCustomNameFromLineage covers the lazyrecall-assigned name
+// (lineages.custom_name, distinct from sessions.name which a source tool
+// records): a lineage with a custom name set must have it come back on the
+// Item every query path over itemColumns returns.
+func TestListIncludesCustomNameFromLineage(t *testing.T) {
+	db := testDB(t)
+	seedLineageWithHandle(t, db, "lin1", "p", 1)
+	seedSession(t, db, map[string]any{
+		"id": "claude:p:1", "source": "claude", "source_session_id": "1", "lineage_id": "lin1",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 100,
+	})
+	if err := annotate.SetName(db, "lin1", "the release checklist"); err != nil {
+		t.Fatal(err)
+	}
+
+	items, err := List(db, Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].CustomName == nil || *items[0].CustomName != "the release checklist" {
+		t.Fatalf("expected the custom name on the listed item, got %+v", items)
+	}
+
+	it, ok, err := ItemForIdentifier(db, "1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || it.CustomName == nil || *it.CustomName != "the release checklist" {
+		t.Fatalf("expected the custom name from ItemForIdentifier, got item=%+v ok=%v", it, ok)
+	}
+}
+
+// TestListWithNoCustomNameReadsNil covers the default: a lineage with no
+// custom name ever set must read back nil, not an empty string standing in
+// for "none".
+func TestListWithNoCustomNameReadsNil(t *testing.T) {
+	db := testDB(t)
+	seedLineageWithHandle(t, db, "lin1", "p", 1)
+	seedSession(t, db, map[string]any{
+		"id": "claude:p:1", "source": "claude", "source_session_id": "1", "lineage_id": "lin1",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 100,
+	})
+
+	items, err := List(db, Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].CustomName != nil {
+		t.Fatalf("expected a nil custom name with none ever set, got %+v", items)
+	}
+}
+
+// TestListIncludesCommentCount covers the row marker's data source: a
+// lineage's comment count is a correlated COUNT(*), computed at query time
+// over every query path that selects itemColumns, and it is 0 - not
+// missing - for a session with no comments.
+func TestListIncludesCommentCount(t *testing.T) {
+	db := testDB(t)
+	seedLineageWithHandle(t, db, "lin1", "p", 1)
+	seedLineageWithHandle(t, db, "lin2", "p", 2)
+	seedSession(t, db, map[string]any{
+		"id": "claude:p:1", "source": "claude", "source_session_id": "1", "lineage_id": "lin1",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 200,
+	})
+	seedSession(t, db, map[string]any{
+		"id": "claude:p:2", "source": "claude", "source_session_id": "2", "lineage_id": "lin2",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 100,
+	})
+	if err := annotate.AddComment(db, "lin1", "first"); err != nil {
+		t.Fatal(err)
+	}
+	if err := annotate.AddComment(db, "lin1", "second"); err != nil {
+		t.Fatal(err)
+	}
+
+	items, err := List(db, Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(items))
+	}
+	byID := map[string]Item{}
+	for _, it := range items {
+		byID[it.SessionID] = it
+	}
+	if got := byID["claude:p:1"].CommentCount; got != 2 {
+		t.Errorf("comment count for lin1 = %d, want 2", got)
+	}
+	if got := byID["claude:p:2"].CommentCount; got != 0 {
+		t.Errorf("comment count for lin2 = %d, want 0", got)
+	}
+}
+
 func TestItemForIdentifierByHandle(t *testing.T) {
 	db := testDB(t)
 	seedLineageWithHandle(t, db, "lin1", "p", 3)
@@ -523,6 +619,250 @@ func TestItemForIdentifierHandlePicksMostRecentSessionInLineage(t *testing.T) {
 	}
 	if !ok || it.SessionID != "claude:p:2" {
 		t.Fatalf("expected the most recently active session in the lineage, got %+v ok=%v", it, ok)
+	}
+}
+
+// The following cover task "resume shortcuts and unique id prefixes":
+// ItemForIdentifier trying an arg that is neither a handle nor an exact id
+// match as a unique prefix of a session's composite id or its native
+// SourceSessionID.
+
+func TestItemForIdentifierPrefixOfNativeSessionID(t *testing.T) {
+	db := testDB(t)
+	seedSession(t, db, map[string]any{
+		"id": "claude:p:9f2a1b3c-uuid", "source": "claude", "source_session_id": "9f2a1b3c-uuid", "lineage_id": "lin1",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 100,
+	})
+
+	it, ok, err := ItemForIdentifier(db, "9f2a", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || it.SessionID != "claude:p:9f2a1b3c-uuid" {
+		t.Fatalf("got item=%+v ok=%v, want the session whose native id starts with the prefix", it, ok)
+	}
+}
+
+func TestItemForIdentifierPrefixOfCompositeID(t *testing.T) {
+	db := testDB(t)
+	seedSession(t, db, map[string]any{
+		"id": "claude:cc:abc123", "source": "claude", "source_session_id": "abc123", "lineage_id": "lin1",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 100,
+	})
+
+	// "claude:c" is a prefix of the composite id but not of the native
+	// SourceSessionID ("abc123") - proving the composite-id column alone is
+	// enough to resolve it.
+	it, ok, err := ItemForIdentifier(db, "claude:c", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || it.SessionID != "claude:cc:abc123" {
+		t.Fatalf("got item=%+v ok=%v, want the session whose composite id starts with the prefix", it, ok)
+	}
+}
+
+// TestItemForIdentifierExactIDWinsOverAmbiguousPrefix covers that an exact
+// composite-id match is tried, and returned, before prefix matching ever
+// runs - so a session whose id happens to be a literal prefix of a
+// different, longer session id (e.g. "s:p:abc" is a prefix of "s:p:abcxyz")
+// still resolves to itself exactly, not to an AmbiguousError.
+func TestItemForIdentifierExactIDWinsOverAmbiguousPrefix(t *testing.T) {
+	db := testDB(t)
+	seedSession(t, db, map[string]any{
+		"id": "s:p:abc", "source": "s", "source_session_id": "abc", "lineage_id": "lin1",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 100,
+	})
+	seedSession(t, db, map[string]any{
+		"id": "s:p:abcxyz", "source": "s", "source_session_id": "abcxyz", "lineage_id": "lin2",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 200,
+	})
+
+	it, ok, err := ItemForIdentifier(db, "s:p:abc", nil)
+	if err != nil {
+		t.Fatalf("expected the exact match to win with no error, got %v", err)
+	}
+	if !ok || it.SessionID != "s:p:abc" {
+		t.Fatalf("got item=%+v ok=%v, want the exact match, not an ambiguity", it, ok)
+	}
+}
+
+// TestItemForIdentifierPrefixAmbiguousReturnsCandidates covers the several-
+// matches outcome: a *AmbiguousError carrying every matching Item, most
+// recently active first, rather than ok=false or a silently arbitrary pick.
+func TestItemForIdentifierPrefixAmbiguousReturnsCandidates(t *testing.T) {
+	db := testDB(t)
+	seedSession(t, db, map[string]any{
+		"id": "claude:p:abcd1111", "source": "claude", "source_session_id": "abcd1111", "lineage_id": "lin1",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 100,
+	})
+	seedSession(t, db, map[string]any{
+		"id": "claude:p:abcd2222", "source": "claude", "source_session_id": "abcd2222", "lineage_id": "lin2",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 200,
+	})
+
+	it, ok, err := ItemForIdentifier(db, "abcd", nil)
+	if ok {
+		t.Fatalf("expected ok=false for an ambiguous prefix, got item=%+v", it)
+	}
+	var amb *AmbiguousError
+	if !errors.As(err, &amb) {
+		t.Fatalf("expected a *AmbiguousError, got %v", err)
+	}
+	if amb.Identifier != "abcd" {
+		t.Errorf("Identifier = %q, want %q", amb.Identifier, "abcd")
+	}
+	if len(amb.Candidates) != 2 {
+		t.Fatalf("expected 2 candidates, got %+v", amb.Candidates)
+	}
+	if amb.Candidates[0].SessionID != "claude:p:abcd2222" || amb.Candidates[1].SessionID != "claude:p:abcd1111" {
+		t.Errorf("expected candidates ordered most-recently-active first, got %+v", amb.Candidates)
+	}
+}
+
+// TestItemForIdentifierPrefixBelowMinimumLengthDoesNotResolve covers the
+// minimum-length floor: a 3-character prefix must not resolve even when it
+// would otherwise uniquely match exactly one session, since a fragment that
+// short would routinely be ambiguous in a real, larger index.
+func TestItemForIdentifierPrefixBelowMinimumLengthDoesNotResolve(t *testing.T) {
+	db := testDB(t)
+	seedSession(t, db, map[string]any{
+		"id": "claude:p:xyz9999", "source": "claude", "source_session_id": "xyz9999", "lineage_id": "lin1",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 100,
+	})
+
+	it, ok, err := ItemForIdentifier(db, "xyz", nil)
+	if err != nil {
+		t.Fatalf("a too-short prefix should not resolve to nothing without ever being an error, got %v", err)
+	}
+	if ok {
+		t.Fatalf("expected a 3-character prefix not to resolve, got %+v", it)
+	}
+}
+
+// TestItemForIdentifierPrefixAtMinimumLengthResolves pins the boundary
+// itself: exactly 4 characters is long enough to be tried.
+func TestItemForIdentifierPrefixAtMinimumLengthResolves(t *testing.T) {
+	db := testDB(t)
+	seedSession(t, db, map[string]any{
+		"id": "claude:p:xyz9999", "source": "claude", "source_session_id": "xyz9999", "lineage_id": "lin1",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 100,
+	})
+
+	it, ok, err := ItemForIdentifier(db, "xyz9", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || it.SessionID != "claude:p:xyz9999" {
+		t.Fatalf("got item=%+v ok=%v, want the 4-character prefix to resolve", it, ok)
+	}
+}
+
+// TestItemForIdentifierHandleNeverFallsThroughToPrefix covers that an
+// all-digit arg is only ever tried as a handle (spec session-search, "Short
+// session handle"; design.md decision 4) - never retried as an id prefix
+// even when it would otherwise uniquely match one, so an unassigned handle
+// is reported as not resolving rather than surprising the caller by
+// matching an unrelated session's native id.
+func TestItemForIdentifierHandleNeverFallsThroughToPrefix(t *testing.T) {
+	db := testDB(t)
+	// No lineage is given the handle 1234, but a session's own native id
+	// starts with the digits "1234" - if prefix matching were ever tried
+	// for an all-digit arg, this would resolve it.
+	seedSession(t, db, map[string]any{
+		"id": "claude:p:1234567", "source": "claude", "source_session_id": "1234567", "lineage_id": "lin1",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 100,
+	})
+
+	it, ok, err := ItemForIdentifier(db, "1234", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Fatalf("expected the all-digit arg to be tried only as a handle, not as a prefix, got %+v", it)
+	}
+}
+
+// TestItemForIdentifierPrefixTreatsPercentLiterally covers that the prefix
+// test never uses LIKE/GLOB semantics: a literal '%' in the typed prefix
+// must match only a literal '%' in the stored id, never "any sequence of
+// characters" the way a LIKE pattern would read it.
+func TestItemForIdentifierPrefixTreatsPercentLiterally(t *testing.T) {
+	db := testDB(t)
+	seedSession(t, db, map[string]any{
+		"id": "s:p:ab%1234", "source": "s", "source_session_id": "ab%1234", "lineage_id": "lin1",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 100,
+	})
+	// Under LIKE semantics, the pattern "ab%1%" (prefix "ab%1" plus a
+	// trailing wildcard) would also match this session, since '%' reads as
+	// "anything" - it does not literally start with "ab%1".
+	seedSession(t, db, map[string]any{
+		"id": "s:p:abY1999", "source": "s", "source_session_id": "abY1999", "lineage_id": "lin2",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 200,
+	})
+
+	it, ok, err := ItemForIdentifier(db, "ab%1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || it.SessionID != "s:p:ab%1234" {
+		t.Fatalf("got item=%+v ok=%v, want only the session whose id literally starts with \"ab%%1\"", it, ok)
+	}
+}
+
+// TestItemForIdentifierPrefixTreatsUnderscoreLiterally is
+// TestItemForIdentifierPrefixTreatsPercentLiterally's sibling for '_', which
+// GLOB (and, as "any one character", LIKE) also read as a pattern
+// character.
+func TestItemForIdentifierPrefixTreatsUnderscoreLiterally(t *testing.T) {
+	db := testDB(t)
+	seedSession(t, db, map[string]any{
+		"id": "s:p:ab_1234", "source": "s", "source_session_id": "ab_1234", "lineage_id": "lin1",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 100,
+	})
+	// Under LIKE semantics, "_" matches any single character, so "abY1999"
+	// would also match a pattern built from the prefix "ab_1" - it does not
+	// literally start with "ab_1".
+	seedSession(t, db, map[string]any{
+		"id": "s:p:abY1999", "source": "s", "source_session_id": "abY1999", "lineage_id": "lin2",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 200,
+	})
+
+	it, ok, err := ItemForIdentifier(db, "ab_1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || it.SessionID != "s:p:ab_1234" {
+		t.Fatalf("got item=%+v ok=%v, want only the session whose id literally starts with \"ab_1\"", it, ok)
+	}
+}
+
+// TestItemForIdentifierPrefixResolvesArchivedSession covers that a prefix
+// resolves an archived session exactly the way an exact id already does
+// (ItemBySessionID applies no hide/archive predicate) - archiving a session
+// must not make it unreachable by its own id.
+func TestItemForIdentifierPrefixResolvesArchivedSession(t *testing.T) {
+	db := testDB(t)
+	b := db.NewBatch()
+	if err := b.BulkInsert("lineages", []string{"id", "profile", "orphaned", "archived_at"}, []map[string]any{
+		{"id": "lin1", "profile": "p", "orphaned": 0, "archived_at": 1000},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Run(); err != nil {
+		t.Fatal(err)
+	}
+	seedSession(t, db, map[string]any{
+		"id": "claude:p:archived123", "source": "claude", "source_session_id": "archived123", "lineage_id": "lin1",
+		"end_state": "completed", "resumable": 1, "last_activity_at": 100,
+	})
+
+	it, ok, err := ItemForIdentifier(db, "arch", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || !it.Archived {
+		t.Fatalf("got item=%+v ok=%v, want the archived session to resolve by prefix", it, ok)
 	}
 }
 
