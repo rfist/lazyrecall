@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/rfist/lazyrecall/internal/annotate"
@@ -1049,6 +1050,61 @@ func TestCommentsTabShowsCommentsWithTheirIDs(t *testing.T) {
 	}
 }
 
+// TestDetailShowsNoCommentsAsNone covers the tags line's "(none)"
+// convention carried over to the new comments section on the Detail tab: a
+// session with no comments shows "(none)", not a blank section.
+func TestDetailShowsNoCommentsAsNone(t *testing.T) {
+	db := browseTestDB(t)
+	seedFixture(t, db)
+	m := newTestBrowser(db, "claude-personal", BrowserOptions{Installs: testInstalls("claude-personal")})
+	it := m.visible[0]
+	got := renderItemDetail(db, it, nil, noInstallInfo, RenderOptions{Width: 80})
+	if !strings.Contains(got, "comments: (none)") {
+		t.Errorf("expected the comments section to say (none), got:\n%s", got)
+	}
+}
+
+// TestDetailShowsUpToThreeRecentCommentsWithOverflowNote covers the Detail
+// tab's comments preview: at most the 3 most recent comments, in the same
+// date + wrapped-body format renderItemComments uses, and a note of how
+// many more exist when there are more than 3 - the Comments tab itself is
+// unaffected and still shows every one.
+func TestDetailShowsUpToThreeRecentCommentsWithOverflowNote(t *testing.T) {
+	db := browseTestDB(t)
+	seedFixture(t, db)
+	for _, body := range []string{"first note", "second note", "third note", "fourth note"} {
+		if err := annotate.AddComment(db, "L0", body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m := newTestBrowser(db, "claude-personal", BrowserOptions{Installs: testInstalls("claude-personal")})
+	var it search.Item
+	for _, x := range m.all {
+		if x.LineageID == "L0" {
+			it = x
+		}
+	}
+	got := renderItemDetail(db, it, nil, noInstallInfo, RenderOptions{Width: 80})
+
+	if strings.Contains(got, "first note") {
+		t.Errorf("expected only the 3 most recent comments, but the oldest one is shown:\n%s", got)
+	}
+	for _, want := range []string{"second note", "third note", "fourth note"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("expected recent comment %q on the Detail tab:\n%s", want, got)
+		}
+	}
+	if !strings.Contains(got, "(+1 more on the Comments tab)") {
+		t.Errorf("expected an overflow note for the 1 comment beyond the preview:\n%s", got)
+	}
+
+	// The Comments tab itself still shows every comment, unaffected.
+	full := renderItemComments(db, it, RenderOptions{Width: 80})
+	if !strings.Contains(full, "first note") {
+		t.Errorf("the Comments tab should still show every comment:\n%s", full)
+	}
+}
+
 // ---------------------------------------------------------------------
 // The action menu
 // ---------------------------------------------------------------------
@@ -1815,6 +1871,145 @@ func TestTagAndCommentEditingUpdateImmediately(t *testing.T) {
 	}
 }
 
+// TestRenameSetsNameAndUpdatesImmediately covers the `r` action end to end:
+// it opens the rename prompt blank (no custom name yet), and submitting a
+// name updates the row and the Detail tab without dismissing the browser -
+// the same "annotation edit reflects immediately" contract tag and comment
+// edits already have (TestTagAndCommentEditingUpdateImmediately).
+func TestRenameSetsNameAndUpdatesImmediately(t *testing.T) {
+	m := fixtureBrowser(t)
+	m = update(t, m, keyRunes("0"))
+	target := m.visible[0].LineageID
+
+	m = update(t, m, keyRunes("r"))
+	if m.mode != modeRename {
+		t.Fatalf("r did not open the rename prompt (mode %v)", m.mode)
+	}
+	if got := m.input.Value(); got != "" {
+		t.Errorf("rename prompt should open blank with no custom name yet, got %q", got)
+	}
+	m = update(t, m, keyRunes("retry-loop"))
+	m = update(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+
+	if got := m.visible[0].CustomName; got == nil || *got != "retry-loop" {
+		t.Fatalf("the new name is not on the row: %v", got)
+	}
+	got, err := renderCustomNameFor(t, m.db, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || *got != "retry-loop" {
+		t.Errorf("SetName was not applied to the lineage: %v", got)
+	}
+	m.tab = tabDetail
+	if got := m.detailContent(RenderOptions{Width: 60}); !strings.Contains(got, "name:   retry-loop") {
+		t.Errorf("the Detail tab does not show the new name:\n%s", got)
+	}
+}
+
+// TestRenamePrefillsCurrentName covers the browser's own conflict with the
+// non-interactive command: `r` opens the input bar with the session's
+// current custom name already filled in, not blank - an edit of what is
+// there, not a fresh prompt (change adding-annotation-shaped-naming).
+func TestRenamePrefillsCurrentName(t *testing.T) {
+	m := fixtureBrowser(t)
+	m = update(t, m, keyRunes("0"))
+	if err := annotate.SetName(m.db, m.visible[0].LineageID, "already named"); err != nil {
+		t.Fatal(err)
+	}
+	m.loadAll()
+
+	m = update(t, m, keyRunes("r"))
+	if got := m.input.Value(); got != "already named" {
+		t.Errorf("rename prompt value = %q, want it pre-filled with the current name", got)
+	}
+}
+
+// TestRenameEmptyClears covers submitting a blank rename prompt: unlike
+// modeAddTag/modeAddComment, where an empty submission is a no-op, an empty
+// rename clears a name set earlier (annotate.SetName's own contract).
+func TestRenameEmptyClears(t *testing.T) {
+	m := fixtureBrowser(t)
+	m = update(t, m, keyRunes("0"))
+	if err := annotate.SetName(m.db, m.visible[0].LineageID, "already named"); err != nil {
+		t.Fatal(err)
+	}
+	m.loadAll()
+
+	m = update(t, m, keyRunes("r"))
+	m.input.SetValue("")
+	m = update(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+
+	if got := m.visible[0].CustomName; got != nil {
+		t.Errorf("expected the name to be cleared, got %v", got)
+	}
+}
+
+// TestRenameEscCancelsWithoutChanging covers Esc leaving the rename prompt
+// with no change applied, the same contract every other prompt has.
+func TestRenameEscCancelsWithoutChanging(t *testing.T) {
+	m := fixtureBrowser(t)
+	m = update(t, m, keyRunes("0"))
+	if err := annotate.SetName(m.db, m.visible[0].LineageID, "already named"); err != nil {
+		t.Fatal(err)
+	}
+	m.loadAll()
+
+	m = update(t, m, keyRunes("r"))
+	m = update(t, m, keyRunes("something else entirely"))
+	m = update(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+
+	if m.mode != modeNone {
+		t.Errorf("esc did not leave the rename prompt (mode %v)", m.mode)
+	}
+	if got := m.visible[0].CustomName; got == nil || *got != "already named" {
+		t.Errorf("esc should not have changed the name, got %v", got)
+	}
+}
+
+// TestRenameOfferedFromActionMenuAndHelp covers the discoverability
+// requirements: `x` on the Sessions panel offers "rename this session", and
+// `?` lists the `r` binding, so the footer and help stay accurate.
+func TestRenameOfferedFromActionMenuAndHelp(t *testing.T) {
+	m := fixtureBrowser(t)
+	m = update(t, m, keyRunes("0"))
+	m = update(t, m, keyRunes("x"))
+	labels := make([]string, len(m.menuFiltered))
+	for i, a := range m.menuFiltered {
+		labels[i] = a.label
+	}
+	if !contains(labels, "rename this session") {
+		t.Errorf("the Sessions menu does not offer rename; it offers %v", labels)
+	}
+
+	found := false
+	for _, a := range browseActions {
+		if a.key == "r" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("browseActions does not document the r binding, so ? would not list it")
+	}
+}
+
+// renderCustomNameFor reads the raw custom_name a lineage has stored, for
+// tests asserting SetName's effect independent of what the browser's own
+// query happens to have cached.
+func renderCustomNameFor(t *testing.T, db *sqlitex.Runner, lineageID string) (*string, error) {
+	t.Helper()
+	var rows []struct {
+		CustomName *string `json:"custom_name"`
+	}
+	if err := db.Query("SELECT custom_name FROM lineages WHERE id = '"+lineageID+"';", &rows); err != nil {
+		return nil, err
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected exactly one lineage row for %q, got %d", lineageID, len(rows))
+	}
+	return rows[0].CustomName, nil
+}
+
 func contains(xs []string, want string) bool {
 	for _, x := range xs {
 		if x == want {
@@ -2020,6 +2215,46 @@ func TestRenderItemDetailShowsNameAndTopicSeparately(t *testing.T) {
 // TestRenderItemDetailShowsClientWithItsRawValue: the row has room only
 // for the short label, so the detail pane is where the reader can see what
 // that label was inferred from (change show-editor-clients).
+// TestRenderItemDetailPrefersCustomNameAndShowsAgentNameSeparately covers
+// the effective-name line: lazyrecall's own name (CustomName) is shown as
+// "name:", and when the source also recorded a different name, that name
+// gets its own "agent name:" line so what the session was renamed away
+// from stays visible on both sides.
+func TestRenderItemDetailPrefersCustomNameAndShowsAgentNameSeparately(t *testing.T) {
+	db := browseTestDB(t)
+	customName, sourceName, topic := "my own name", "agent-set name", "derived topic"
+	it := search.Item{SessionID: "claude:p:1", Source: "claude", CustomName: &customName, Name: &sourceName, Topic: &topic}
+	got := renderItemDetail(db, it, nil, noInstallInfo, RenderOptions{Width: 80})
+	if !strings.Contains(got, "name:   "+customName) {
+		t.Errorf("the detail pane does not show the custom name as the effective name:\n%s", got)
+	}
+	if !strings.Contains(got, "agent name: "+sourceName) {
+		t.Errorf("the detail pane does not show the source-recorded name on its own line:\n%s", got)
+	}
+	if !strings.Contains(got, "topic:  "+topic) {
+		t.Errorf("the detail pane does not still show the derived topic:\n%s", got)
+	}
+
+	// With no custom name set, the source name alone is the effective name
+	// and there is no separate "agent name:" line - exactly the pre-existing
+	// behaviour (TestRenderItemDetailShowsNameAndTopicSeparately).
+	noCustom := search.Item{SessionID: "claude:p:2", Source: "claude", Name: &sourceName, Topic: &topic}
+	got = renderItemDetail(db, noCustom, nil, noInstallInfo, RenderOptions{Width: 80})
+	if !strings.Contains(got, "name:   "+sourceName) {
+		t.Errorf("the detail pane does not fall back to the source name:\n%s", got)
+	}
+	if strings.Contains(got, "agent name:") {
+		t.Errorf("the detail pane should not show a separate agent name line with no custom name set:\n%s", got)
+	}
+
+	// A custom name identical to the source name is shown once, not twice.
+	same := search.Item{SessionID: "claude:p:3", Source: "claude", CustomName: &sourceName, Name: &sourceName}
+	got = renderItemDetail(db, same, nil, noInstallInfo, RenderOptions{Width: 80})
+	if strings.Contains(got, "agent name:") {
+		t.Errorf("an identical custom name and source name should not duplicate the line:\n%s", got)
+	}
+}
+
 func TestRenderItemDetailShowsClientWithItsRawValue(t *testing.T) {
 	db := browseTestDB(t)
 	client := "sdk-ts"
@@ -2236,6 +2471,29 @@ func TestTextFilterMatchesOnlyWhatTheRowShows(t *testing.T) {
 	// The name it does show still filters normally.
 	if got := (&browseModel{textFilter: "retry"}).applyTextFilter([]search.Item{named}); len(got) != 1 {
 		t.Errorf("filtering on the text the row shows kept %d rows, want 1", len(got))
+	}
+}
+
+// TestTextFilterMatchesCustomName covers the `/` row filter's coverage of
+// lazyrecall's own name (CustomName): since it wins the row's text slot
+// over both the source-recorded name and the topic (rowText), it must be
+// what the filter matches too, following the same "if it's on the line, it
+// filters" rule TestTextFilterMatchesOnlyWhatTheRowShows already covers for
+// Name.
+func TestTextFilterMatchesCustomName(t *testing.T) {
+	renamed := search.Item{
+		SessionID: "claude:p:1", Source: "claude", Handle: 1, EndState: "completed",
+		CustomName: strp("my own retry-loop notes"),
+		Name:       strp("agent-set name"),
+		Topic:      strp("Postman collection debugging"),
+	}
+	if got := (&browseModel{textFilter: "retry-loop"}).applyTextFilter([]search.Item{renamed}); len(got) != 1 {
+		t.Errorf("filtering on the custom name kept %d rows, want 1", len(got))
+	}
+	// The source name and topic are not shown on this row once a custom
+	// name is set (rowText precedence), so they must not match either.
+	if got := (&browseModel{textFilter: "agent-set"}).applyTextFilter([]search.Item{renamed}); len(got) != 0 {
+		t.Errorf("a row displaying the custom name survived a filter on the source name it does not show")
 	}
 }
 
@@ -3465,5 +3723,398 @@ func TestGroupsPanelAllCountWithZeroConfig(t *testing.T) {
 	}
 	if m.groups_.rows[1].Count != 1 {
 		t.Errorf("Archive row count = %d, want 1", m.groups_.rows[1].Count)
+	}
+}
+
+// ---------------------------------------------------------------------
+// Date separator rows in the Sessions panel (change date-separator-rows)
+// ---------------------------------------------------------------------
+
+// timep is dateHeaderItem's pointer helper, the *time.Time counterpart of
+// pick_test.go's strp.
+func timep(t time.Time) *time.Time { return &t }
+
+// dateHeaderItem builds a minimal search.Item for these tests: only the
+// fields sessionDisplayRows and RenderRow actually read. EndState is filled
+// in because RenderRow always draws a state slot regardless of what the test
+// cares about.
+func dateHeaderItem(handle int, at *time.Time) search.Item {
+	return search.Item{
+		SessionID:      fmt.Sprintf("claude:p:%d", handle),
+		Source:         "claude",
+		Handle:         handle,
+		EndState:       "completed",
+		LastActivityAt: at,
+	}
+}
+
+// buildBucketedItems returns perBucket sessions in each of the six buckets -
+// Today, Yesterday, Last 7 days, Last 30 days, Older, then perBucket more
+// with no LastActivityAt at all - already in the newest-first order every
+// real query returns (recencyOrdered(result) is always true), which is what
+// lets these tests build a model by hand (no DB) and still exercise the same
+// display-row math a real browsing session would.
+func buildBucketedItems(now time.Time, perBucket int) []search.Item {
+	daysAgo := []int{0, 1, 3, 10, 40}
+	var items []search.Item
+	handle := 1
+	for _, days := range daysAgo {
+		for i := 0; i < perBucket; i++ {
+			at := now.AddDate(0, 0, -days).Add(-time.Duration(i) * time.Minute)
+			items = append(items, dateHeaderItem(handle, timep(at)))
+			handle++
+		}
+	}
+	for i := 0; i < perBucket; i++ {
+		items = append(items, dateHeaderItem(handle, nil))
+		handle++
+	}
+	return items
+}
+
+// dateHeaderModel builds a browseModel directly from items, with dateHeaders
+// and a pinned clock set, and applies size - the same no-DB construction
+// TestTextFilterKeepsRecencyOrder already uses for pure display-logic tests,
+// extended with a WindowSizeMsg so geometry, rebuild and keepCursorVisible
+// all run exactly as they would in the real program. focus and detail are
+// set by hand because this bypasses newBrowseModel (which needs a real *DB*
+// to run its own loadAll) - both are things a WindowSizeMsg touches
+// regardless of which panel is focused (Update's own WindowSizeMsg case, and
+// panelDrawn's fallback to Sessions).
+func dateHeaderModel(t *testing.T, items []search.Item, headers bool, now time.Time, width, height int) *browseModel {
+	t.Helper()
+	m := &browseModel{
+		all:         items,
+		dateHeaders: headers,
+		now:         func() time.Time { return now },
+		focus:       panelSessions,
+		detail:      &viewport.Model{},
+	}
+	return update(t, m, tea.WindowSizeMsg{Width: width, Height: height})
+}
+
+// TestBucketForTimeUsesLocalMidnightBoundaries pins down the exact boundary
+// rule (spec: "based on each session's LastActivityAt in local time, with
+// boundaries at local midnight") rather than "24 hours ago": a session from
+// late last night is Yesterday even though fewer than 24 hours have passed,
+// and a session from just after midnight today is Today even though nearly
+// 24 hours have not yet passed either.
+func TestBucketForTimeUsesLocalMidnightBoundaries(t *testing.T) {
+	now := time.Date(2026, 9, 25, 0, 30, 0, 0, time.Local)
+	cases := []struct {
+		name string
+		at   time.Time
+		want dateBucket
+	}{
+		{"40 minutes ago but the previous calendar day is Yesterday", time.Date(2026, 9, 24, 23, 50, 0, 0, time.Local), bucketYesterday},
+		{"same calendar day, hours apart, is still Today", time.Date(2026, 9, 25, 0, 1, 0, 0, time.Local), bucketToday},
+		{"exactly 7 calendar days back is still Last 7 days", now.AddDate(0, 0, -7), bucketLast7Days},
+		{"8 calendar days back rolls into Last 30 days", now.AddDate(0, 0, -8), bucketLast30Days},
+		{"exactly 30 calendar days back is still Last 30 days", now.AddDate(0, 0, -30), bucketLast30Days},
+		{"31 calendar days back is Older", now.AddDate(0, 0, -31), bucketOlder},
+		{"a timestamp after now (clock skew) is still Today", now.Add(time.Hour), bucketToday},
+	}
+	for _, c := range cases {
+		if got := bucketForTime(c.at, now); got != c.want {
+			t.Errorf("%s: bucketForTime = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// TestRecencyOrderedDetectsAnOutOfOrderList covers the self-check
+// recencyOrdered's own doc comment describes: newest-first with a trailing
+// run of no-timestamp sessions is "ordered"; anything where an earlier item
+// is older than a later one is not.
+func TestRecencyOrderedDetectsAnOutOfOrderList(t *testing.T) {
+	newer := time.Date(2026, 9, 25, 10, 0, 0, 0, time.Local)
+	older := newer.AddDate(0, 0, -5)
+	ordered := []search.Item{
+		dateHeaderItem(1, timep(newer)),
+		dateHeaderItem(2, timep(older)),
+		dateHeaderItem(3, nil),
+	}
+	if !recencyOrdered(ordered) {
+		t.Error("a newest-first list with a trailing no-timestamp session was reported out of order")
+	}
+	outOfOrder := []search.Item{
+		dateHeaderItem(1, timep(older)),
+		dateHeaderItem(2, timep(newer)),
+	}
+	if recencyOrdered(outOfOrder) {
+		t.Error("an out-of-order list was reported as recency-ordered")
+	}
+}
+
+// TestDateHeadersBucketAndOrderCorrectly is the end-to-end render test: one
+// session per bucket, and the Sessions panel must draw exactly one header per
+// bucket, in bucket order, immediately before that bucket's session.
+func TestDateHeadersBucketAndOrderCorrectly(t *testing.T) {
+	now := time.Date(2026, 9, 25, 15, 0, 0, 0, time.Local)
+	items := []search.Item{
+		dateHeaderItem(1, timep(now.Add(-time.Hour))),    // Today
+		dateHeaderItem(2, timep(now.AddDate(0, 0, -1))),  // Yesterday
+		dateHeaderItem(3, timep(now.AddDate(0, 0, -3))),  // Last 7 days
+		dateHeaderItem(4, timep(now.AddDate(0, 0, -10))), // Last 30 days
+		dateHeaderItem(5, timep(now.AddDate(0, 0, -40))), // Older
+		dateHeaderItem(6, nil),                           // Unknown date
+	}
+	m := dateHeaderModel(t, items, true, now, 100, 40)
+
+	box := m.sessionsPanel(m.geometry())
+	wantLabels := []string{"Today", "Yesterday", "Last 7 days", "Last 30 days", "Older", "Unknown date"}
+	var gotLabels []string
+	for _, l := range box.Lines {
+		for _, lab := range wantLabels {
+			if strings.Contains(l, lab) {
+				gotLabels = append(gotLabels, lab)
+			}
+		}
+	}
+	if !reflect.DeepEqual(gotLabels, wantLabels) {
+		t.Errorf("header labels in order = %v, want %v\nfull render:\n%s", gotLabels, wantLabels, strings.Join(box.Lines, "\n"))
+	}
+	if len(box.Lines) != len(items)+len(wantLabels) {
+		t.Errorf("drew %d lines, want %d (one per session plus one header per bucket)", len(box.Lines), len(items)+len(wantLabels))
+	}
+}
+
+// TestDateHeadersOnlyPopulatedBucketsShowAHeader: with sessions in only two
+// of the six buckets, only those two headers may appear - a header for an
+// empty bucket would say "these are the sessions in this bucket" about
+// nothing.
+func TestDateHeadersOnlyPopulatedBucketsShowAHeader(t *testing.T) {
+	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.Local)
+	items := []search.Item{
+		dateHeaderItem(1, timep(now)),
+		dateHeaderItem(2, timep(now.AddDate(0, 0, -40))),
+	}
+	m := dateHeaderModel(t, items, true, now, 100, 40)
+	box := m.sessionsPanel(m.geometry())
+	joined := strings.Join(box.Lines, "\n")
+	for _, absent := range []string{"Yesterday", "Last 7 days", "Last 30 days", "Unknown date"} {
+		if strings.Contains(joined, absent) {
+			t.Errorf("rendered a header for an empty bucket %q:\n%s", absent, joined)
+		}
+	}
+	if !strings.Contains(joined, "Today") || !strings.Contains(joined, "Older") {
+		t.Errorf("missing an expected header:\n%s", joined)
+	}
+	if len(box.Lines) != 4 {
+		t.Errorf("drew %d lines, want 4 (2 headers + 2 sessions)", len(box.Lines))
+	}
+}
+
+// TestDateHeadersOffShowsPlainList covers browse.date_headers = false
+// (BrowserOptions.DateHeaders unset, the default off in this package - see
+// its doc comment): the exact pre-feature output, one line per session, no
+// separators at all, even though the sessions span every bucket.
+func TestDateHeadersOffShowsPlainList(t *testing.T) {
+	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.Local)
+	items := buildBucketedItems(now, 2)
+	m := dateHeaderModel(t, items, false, now, 100, 40)
+	box := m.sessionsPanel(m.geometry())
+	if len(box.Lines) != len(items) {
+		t.Errorf("dateHeaders=false drew %d lines, want exactly %d (one per session)", len(box.Lines), len(items))
+	}
+	joined := strings.Join(box.Lines, "\n")
+	for _, lab := range []string{"Today", "Yesterday", "Last 7 days", "Last 30 days", "Older", "Unknown date"} {
+		if strings.Contains(joined, lab) {
+			t.Errorf("dateHeaders=false still drew a %q header", lab)
+		}
+	}
+}
+
+// TestBrowserOptionsDateHeadersWiresThrough covers the option itself: unset
+// leaves the model's headers off (see BrowserOptions.DateHeaders' doc
+// comment on why that default lives here rather than matching the config
+// key's true default), and DateHeaders: true turns them on.
+func TestBrowserOptionsDateHeadersWiresThrough(t *testing.T) {
+	db := browseTestDB(t)
+	seedFixture(t, db)
+	off := newTestBrowser(db, "p", BrowserOptions{Installs: testInstalls("claude")})
+	if off.dateHeaders {
+		t.Error("BrowserOptions{} (DateHeaders unset) produced dateHeaders=true, want false")
+	}
+	on := newTestBrowser(db, "p", BrowserOptions{DateHeaders: true, Installs: testInstalls("claude")})
+	if !on.dateHeaders {
+		t.Error("BrowserOptions{DateHeaders: true} did not set browseModel.dateHeaders")
+	}
+}
+
+// TestDateHeadersHiddenWhenListIsNotRecencyOrdered exercises recencyOrdered's
+// self-check directly: no code path in this browser produces an out-of-order
+// m.visible today (list, "/", and "s" are all recency-ordered - see
+// recencyOrdered's doc comment), so this hand-builds the one condition that
+// would make it happen anyway, rather than trusting that invariant to hold
+// forever without anything rechecking it.
+func TestDateHeadersHiddenWhenListIsNotRecencyOrdered(t *testing.T) {
+	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.Local)
+	older := now.AddDate(0, 0, -40)
+	items := []search.Item{
+		dateHeaderItem(1, timep(older)), // deliberately older-before-newer
+		dateHeaderItem(2, timep(now)),
+	}
+	m := dateHeaderModel(t, items, true, now, 100, 40)
+	if recencyOrdered(m.visible) {
+		t.Fatal("test fixture is not actually out of order - fix the fixture")
+	}
+	box := m.sessionsPanel(m.geometry())
+	joined := strings.Join(box.Lines, "\n")
+	if len(box.Lines) != len(items) {
+		t.Errorf("out-of-order list drew %d lines, want %d (no headers)", len(box.Lines), len(items))
+	}
+	for _, lab := range []string{"Today", "Older"} {
+		if strings.Contains(joined, lab) {
+			t.Errorf("drew a header (%q) for a list that is not recency-ordered", lab)
+		}
+	}
+}
+
+// TestDateHeadersCursorIndexesSessionsNotDisplayRows: m.cursor must walk
+// exactly one session per "j", regardless of how many header rows sit
+// between them - the cursor indexes m.visible, never the mixed display-row
+// list.
+func TestDateHeadersCursorIndexesSessionsNotDisplayRows(t *testing.T) {
+	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.Local)
+	items := buildBucketedItems(now, 2)
+	m := dateHeaderModel(t, items, true, now, 100, 40)
+	for i := 0; i < len(items)-1; i++ {
+		m = update(t, m, keyRunes("j"))
+		if m.cursor != i+1 {
+			t.Fatalf("after %d 'j' presses cursor = %d, want %d", i+1, m.cursor, i+1)
+		}
+		got := m.current()
+		if got == nil || got.SessionID != items[i+1].SessionID {
+			t.Fatalf("cursor %d does not point at session %d", m.cursor, i+1)
+		}
+	}
+	// One more 'j' past the end must not move past the last session.
+	m = update(t, m, keyRunes("j"))
+	if m.cursor != len(items)-1 {
+		t.Errorf("cursor moved past the last session: %d", m.cursor)
+	}
+}
+
+// TestDateHeadersGAndCtrlDUMoveByHeaderAwareRows covers g/G and Ctrl-D/U with
+// headers on and a panel too short to show the whole list at once: every one
+// of them must still land on a real session and never overflow the panel's
+// row budget.
+func TestDateHeadersGAndCtrlDUMoveByHeaderAwareRows(t *testing.T) {
+	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.Local)
+	items := buildBucketedItems(now, 4) // 24 sessions across 6 buckets, plus their headers
+	m := dateHeaderModel(t, items, true, now, 100, 20)
+	g := m.geometry()
+	if g.sessionsInner <= 0 || g.sessionsInner >= len(items) {
+		t.Fatalf("need a panel shorter than the full list for this test to mean anything (sessionsInner=%d, sessions=%d)", g.sessionsInner, len(items))
+	}
+
+	m = update(t, m, keyRunes("G"))
+	if m.cursor != len(items)-1 {
+		t.Errorf("G put the cursor at %d, want %d", m.cursor, len(items)-1)
+	}
+	assertCursorDrawnWithinBudget(t, m, g, "G")
+
+	m = update(t, m, keyRunes("g"))
+	if m.cursor != 0 || m.listTop != 0 {
+		t.Errorf("g left cursor=%d top=%d, want 0/0", m.cursor, m.listTop)
+	}
+	assertCursorDrawnWithinBudget(t, m, g, "g")
+
+	before := m.cursor
+	m = update(t, m, tea.KeyMsg{Type: tea.KeyCtrlD})
+	if m.cursor <= before {
+		t.Errorf("Ctrl-D did not move the cursor forward: %d -> %d", before, m.cursor)
+	}
+	assertCursorDrawnWithinBudget(t, m, g, "Ctrl-D")
+
+	before = m.cursor
+	m = update(t, m, tea.KeyMsg{Type: tea.KeyCtrlU})
+	if m.cursor >= before {
+		t.Errorf("Ctrl-U did not move the cursor backward: %d -> %d", before, m.cursor)
+	}
+	assertCursorDrawnWithinBudget(t, m, g, "Ctrl-U")
+}
+
+// assertCursorDrawnWithinBudget checks the two invariants every cursor move
+// must keep, with or without headers: the panel never draws more rows than
+// its budget, and the selected session is one of the rows it drew.
+func assertCursorDrawnWithinBudget(t *testing.T, m *browseModel, g geometry, action string) {
+	t.Helper()
+	box := m.sessionsPanel(g)
+	if len(box.Lines) > g.sessionsInner {
+		t.Errorf("after %s: drew %d lines for a %d-row panel", action, len(box.Lines), g.sessionsInner)
+	}
+	if !strings.Contains(strings.Join(box.Lines, "\n"), "▸ ") {
+		t.Errorf("after %s: the selected session (cursor=%d) is not drawn:\n%s", action, m.cursor, strings.Join(box.Lines, "\n"))
+	}
+}
+
+// TestKeepCursorVisibleNeverOverflowsWithHeaders walks the cursor through an
+// entire header-bearing list at several panel heights, including ones far
+// shorter than the number of buckets - the small-terminal case the task
+// singles out - and checks at every step that the panel never draws more
+// rows than it was given and the selected session is always among the rows
+// it drew, even when its own header cannot be (h==1).
+func TestKeepCursorVisibleNeverOverflowsWithHeaders(t *testing.T) {
+	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.Local)
+	items := buildBucketedItems(now, 5) // 30 sessions across 6 buckets, plus their headers
+	for _, size := range [][2]int{{100, 10}, {100, 6}, {60, 5}, {60, 4}} {
+		m := dateHeaderModel(t, items, true, now, size[0], size[1])
+		g := m.geometry()
+		for step := 0; step < len(items); step++ {
+			box := m.sessionsPanel(g)
+			if len(box.Lines) > g.sessionsInner {
+				t.Fatalf("%v step %d: drew %d lines for a %d-row panel", size, step, len(box.Lines), g.sessionsInner)
+			}
+			if g.sessionsInner > 0 && !strings.Contains(strings.Join(box.Lines, "\n"), "▸ ") {
+				t.Fatalf("%v step %d: the selected session (cursor=%d) is not drawn:\n%s", size, step, m.cursor, strings.Join(box.Lines, "\n"))
+			}
+			m = update(t, m, keyRunes("j"))
+		}
+	}
+}
+
+// TestViewFitsTerminalWithDateHeaders is TestViewFitsTerminal's sibling with
+// headers turned on, over the same size matrix the frame-fitting regression
+// tests (e0f3b03, d781915, 57a783f, 0371e5f) use: those never set
+// BrowserOptions.DateHeaders, so without this the whole header code path
+// would go unexercised by the tests that specifically guard against the
+// frame overflowing its terminal.
+func TestViewFitsTerminalWithDateHeaders(t *testing.T) {
+	sizes := [][2]int{
+		{100, 40}, {100, 26}, {120, 30}, {80, 24}, {76, 20}, {70, 20}, {60, 14}, {40, 10},
+		{100, 4}, {100, 5}, {100, 6}, {100, 7}, {100, 8}, {100, 9}, {100, 10}, {100, 11}, {100, 12},
+		{60, 4}, {60, 5}, {60, 6}, {60, 7}, {60, 8}, {60, 9}, {60, 10}, {60, 11}, {60, 12},
+	}
+	for _, size := range sizes {
+		w, h := size[0], size[1]
+		// seedFixture's sessions are all from 2023 (browseTestDB's fixture,
+		// far in the past relative to any real clock), which lands them all
+		// in the same Older bucket against time.Now() - no injected clock
+		// here on purpose, so this also covers the real fallback in clock().
+		db := browseTestDB(t)
+		seedFixture(t, db)
+		m := newTestBrowser(db, "claude-personal", BrowserOptions{
+			DateHeaders: true, Installs: testInstalls("claude-personal"),
+		})
+		m = update(t, m, tea.WindowSizeMsg{Width: w, Height: h})
+		lines := strings.Split(m.View(), "\n")
+		if len(lines) > h {
+			t.Errorf("%dx%d: frame is %d lines, taller than the terminal", w, h, len(lines))
+		}
+		for i, l := range lines {
+			if got := visibleWidth(l); got > w {
+				t.Errorf("%dx%d: line %d is %d columns wide: %q", w, h, i, got, l)
+			}
+		}
+
+		g := m.geometry()
+		box := m.sessionsPanel(g)
+		if len(box.Lines) > g.sessionsInner {
+			t.Errorf("%dx%d: sessions panel drew %d lines for a %d-row budget", w, h, len(box.Lines), g.sessionsInner)
+		}
+		if !box.Collapsed && g.sessionsInner > 0 && !strings.Contains(strings.Join(box.Lines, "\n"), "▸ ") {
+			t.Errorf("%dx%d: the selected session is not drawn:\n%s", w, h, strings.Join(box.Lines, "\n"))
+		}
 	}
 }

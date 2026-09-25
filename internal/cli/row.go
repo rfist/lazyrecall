@@ -83,16 +83,22 @@ const (
 	slotState
 	slotTopic
 	slotTags
+	// slotComments carries the comment-count marker (e.g. "✎2"), drawn last
+	// - after tags, nearest the end of the line - and the very first thing
+	// fitRowToWidth gives up when a row does not fit (see its doc comment):
+	// it is a hint that more is recorded on the Detail tab, not identifying
+	// information the way the topic, location, or tags are.
+	slotComments
 	numSlots
 )
 
 // RenderRow renders one session as a single line: "#<handle> [<source>]
-// <location> <age> [<end state>] "<name or topic>"  #<tags>", truncated to
-// opts.Width and, when opts.Style is set, with ANSI styling that
-// distinguishes each field (task 5.2) and marks sessions needing attention
-// (task 5.3). The string returned never contains a newline, since callers
-// including the numbered-list picker (pick.go) print it as a single line
-// per session.
+// <location> <age> [<end state>] "<name or topic>"  #<tags>  ✎<comments>",
+// truncated to opts.Width and, when opts.Style is set, with ANSI styling
+// that distinguishes each field (task 5.2) and marks sessions needing
+// attention (task 5.3). The string returned never contains a newline, since
+// callers including the numbered-list picker (pick.go) print it as a single
+// line per session.
 func RenderRow(it search.Item, opts RenderOptions) string {
 	width := opts.Width
 	if width <= 0 {
@@ -118,13 +124,22 @@ func RenderRow(it search.Item, opts RenderOptions) string {
 }
 
 // rowText is what the topic slot shows, in descending order of how
-// deliberately it names the session: the name the user gave it inside the
-// source tool, then the agent-written topic, then the last prompt. A
-// chosen name wins over a derived one - the reason Name is a field of its
-// own rather than something merged into Topic during indexing (change
-// show-session-names). The same precedence is used by the browse detail
-// pane, which additionally shows the name and the topic on separate lines.
+// deliberately it names the session: the name the user assigned from
+// inside lazyrecall itself (CustomName), then the name the source tool
+// recorded (Name - Claude Code's rename), then the agent-written topic,
+// then the last prompt. A chosen name always wins over a derived one - the
+// reason Name is a field of its own rather than something merged into
+// Topic during indexing (change show-session-names) - and lazyrecall's own
+// name outranks the source's, since it is the more recent, more deliberate
+// choice: renaming a session inside lazyrecall would otherwise have no
+// visible effect while the source-recorded name was still sitting there.
+// The same precedence is used by the browse detail pane, which additionally
+// shows all three - custom name, source name, and topic - on lines of
+// their own when they differ.
 func rowText(it search.Item) string {
+	if it.CustomName != nil && *it.CustomName != "" {
+		return *it.CustomName
+	}
 	if it.Name != nil && *it.Name != "" {
 		return *it.Name
 	}
@@ -135,6 +150,18 @@ func rowText(it search.Item) string {
 		return *it.LastPrompt
 	}
 	return ""
+}
+
+// hasChosenName reports whether the topic slot is showing a name someone
+// deliberately chose (CustomName or Name) rather than text derived from the
+// session's own content (Topic, LastPrompt) - what slotColor uses to decide
+// between the upright/bold and italic styling rowText's doc comment
+// describes.
+func hasChosenName(it search.Item) bool {
+	if it.CustomName != nil && *it.CustomName != "" {
+		return true
+	}
+	return it.Name != nil && *it.Name != ""
 }
 
 // sourceSlotText names the account the session ran under, and - when the
@@ -168,6 +195,14 @@ func sourceSlotText(it search.Item, labels map[string]string) string {
 	return account + "·" + label
 }
 
+// commentMarkerGlyph marks a session that carries comments, shown in the
+// session row as this glyph followed by the count (e.g. "✎2") - a compact
+// hint that there is more to read on the Detail tab, in the spirit of
+// archivedMarker's "state must not exist only as a colour" (spec
+// session-search, "Styling disabled by the environment"): the digit next to
+// it, not the glyph's colour alone, is what a NO_COLOR user reads.
+const commentMarkerGlyph = "✎"
+
 func rowSlots(it search.Item, labels map[string]string) []string {
 	slots := make([]string, numSlots)
 
@@ -199,6 +234,10 @@ func rowSlots(it search.Item, labels map[string]string) []string {
 
 	if len(it.Tags) > 0 {
 		slots[slotTags] = "#" + strings.Join(it.Tags, " #")
+	}
+
+	if it.CommentCount > 0 {
+		slots[slotComments] = fmt.Sprintf("%s%d", commentMarkerGlyph, it.CommentCount)
 	}
 
 	// Neutralise line breaks, carriage returns, tabs, and other control
@@ -272,19 +311,45 @@ func sanitizeSingleLine(s string) string {
 // after this budget was supposedly honoured; go-runewidth measures what the
 // terminal actually draws).
 //
-// Cascade, in order: the topic is shortened first, all the way to nothing
-// if necessary; then the location, keeping its end rather than its
-// beginning (task 4.2/4.3); tags are dropped next. Ordinary content never
-// goes further than this. Only when the terminal is narrower than even
-// this floor - narrower than the decoration plus the shortest possible
-// content (design.md risk note, task 1.3) - do the remaining, more
-// identifying fields give way too: age, then end state, then the location
-// entirely, then the source, and finally the handle itself is shortened as
-// the very last resort, since it is what identifies the row and so is the
-// last thing to give ground.
+// Cascade, in order: the topic is shortened while the comment-count marker
+// stays, as long as at least markerTopicFloor columns of topic survive;
+// past that the marker is dropped - it is a hint the Detail tab can always
+// give again, not identifying information - and the topic is shortened from
+// its full length again, all the way to nothing if necessary. Dropping the
+// marker before touching the topic at all would hide it on nearly every
+// row, since a topic is almost always longer than the space left for it
+// (change comments-on-detail-and-row-marker). Then the location,
+// keeping its end rather than its beginning (task 4.2/4.3); tags are
+// dropped next. Ordinary content never goes further than this. Only when
+// the terminal is narrower than even this floor - narrower than the
+// decoration plus the shortest possible content (design.md risk note, task
+// 1.3) - do the remaining, more identifying fields give way too: age, then
+// end state, then the location entirely, then the source, and finally the
+// handle itself is shortened as the very last resort, since it is what
+// identifies the row and so is the last thing to give ground.
+// markerTopicFloor is how many columns of topic the comment-count marker
+// may shrink the topic down to before the marker itself gives way: enough
+// that the topic still says what the session was about.
+const markerTopicFloor = 12
+
 func fitRowToWidth(slots []string, width int) {
 	if joinedWidth(slots) <= width {
 		return
+	}
+
+	if slots[slotComments] != "" {
+		trial := append([]string(nil), slots...)
+		if trial[slotTopic] != "" {
+			shrinkTopic(trial, width)
+		}
+		if joinedWidth(trial) <= width && runewidth.StringWidth(unquote(trial[slotTopic])) >= markerTopicFloor {
+			copy(slots, trial)
+			return
+		}
+		slots[slotComments] = ""
+		if joinedWidth(slots) <= width {
+			return
+		}
 	}
 
 	if slots[slotTopic] != "" {
@@ -536,16 +601,18 @@ func slotColor(idx int, it search.Item, groupColors map[string]string) string {
 	case slotState:
 		return stateColor(it.EndState)
 	case slotTopic:
-		// A user-chosen name is shown upright and bold; derived text
-		// (topic, last prompt) stays italic, so the two are still
-		// distinguishable despite sharing one slot (spec session-search,
-		// "Fields are visually distinguishable").
-		if it.Name != nil && *it.Name != "" {
+		// A user-chosen name (lazyrecall's own, or the source's) is shown
+		// upright and bold; derived text (topic, last prompt) stays italic,
+		// so the two are still distinguishable despite sharing one slot
+		// (spec session-search, "Fields are visually distinguishable").
+		if hasChosenName(it) {
 			return ansiBold
 		}
 		return ansiItalic
 	case slotTags:
 		return ansiMagenta
+	case slotComments:
+		return ansiDim
 	default:
 		return ""
 	}

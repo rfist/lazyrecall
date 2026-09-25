@@ -116,7 +116,22 @@ import (
 // the user decided, so it needs no annotation migration - the version
 // bump discards and rebuilds the index, and the next refresh repopulates
 // it.
-var CurrentVersion = 9
+//
+// v10 adds lineages.custom_name, the name the user assigns from inside
+// lazyrecall itself - the browser's rename action and `lazyrecall name` -
+// as distinct from sessions.name, which is the name a source tool records
+// (Claude Code's rename) and lives on the disposable index instead (change
+// show-session-names). That change's own non-goal said as much: "a
+// Recall-assigned name would live on the durable lineage, not on the
+// disposable index" - this is that follow-up. Like group_name at v8, it is
+// the user's own decision, so it must survive an index rebuild and move
+// with a continuation the way a lineage's other annotations do; this is a
+// forward migration on the durable lineages table, following the same
+// ALTER TABLE, no-backfill mechanism archived_at and group_name used,
+// because NULL ("no custom name, show the source name or topic instead")
+// is already the correct value for every lineage that predates the
+// column.
+var CurrentVersion = 10
 
 // indexDDL creates the tables that are pure cache over the sources: safe to
 // drop and rebuild whenever CurrentVersion changes.
@@ -185,7 +200,8 @@ CREATE TABLE IF NOT EXISTS lineages (
 	orphaned    INTEGER NOT NULL DEFAULT 0,
 	handle      INTEGER,
 	archived_at INTEGER,
-	group_name  TEXT
+	group_name  TEXT,
+	custom_name TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_lineages_handle ON lineages(handle);
 
@@ -279,6 +295,35 @@ ALTER TABLE lineages ADD COLUMN group_name TEXT;
 DROP INDEX IF EXISTS idx_lineages_handle_profile;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_lineages_handle ON lineages(handle);
 `,
+	// v10 adds lazyrecall's own name to the durable lineages table, exactly
+	// like group_name did at v8 - ALTER TABLE, no backfill needed since NULL
+	// ("no custom name") is already the right value for every lineage that
+	// predates the column.
+	10: `
+ALTER TABLE lineages ADD COLUMN custom_name TEXT;
+`,
+}
+
+// annotationOnly marks a schema version whose migration touches only the
+// durable annotation tables (lineages/comments/tags) and adds or changes
+// nothing on the disposable index side - so opening at that version must
+// NOT drop and rebuild sessions/prompt_fts/cursors the way every other
+// version bump does (see the stored < CurrentVersion case in Open).
+//
+// Every version before v10 left this unmarked (defaulting to "not
+// annotation-only", i.e. rebuild) even when its own migration touched only
+// lineages (v2, v4, v8) - changing that retroactively is out of scope here.
+// What changes starting at v10 is that the disposable index is genuinely
+// not free to throw away: a Claude Code transcript is deleted from disk
+// after 30 days, and refresh's incremental fold cannot re-derive a session
+// row for one it can no longer read (devdocs/fyi.md, and the orphaned-
+// lineage handling change group-sessions-in-one-index relies on). Dropping
+// the index at a version bump that added nothing to it - lineages.
+// custom_name needs nothing from sessions/prompt_fts/cursors at all - would
+// permanently erase every such session for no reason connected to what the
+// migration actually changed.
+var annotationOnly = map[int]bool{
+	10: true,
 }
 
 // Open ensures the database at r.DBPath exists with the current schema,
@@ -321,20 +366,33 @@ func Open(r *sqlitex.Runner) (int, error) {
 
 	case stored < CurrentVersion:
 		// Migrate annotations forward, one version at a time; never touch
-		// their rows directly.
+		// their rows directly. rebuildIndex tracks whether any version being
+		// crossed actually needs the disposable index thrown away - true by
+		// default for a version with no annotationOnly entry, so every
+		// pre-v10 version bump still rebuilds exactly as it always did; only
+		// a run that crosses nothing but annotationOnly versions skips it.
+		rebuildIndex := false
 		for v := stored + 1; v <= CurrentVersion; v++ {
 			if mig, ok := migrations[v]; ok {
 				if err := r.Exec(mig); err != nil {
 					return 0, fmt.Errorf("schema: migrating annotations to v%d: %w", v, err)
 				}
 			}
+			if !annotationOnly[v] {
+				rebuildIndex = true
+			}
 		}
 		if err := r.Exec(annotationDDL); err != nil {
 			return 0, err
 		}
-		// The index is disposable: drop and rebuild rather than migrate.
-		if err := r.Exec(`DROP TABLE IF EXISTS sessions; DROP TABLE IF EXISTS prompt_fts; DROP TABLE IF EXISTS cursors;`); err != nil {
-			return 0, fmt.Errorf("schema: discarding stale index: %w", err)
+		if rebuildIndex {
+			// The index is disposable: drop and rebuild rather than migrate -
+			// but only when crossing a version that actually changed it
+			// (annotationOnly's doc comment explains the versions that
+			// don't, and why skipping this matters for those).
+			if err := r.Exec(`DROP TABLE IF EXISTS sessions; DROP TABLE IF EXISTS prompt_fts; DROP TABLE IF EXISTS cursors;`); err != nil {
+				return 0, fmt.Errorf("schema: discarding stale index: %w", err)
+			}
 		}
 		if err := r.Exec(indexDDL); err != nil {
 			return 0, err

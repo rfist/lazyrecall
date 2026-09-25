@@ -83,6 +83,32 @@ func TestWriteItemsJSONIncludesOriginAndOmitsEmpty(t *testing.T) {
 	}
 }
 
+// A name set with `lazyrecall name` and the comment count behind the row's
+// marker are both part of what a script reading --json needs to find a
+// session again, so they are carried like the source-recorded name and the
+// tags are - and omitted, like them, when a session has neither.
+func TestWriteItemsJSONIncludesCustomNameAndCommentCount(t *testing.T) {
+	name := "auth refactor that finally worked"
+	items := []search.Item{
+		{SessionID: "claude:p:1", EndState: "completed", CustomName: &name, CommentCount: 2},
+		{SessionID: "claude:p:2", EndState: "completed"},
+	}
+	var buf bytes.Buffer
+	if err := WriteItemsJSON(&buf, items); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, `"custom_name": "auth refactor that finally worked"`) {
+		t.Errorf("expected custom_name in output, got:\n%s", out)
+	}
+	if !strings.Contains(out, `"comment_count": 2`) {
+		t.Errorf("expected comment_count in output, got:\n%s", out)
+	}
+	if strings.Count(out, `"custom_name"`) != 1 || strings.Count(out, `"comment_count"`) != 1 {
+		t.Errorf("expected both fields omitted for the session without them, got:\n%s", out)
+	}
+}
+
 func TestWriteItemsHumanShowsEmptyMessage(t *testing.T) {
 	var buf bytes.Buffer
 	WriteItemsHuman(&buf, nil, "nothing here", DefaultRenderOptions)

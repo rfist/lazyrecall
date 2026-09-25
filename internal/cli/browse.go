@@ -96,6 +96,27 @@ type BrowserOptions struct {
 	ArchiveColor string
 	UnknownColor string
 
+	// Transcript is the Transcript tab's starting rendering - "clean" or
+	// "full" (config.Config.Browse.Transcript; change
+	// clean-transcript-mode). The `t` key changes it for the running
+	// browser; empty (a test not caring about the tab at all) behaves like
+	// "clean", the config default, rather than requiring every existing
+	// caller to spell it out.
+	Transcript string
+	// DateHeaders is cfg.Browse.date_headers - whether the Sessions panel
+	// draws its "── Today ──" / "── Yesterday ──" / ... separator rows
+	// (change date-separator-rows). It defaults to false here, the ordinary
+	// Go zero value, unlike the config key it carries (which defaults to
+	// true, config.defaultConfig): every real caller goes through
+	// cmd/lazyrecall's cfg.Browse.DateHeaders, which is already true unless
+	// a config file turned it off, so the "default true" promise is kept at
+	// that layer. Leaving the zero value here as "off" is deliberate: every
+	// browseModel test in this package that builds a BrowserOptions by hand
+	// - the large majority, none of which are about date headers - keeps
+	// behaving exactly as it did before this feature existed, with no row
+	// budget to account for, unless it opts in.
+	DateHeaders bool
+
 	// Installs lists every install this browser can resolve a session
 	// against. There is no more profile switching (change
 	// group-sessions-in-one-index: one browsing session now covers every
@@ -264,6 +285,46 @@ func (t detailTab) title() string {
 	return "Detail"
 }
 
+// transcriptMode is which of the Transcript tab's two renderings is
+// showing (change clean-transcript-mode). It is UI state, not data:
+// internal/transcript and conversationCache.turns are exactly the same
+// either way - only how renderItemTranscriptMode groups and filters them
+// differs. The `t` key (toggleTranscriptMode) flips it; browse.transcript
+// in config picks what a freshly opened browser starts on.
+type transcriptMode int
+
+const (
+	// transcriptClean hides KindToolUse and KindCompactionBoundary turns
+	// and merges the runs of KindAssistantText turns left adjacent once
+	// those are removed into one "agent" block - the default, and the
+	// reading view the feature exists for: "the conversation is hard to
+	// read because of all the thinking/tool/output sections."
+	//
+	// It is iota's zero value on purpose: a browseModel (or a test) that
+	// never sets transcriptMode explicitly gets the configured default
+	// rather than the technical view, matching config.Browse.Transcript's
+	// own default of "clean".
+	transcriptClean transcriptMode = iota
+	// transcriptFull renders every turn Conversation kept, unchanged from
+	// how the tab has always looked.
+	transcriptFull
+)
+
+// transcriptModeFromConfig maps the validated config string
+// (config.Browse.Transcript, or BrowserOptions.Transcript carrying it
+// through) onto the type the browser actually branches on. Config already
+// rejects any value other than "clean"/"full" at Load, but a test building
+// BrowserOptions by hand may leave Transcript at its zero value "" - which
+// falls to transcriptClean here for the same reason the iota above is
+// ordered the way it is: no caller has to know the config default to get
+// it.
+func transcriptModeFromConfig(value string) transcriptMode {
+	if value == "full" {
+		return transcriptFull
+	}
+	return transcriptClean
+}
+
 // ---------------------------------------------------------------------
 // Input modes
 // ---------------------------------------------------------------------
@@ -288,6 +349,14 @@ const (
 	modeRemoveTag
 	modeAddComment
 	modeRemoveComment
+	// modeRename prompts for the selected session's lazyrecall-assigned
+	// name (annotate.SetName). Unlike every other prompt above, it opens
+	// pre-filled with the session's current custom name rather than blank
+	// (see startRenameInput) - a rename is an edit of an existing value,
+	// not a fresh one, so requiring it to be retyped from scratch would be
+	// actively hostile to the common case of tweaking a name rather than
+	// replacing it outright.
+	modeRename
 	modeMenu // the action menu (x)
 )
 
@@ -305,6 +374,8 @@ func (m inputMode) prompt() string {
 		return "comment to add: "
 	case modeRemoveComment:
 		return "comment id to remove: "
+	case modeRename:
+		return "name (blank to clear): "
 	case modeMenu:
 		return "menu (j/k move, enter select, esc close, / to narrow): "
 	}
@@ -410,6 +481,23 @@ type browseModel struct {
 	cursor  int
 	listTop int
 
+	// dateHeaders is BrowserOptions.DateHeaders, copied once in
+	// newBrowseModel (change date-separator-rows): whether the Sessions
+	// panel draws bucket separators at all. Even when true, a render can
+	// still end up with none - sessionDisplayRows also requires m.visible to
+	// actually be in recency order (recencyOrdered), which every state this
+	// browser can be in today satisfies, but a text filter or a future
+	// change to search ordering is not trusted to keep satisfying by
+	// assumption alone.
+	dateHeaders bool
+	// now is the Sessions panel's clock for bucketing by LastActivityAt
+	// (bucketFor) - nil in every model built by newBrowseModel, which is
+	// what clock() reads as "use time.Now()". Only tests ever set it
+	// directly (there is no matching BrowserOptions field: nothing a real
+	// caller could inject a fixed clock from), so "today" can be pinned
+	// without the test depending on when it happens to run.
+	now func() time.Time
+
 	tab      detailTab
 	detail   *viewport.Model
 	detailOf string // session id the viewport's content was built for
@@ -420,6 +508,12 @@ type browseModel struct {
 	// every keystroke would re-read it. Behind a pointer for the same
 	// reason the viewport is: the render path takes the model by value.
 	convo *conversationCache
+	// transcriptMode is clean or full (change clean-transcript-mode),
+	// seeded from BrowserOptions.Transcript (config's browse.transcript)
+	// and flipped by `t` for the lifetime of this browser - unlike tab,
+	// which session is selected, or the search phrase, it survives every
+	// one of those changing.
+	transcriptMode transcriptMode
 
 	mode       inputMode
 	input      textinput.Model
@@ -466,21 +560,23 @@ func (m browseModel) Init() tea.Cmd { return nil }
 
 func newBrowseModel(opts BrowserOptions) browseModel {
 	m := browseModel{
-		db:            opts.DB,
-		style:         opts.Style,
-		showAll:       opts.ShowAll,
-		hide:          opts.Hide,
-		group:         opts.Group,
-		groups:        opts.Groups,
-		groupColors:   GroupColors(opts.Groups, opts.ArchiveColor, opts.UnknownColor),
-		installs:      opts.discoverInstalls,
-		installLabels: opts.InstallLabels,
-		width:         DefaultWidth,
-		height:        24,
-		focus:         panelSessions,
-		query:         opts.Query,
-		client:        opts.Client,
-		input:         textinput.New(),
+		db:             opts.DB,
+		style:          opts.Style,
+		showAll:        opts.ShowAll,
+		hide:           opts.Hide,
+		group:          opts.Group,
+		groups:         opts.Groups,
+		groupColors:    GroupColors(opts.Groups, opts.ArchiveColor, opts.UnknownColor),
+		installs:       opts.discoverInstalls,
+		installLabels:  opts.InstallLabels,
+		width:          DefaultWidth,
+		height:         24,
+		focus:          panelSessions,
+		query:          opts.Query,
+		client:         opts.Client,
+		input:          textinput.New(),
+		transcriptMode: transcriptModeFromConfig(opts.Transcript),
+		dateHeaders:    opts.DateHeaders,
 	}
 	// Command-line filters open as the corresponding panels' selections, so
 	// `lazyrecall browse --agent=pi` and walking to "pi" in the Agents panel
@@ -867,16 +963,27 @@ func (m *browseModel) facetFor(p panelID) *facet {
 }
 
 // keepCursorVisible scrolls the session list window so the cursor is shown.
+// m.listTop stays a session index exactly as it was before date headers
+// existed (see rebuild's own listTop/cursor comparison, which depends on
+// that) - what changed is the cost of showing the window from m.listTop
+// through m.cursor, which is no longer "one row per session" once a bucket
+// boundary in between adds a header row of its own. windowCost measures that
+// cost in display rows; the loop below is this function's old direct jump
+// (`m.listTop = m.cursor - h + 1`) turned into single steps, since a
+// header's contribution to the cost depends on exactly which sessions end
+// up in the window and so cannot be computed by one subtraction the way a
+// uniform one-row-per-session list could.
 func (m *browseModel) keepCursorVisible() {
 	h := m.geometry().sessionsInner
-	if h <= 0 {
+	if h <= 0 || len(m.visible) == 0 {
 		return
 	}
 	if m.cursor < m.listTop {
 		m.listTop = m.cursor
 	}
-	if m.cursor >= m.listTop+h {
-		m.listTop = m.cursor - h + 1
+	rows, sessionRow := m.sessionDisplayRows()
+	for m.listTop < m.cursor && windowCost(rows, sessionRow, m.listTop, m.cursor) > h {
+		m.listTop++
 	}
 	if m.listTop < 0 {
 		m.listTop = 0
@@ -1047,6 +1154,8 @@ func (m *browseModel) handleBrowseKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.jumpToHit(1)
 	case "N":
 		m.jumpToHit(-1)
+	case "t":
+		m.toggleTranscriptMode()
 	case "m":
 		return m.startInput(modeAddTag)
 	case "M":
@@ -1057,6 +1166,8 @@ func (m *browseModel) handleBrowseKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.startInput(modeAddComment)
 	case "C":
 		return m.startInput(modeRemoveComment)
+	case "r":
+		return m.startRenameInput()
 	case "a":
 		m.toggleArchive()
 	case ".":
@@ -1569,6 +1680,35 @@ func (m *browseModel) jumpToHit(delta int) {
 	m.notice = fmt.Sprintf("%d matches for %q.", len(hits), phrase)
 }
 
+// toggleTranscriptMode flips the Transcript tab between clean and full -
+// the `t` key (change clean-transcript-mode). Like n/N (jumpToHit), it only
+// means something while that tab is showing; acting on it from another tab
+// would silently change a pane the user cannot see and leave them wondering
+// later why nothing looked different.
+//
+// There is nothing to re-render here beyond the mode itself: detailContent
+// runs on every frame regardless of which tab is showing (there is no
+// "already rendered" cache to invalidate the way tab switches clear
+// detailOf for), so the very next View picks up the new mode, recomputes
+// convo.hits against the new line layout, and n/N step through exactly
+// those. GotoTop puts the pane where opening the tab already does
+// (cycleTab) - a toggle is a second way to arrive at a freshly drawn
+// transcript, not a special case of it.
+func (m *browseModel) toggleTranscriptMode() {
+	if m.tab != tabTranscript {
+		m.notice = "t switches clean/full transcript view on the Transcript tab."
+		return
+	}
+	if m.transcriptMode == transcriptClean {
+		m.transcriptMode = transcriptFull
+		m.notice = "full transcript - every turn, tool calls included."
+	} else {
+		m.transcriptMode = transcriptClean
+		m.notice = "clean transcript - tool calls and compaction boundaries hidden."
+	}
+	m.detail.GotoTop()
+}
+
 func clampIndex(i, n int) int {
 	if i >= n {
 		i = n - 1
@@ -1614,6 +1754,24 @@ func (m *browseModel) startInput(mode inputMode) (tea.Model, tea.Cmd) {
 	}
 	m.notice = ""
 	return m, m.input.Focus()
+}
+
+// startRenameInput opens the rename prompt (modeRename) pre-filled with the
+// selected session's current lazyrecall-assigned name, cursor at the end -
+// unlike startInput's other callers, which always open blank. A rename is
+// an edit of whatever is already there, so the prompt starts from it rather
+// than making every rename retype a name that is only being tweaked. With
+// no session selected (an empty Sessions list) it still opens, blank, the
+// same as any other prompt would with nothing to act on - submitInput
+// handles that case the same way modeAddTag/modeAddComment already do, by
+// simply doing nothing if m.current() is nil.
+func (m *browseModel) startRenameInput() (tea.Model, tea.Cmd) {
+	mod, cmd := m.startInput(modeRename)
+	if it := m.current(); it != nil && it.CustomName != nil {
+		m.input.SetValue(*it.CustomName)
+		m.input.CursorEnd()
+	}
+	return mod, cmd
 }
 
 func (m *browseModel) updateInputMode(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -1783,6 +1941,19 @@ func (m *browseModel) submitInput(value string) tea.Cmd {
 				return nil
 			}
 		}
+	case modeRename:
+		// Unlike modeAddTag/modeAddComment above, an empty value is not a
+		// no-op here: it is how a name set earlier is cleared (spec-shaped
+		// like modeFilter's "blank clears" exception to submitting empty
+		// applying nothing). annotate.SetName already treats an empty or
+		// whitespace-only name as "clear", so this always calls it rather
+		// than gating on value != "".
+		if it := m.current(); it != nil {
+			if err := annotate.SetName(m.db, it.LineageID, value); err != nil {
+				m.notice = "name: " + err.Error()
+				return nil
+			}
+		}
 	}
 	// An annotation edit changes the tag facet and the rows themselves, so
 	// the corpus is re-read rather than re-sliced.
@@ -1816,6 +1987,7 @@ func (m *browseModel) menuFor(p panelID) []menuAction {
 			menuAction{"remove a tag", func(m *browseModel) tea.Cmd { _, c := m.startInput(modeRemoveTag); return c }},
 			menuAction{"add a comment", func(m *browseModel) tea.Cmd { _, c := m.startInput(modeAddComment); return c }},
 			menuAction{"remove a comment", func(m *browseModel) tea.Cmd { _, c := m.startInput(modeRemoveComment); return c }},
+			menuAction{"rename this session", func(m *browseModel) tea.Cmd { _, c := m.startRenameInput(); return c }},
 			menuAction{"filter these sessions", func(m *browseModel) tea.Cmd { _, c := m.startInput(modeFilter); return c }},
 		)
 		// The same group entries the `p` popup offers (change
@@ -2641,14 +2813,48 @@ func (m browseModel) sessionsPanel(g geometry) panelBox {
 		return box
 	}
 	h := box.innerHeight()
+	rows, sessionRow := m.sessionDisplayRows()
 	top := m.listTop
-	if top > maxInt(len(m.visible)-h, 0) {
-		top = maxInt(len(m.visible)-h, 0)
+	if top < 0 {
+		top = 0
+	}
+	if top > len(m.visible)-1 {
+		top = len(m.visible) - 1
+	}
+	// Pull back while there is still slack: the pre-header version of this
+	// clamped once, with `top > len(visible)-h`, to stop a stale scroll
+	// position from leaving blank rows below a short tail. A header can sit
+	// anywhere in that tail now, so "how many sessions fill h rows" is no
+	// longer a subtraction - windowCost measures it directly, and the loop
+	// keeps pulling top back one session at a time for as long as doing so
+	// still fits, the same "maximize the window's use of the space it has"
+	// intent as the single subtraction it replaces.
+	for top > 0 && windowCost(rows, sessionRow, top-1, len(m.visible)-1) <= h {
+		top--
+	}
+	inner := box.innerWidth()
+	startDisplay := sessionRow[top]
+	// top's own header (the row immediately before its session row, present
+	// only when top is the first session of its bucket) is included only
+	// when there is room left over for at least one more row after it - h>1
+	// guarantees that, since exactly one session row (top's own) always
+	// follows immediately below. At h==1 this is the small-terminal floor:
+	// the selected session must always be visible even when its header
+	// cannot be (see keepCursorVisible, which forces top==cursor whenever a
+	// window this small cannot hold both).
+	if h > 1 && startDisplay > 0 && rows[startDisplay-1].kind == rowHeader {
+		startDisplay--
 	}
 	baseRowWidth := m.sessionRowWidth()
-	end := minInt(top+h, len(m.visible))
-	for i := top; i < end; i++ {
-		it := m.visible[i]
+	drawn := 0
+	for d := startDisplay; d < len(rows) && drawn < h; d++ {
+		row := rows[d]
+		if row.kind == rowHeader {
+			box.Lines = append(box.Lines, dateHeaderLine(row.bucket, inner, m.style))
+			drawn++
+			continue
+		}
+		it := m.visible[row.session]
 		// The archive marker is budgeted *before* the row is shortened,
 		// never appended after truncation - trimming a styled row after the
 		// fact risks cutting inside an ANSI escape sequence, and a marker
@@ -2666,7 +2872,7 @@ func (m browseModel) sessionsPanel(g geometry) panelBox {
 		rowOpts := RenderOptions{Width: m.sessionRowWidthFor(it, baseRowWidth), Style: m.style, InstallLabels: m.installLabels, GroupColors: m.groupColors}
 
 		line := RenderRow(it, rowOpts) + marker
-		if i == m.cursor {
+		if row.session == m.cursor {
 			if m.style {
 				line = highlightLine(line)
 			}
@@ -2675,6 +2881,7 @@ func (m browseModel) sessionsPanel(g geometry) panelBox {
 			line = "  " + line
 		}
 		box.Lines = append(box.Lines, line)
+		drawn++
 	}
 	return box
 }
@@ -2722,6 +2929,7 @@ func positionCount(cursor, total int) string {
 func (m browseModel) detailPanel(g geometry) panelBox {
 	box := panelBox{
 		Title:   m.tabStrip(),
+		Count:   m.transcriptModeHint(),
 		Width:   g.rightWidth,
 		Height:  g.detailH,
 		Focused: m.focus == panelDetail,
@@ -2771,6 +2979,24 @@ func (m browseModel) tabStrip() string {
 	return strings.Join(parts, "")
 }
 
+// transcriptModeHint is the detail pane's top-border annotation while the
+// Transcript tab is showing (change clean-transcript-mode): which of the
+// two renderings is active, and the key that switches it, so the toggle is
+// discoverable without opening the full `?` help. panelBox already colours
+// this slot dim the same way sessionsCount's "N of M" is (see
+// panelBox.borderLine), so it reads as chrome rather than content. Empty on
+// every other tab - there is nothing to say there, the same way Count is
+// "" for any panel with nothing to report.
+func (m browseModel) transcriptModeHint() string {
+	if m.tab != tabTranscript {
+		return ""
+	}
+	if m.transcriptMode == transcriptFull {
+		return "full · t hides tool calls"
+	}
+	return "clean · t shows tool calls"
+}
+
 func (m browseModel) detailContent(opts RenderOptions) string {
 	it := m.current()
 	if it == nil {
@@ -2780,7 +3006,7 @@ func (m browseModel) detailContent(opts RenderOptions) string {
 	case tabPrompts:
 		return renderItemPrompts(m.db, *it, opts)
 	case tabTranscript:
-		return renderItemTranscript(m.convo, *it, m.transcriptPhrase(), m.installFor, opts)
+		return renderItemTranscriptMode(m.convo, *it, m.transcriptPhrase(), m.installFor, m.transcriptMode, opts)
 	case tabComments:
 		return renderItemComments(m.db, *it, opts)
 	}
@@ -2991,6 +3217,7 @@ var browseActions = []browseAction{
 	{key: "esc", label: "clear filter", help: "clear what this panel is filtering by", panels: []panelID{panelSessions, panelGroups, panelAgents, panelRepos, panelTags}, footer: true},
 	{key: "[/]", label: "tab", help: "previous/next tab in the detail pane", panels: []panelID{panelSessions, panelDetail}, footer: true},
 	{key: "n/N", label: "next/previous match", help: "on the Transcript tab, scroll to the next/previous occurrence of the search phrase", panels: []panelID{panelSessions, panelDetail}},
+	{key: "t", label: "clean/full", help: "on the Transcript tab, toggle between the clean question/answer view and the full technical transcript", panels: []panelID{panelSessions, panelDetail}},
 	{key: "/", label: "narrow", help: "keep only the focused panel's rows containing what you type", footer: true},
 	{key: "s", label: "search phrase", help: "full-text search over your own prompts"},
 	{key: "x", label: "menu", help: "action menu for the focused panel - j/k or ↑/↓ move, enter applies, esc closes, / narrows by typing", footer: true},
@@ -3000,6 +3227,7 @@ var browseActions = []browseAction{
 	{key: "m/M", label: "add/remove a tag", help: "add/remove a tag on the selected session"},
 	{key: "d", label: "remove this tag", help: "take the tag under the cursor off the selected session", panels: []panelID{panelTags}, footer: true},
 	{key: "c/C", label: "add/remove a comment", help: "add/remove a comment on the selected session"},
+	{key: "r", label: "rename", help: "set or clear lazyrecall's own name for the selected session (blank clears it)"},
 	{key: "a", label: "archive", help: "archive/unarchive the selected session", footer: true},
 	{key: ".", label: "show all", help: "toggle showing sessions the hide rules and the archive flag suppress", footer: true},
 	{key: "?", label: "keys", help: "this list", footer: true},
@@ -3091,12 +3319,32 @@ func renderItemDetail(db *sqlitex.Runner, it search.Item, groups []config.Group,
 	if it.MessageCount != nil {
 		fmt.Fprintf(&b, "msgs:   %d\n", *it.MessageCount)
 	}
-	// The name (when the user set one in the source tool) and the derived
-	// topic are shown on lines of their own here, unlike the row, where
-	// they share a slot: the detail pane has the space, and seeing both is
-	// how you tell what a session was renamed *away* from.
+	// The name shown here is the effective one: lazyrecall's own name
+	// (CustomName, set from inside the browser or `lazyrecall name`) when
+	// the user chose one, else the name the source tool recorded (Name -
+	// Claude Code's rename). When a custom name is set AND the source
+	// recorded a different one, the source's own name gets a line of its
+	// own too - "agent name:" - so what the session was renamed away from,
+	// from either direction, stays visible; the derived topic below is
+	// shown separately either way, unlike the row, where name and topic
+	// share one slot.
+	customName := ""
+	if it.CustomName != nil && *it.CustomName != "" {
+		customName = *it.CustomName
+	}
+	sourceName := ""
 	if it.Name != nil && *it.Name != "" {
-		fmt.Fprintf(&b, "name:   %s\n", style(*it.Name, ansiBold, opts.Style))
+		sourceName = *it.Name
+	}
+	effectiveName := customName
+	if effectiveName == "" {
+		effectiveName = sourceName
+	}
+	if effectiveName != "" {
+		fmt.Fprintf(&b, "name:   %s\n", style(effectiveName, ansiBold, opts.Style))
+	}
+	if customName != "" && sourceName != "" && sourceName != customName {
+		fmt.Fprintf(&b, "agent name: %s\n", style(sourceName, ansiDim, opts.Style))
 	}
 	topic := ""
 	if it.Topic != nil && *it.Topic != "" {
@@ -3136,7 +3384,49 @@ func renderItemDetail(db *sqlitex.Runner, it search.Item, groups []config.Group,
 	}
 	b.WriteString("\n")
 
+	// The most recent 3 comments, so the Detail tab already answers "is
+	// there anything noted on this session" without switching tabs - the
+	// Comments tab itself (renderItemComments) is unchanged and still shows
+	// every one of them. "(none)" follows the same convention the tags line
+	// above uses for an empty set, and an error reading them is shown
+	// inline rather than losing the rest of an otherwise-successful render.
+	fmt.Fprint(&b, "\ncomments: ")
+	comments, cerr := annotate.CommentsForLineage(db, it.LineageID)
+	switch {
+	case cerr != nil:
+		b.WriteString(cerr.Error())
+		b.WriteString("\n")
+	case len(comments) == 0:
+		b.WriteString("(none)")
+		b.WriteString("\n")
+	default:
+		b.WriteString("\n")
+		recent := comments
+		if len(comments) > 3 {
+			recent = comments[len(comments)-3:]
+		}
+		renderCommentList(&b, recent, opts)
+		if extra := len(comments) - len(recent); extra > 0 {
+			fmt.Fprintf(&b, "(+%d more on the Comments tab)\n", extra)
+		}
+	}
+
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// renderCommentList writes one comment per entry - its id, creation date,
+// and wrapped body - in the format both the Comments tab (renderItemComments)
+// and the Detail tab's preview use, so the two can never draw a comment
+// differently depending on which one is asking.
+func renderCommentList(b *strings.Builder, comments []annotate.Comment, opts RenderOptions) {
+	for _, c := range comments {
+		fmt.Fprintf(b, "%s %s\n",
+			style(fmt.Sprintf("[%d]", c.ID), ansiDim, opts.Style),
+			style(c.CreatedAt.Format("2006-01-02 15:04"), ansiDim, opts.Style))
+		for _, line := range wrapToWidth(c.Body, opts.Width-2) {
+			fmt.Fprintf(b, "  %s\n", line)
+		}
+	}
 }
 
 // renderItemComments renders the Comments tab: LazyRecall's own annotations
@@ -3151,14 +3441,7 @@ func renderItemComments(db *sqlitex.Runner, it search.Item, opts RenderOptions) 
 		return style("No comments on this session. Press c to add one.", ansiDim, opts.Style)
 	}
 	var b strings.Builder
-	for _, c := range comments {
-		fmt.Fprintf(&b, "%s %s\n",
-			style(fmt.Sprintf("[%d]", c.ID), ansiDim, opts.Style),
-			style(c.CreatedAt.Format("2006-01-02 15:04"), ansiDim, opts.Style))
-		for _, line := range wrapToWidth(c.Body, opts.Width-2) {
-			fmt.Fprintf(&b, "  %s\n", line)
-		}
-	}
+	renderCommentList(&b, comments, opts)
 	return strings.TrimRight(b.String(), "\n")
 }
 
@@ -3247,11 +3530,24 @@ func (c *conversationCache) load(it search.Item, installFor func(search.Item) (p
 	c.turns, c.dropped, c.err = reader.Conversation(p, it.SourceSessionID, transcript.DefaultConversationLimits)
 }
 
-// renderItemTranscript renders the Transcript tab: the conversation itself,
-// as far back as the read budget allows, with the active search phrase
-// highlighted. This is the tab that answers "is this the session I meant"
-// without having to resume it and find out.
+// renderItemTranscript renders the Transcript tab in full mode: every turn
+// Conversation kept, exactly as the tab looked before clean mode existed.
+// It is a thin wrapper around renderItemTranscriptMode rather than mode
+// becoming a parameter here, so every existing caller - and every test
+// written against this signature - keeps rendering exactly what it always
+// has (change clean-transcript-mode: "Full mode must render exactly what
+// renders today").
 func renderItemTranscript(c *conversationCache, it search.Item, phrase string, installFor func(search.Item) (profile.Profile, error), opts RenderOptions) string {
+	return renderItemTranscriptMode(c, it, phrase, installFor, transcriptFull, opts)
+}
+
+// renderItemTranscriptMode is what the browser actually calls: the
+// conversation itself, as far back as the read budget allows, with the
+// active search phrase highlighted, in either of the Transcript tab's two
+// renderings (change clean-transcript-mode). This is the tab that answers
+// "is this the session I meant" without having to resume it and find out -
+// full mode as the technical record, clean mode as question/answer.
+func renderItemTranscriptMode(c *conversationCache, it search.Item, phrase string, installFor func(search.Item) (profile.Profile, error), mode transcriptMode, opts RenderOptions) string {
 	c.load(it, installFor)
 
 	if c.err != nil {
@@ -3273,6 +3569,22 @@ func renderItemTranscript(c *conversationCache, it search.Item, phrase string, i
 		return style("No readable turns in this transcript.", ansiDim, opts.Style)
 	}
 
+	// turns is what gets rendered below; c.turns itself is left untouched
+	// either way, so switching modes never has to re-read anything and full
+	// mode - which renders c.turns directly - can never see a clean-mode
+	// side effect.
+	turns := c.turns
+	if mode == transcriptClean {
+		turns = cleanTranscriptTurns(c.turns)
+		if len(turns) == 0 {
+			// Every turn Conversation kept was a tool call or a compaction
+			// boundary - rare, but distinct from an empty conversation
+			// (the check above): there is something to show, just not in
+			// this mode.
+			return style("Nothing left to show once tool calls are hidden - press t for the full transcript.", ansiDim, opts.Style)
+		}
+	}
+
 	var b strings.Builder
 	if c.dropped > 0 {
 		fmt.Fprintf(&b, "%s\n\n", style(fmt.Sprintf("... %d earlier turns not shown; this is the end of the session.", c.dropped), ansiDim, opts.Style))
@@ -3291,11 +3603,17 @@ func renderItemTranscript(c *conversationCache, it search.Item, phrase string, i
 	// all in a transcript where those words never appear adjacent. A
 	// single-word query is exactly one entry in words, so this is a
 	// superset of the old behaviour, not a change to it.
+	//
+	// Hits are recomputed from this same loop on every render regardless of
+	// which mode is active or just became active - clean and full lay the
+	// same phrase over different lines, so n/N always step through matches
+	// that agree with what is actually on screen (change
+	// clean-transcript-mode).
 	c.hits = nil
 	words := strings.Fields(phrase)
 	line := strings.Count(b.String(), "\n")
 
-	for i, t := range c.turns {
+	for i, t := range turns {
 		if i > 0 {
 			b.WriteString("\n")
 			line++
@@ -3311,6 +3629,52 @@ func renderItemTranscript(c *conversationCache, it search.Item, phrase string, i
 		}
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// cleanTranscriptTurns is what clean mode renders in place of the turns
+// Conversation kept (change clean-transcript-mode): KindToolUse and
+// KindCompactionBoundary turns removed, and the runs of KindAssistantText
+// turns that removing them leaves adjacent merged into one block under the
+// first turn's own header, the merged paragraphs separated by a blank line
+// (transcriptBody already renders one wherever wrapToWidth sees "\n\n" in a
+// turn's text, so joining with it is enough - no separate blank-line
+// bookkeeping here). KindUserPrompt turns are never merged, even into a
+// neighboring run of their own kind: a user turn marks a new question
+// regardless of what does or does not separate it from the one before it.
+//
+// The merge only ever looks at the immediately preceding *kept* turn
+// (out's last element), never at a turn already discarded above it - which
+// is exactly what "left adjacent once removed" means: a reply, three tool
+// calls, then another reply merges into one block the same as two replies
+// with nothing between them, because nothing user-visible sits between
+// them either way.
+//
+// A merged block's Truncated is set if any part of it was: transcriptBody
+// appends one "... turn truncated" note at the end of the whole block
+// rather than marking exactly which paragraph ran over the per-turn byte
+// budget - truncation is rare enough (DefaultConversationLimits.
+// MaxTurnBytes is 4000) that a block-level note is enough to say "there is
+// more here than is shown," without teaching transcriptBody to interleave
+// per-paragraph markers for a case this uncommon.
+func cleanTranscriptTurns(turns []transcript.Turn) []transcript.Turn {
+	out := make([]transcript.Turn, 0, len(turns))
+	for _, t := range turns {
+		switch t.Kind {
+		case transcript.KindToolUse, transcript.KindCompactionBoundary:
+			continue
+		case transcript.KindAssistantText:
+			if n := len(out); n > 0 && out[n-1].Kind == transcript.KindAssistantText {
+				merged := &out[n-1]
+				merged.Text += "\n\n" + t.Text
+				merged.Truncated = merged.Truncated || t.Truncated
+				continue
+			}
+			out = append(out, t)
+		default:
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // turnHeader is the one-line speaker label above a turn's body: who spoke,

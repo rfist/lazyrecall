@@ -483,6 +483,113 @@ func TestRenderRowNameStyledDistinctlyFromTopic(t *testing.T) {
 	}
 }
 
+// TestRenderRowPrefersCustomNameOverSourceNameAndTopic covers the full
+// precedence a row's text slot follows: lazyrecall's own name (CustomName)
+// first, then the source-recorded name (Name), then the topic - the same
+// order rowText's doc comment describes and renderItemDetail follows for
+// which lines it shows.
+func TestRenderRowPrefersCustomNameOverSourceNameAndTopic(t *testing.T) {
+	base := search.Item{SessionID: "claude:p:1", Source: "claude", Handle: 7,
+		CWD: strp("/Users/example/project"), EndState: "completed"}
+
+	it := base
+	it.CustomName = strp("my own name")
+	it.Name = strp("agent-set name")
+	it.Topic = strp("derived topic")
+	line := RenderRow(it, RenderOptions{Width: 200, Style: false})
+	if !strings.Contains(line, `"my own name"`) {
+		t.Errorf("row should show the lazyrecall-assigned name over everything else: %q", line)
+	}
+	if strings.Contains(line, "agent-set name") || strings.Contains(line, "derived topic") {
+		t.Errorf("row should not also show the source name or topic once a custom name is set: %q", line)
+	}
+
+	// An empty (rather than absent) custom name is not a name: fall back to
+	// the source-recorded name.
+	blank := base
+	blank.CustomName = strp("")
+	blank.Name = strp("agent-set name")
+	line = RenderRow(blank, RenderOptions{Width: 200, Style: false})
+	if !strings.Contains(line, `"agent-set name"`) {
+		t.Errorf("an empty custom name should fall back to the source name: %q", line)
+	}
+}
+
+// TestRenderRowCustomNameStyledLikeSourceName: a lazyrecall-assigned name is
+// just as deliberate a choice as a source-recorded one, so it gets the same
+// bold styling that distinguishes a chosen name from derived text (spec
+// session-search, "Fields are visually distinguishable").
+func TestRenderRowCustomNameStyledLikeSourceName(t *testing.T) {
+	it := search.Item{SessionID: "claude:p:1", Source: "claude", Handle: 7,
+		CWD: strp("/Users/example/project"), EndState: "completed", CustomName: strp("retry-loop")}
+	line := RenderRow(it, RenderOptions{Width: 200, Style: true})
+	if !strings.Contains(line, ansiBold+`"retry-loop"`) {
+		t.Errorf("a custom name should render bold: %q", line)
+	}
+}
+
+// TestRenderRowShowsCommentMarkerWhenPresent covers the row's comment-count
+// marker: shown, with the count, only when the session has at least one
+// comment.
+func TestRenderRowShowsCommentMarkerWhenPresent(t *testing.T) {
+	base := search.Item{SessionID: "claude:p:1", Source: "claude", Handle: 7,
+		CWD: strp("/Users/example/project"), EndState: "completed"}
+
+	none := base
+	line := RenderRow(none, RenderOptions{Width: 200, Style: false})
+	if strings.Contains(line, commentMarkerGlyph) {
+		t.Errorf("a session with no comments should carry no comment marker: %q", line)
+	}
+
+	some := base
+	some.CommentCount = 3
+	line = RenderRow(some, RenderOptions{Width: 200, Style: false})
+	want := commentMarkerGlyph + "3"
+	if !strings.Contains(line, want) {
+		t.Errorf("expected the comment marker %q in the row, got: %q", want, line)
+	}
+}
+
+// TestRenderRowKeepsCommentMarkerWhileTheTopicCanShrink covers the
+// marker's place in the width cascade (fitRowToWidth): the topic is
+// shortened first while the marker stays, so a long topic does not hide the
+// marker on nearly every row; only once the topic would fall below
+// markerTopicFloor does the marker give way, and the topic keeps the room
+// it frees.
+func TestRenderRowKeepsCommentMarkerWhileTheTopicCanShrink(t *testing.T) {
+	it := search.Item{SessionID: "claude:p:1", Source: "claude", Handle: 7,
+		CWD: strp("/Users/example/project"), EndState: "completed",
+		Topic: strp("fix the retry loop that deadlocks the migration"), CommentCount: 5}
+
+	wide := RenderRow(it, RenderOptions{Width: 200, Style: false})
+	if !strings.Contains(wide, commentMarkerGlyph+"5") {
+		t.Fatalf("expected the marker to show at ample width: %q", wide)
+	}
+
+	// Ten columns short: the topic absorbs it and the marker stays.
+	line := RenderRow(it, RenderOptions{Width: runewidth.StringWidth(wide) - 10, Style: false})
+	if !strings.Contains(line, commentMarkerGlyph+"5") {
+		t.Errorf("expected the marker to survive while the topic can shrink: %q", line)
+	}
+	if !strings.Contains(line, "fix the retry") {
+		t.Errorf("expected a shortened topic beside the marker: %q", line)
+	}
+
+	// So short that keeping the marker would leave less than the floor of
+	// topic: the marker goes and the topic keeps what it freed.
+	full := len("fix the retry loop that deadlocks the migration")
+	markerCost := runewidth.StringWidth(" " + commentMarkerGlyph + "5")
+	width := runewidth.StringWidth(wide) - (full - markerTopicFloor) - markerCost + 1
+	line = RenderRow(it, RenderOptions{Width: width, Style: false})
+	if strings.Contains(line, commentMarkerGlyph) {
+		t.Errorf("expected the marker to be dropped at width %d, got: %q", width, line)
+	}
+	topic := line[strings.Index(line, `"`):]
+	if w := runewidth.StringWidth(unquote(topic)); w < markerTopicFloor {
+		t.Errorf("the topic should keep the room the marker freed (%d columns, want at least %d): %q", w, markerTopicFloor, line)
+	}
+}
+
 // TestRenderRowShowsClientBesideAgent: a session driven through something
 // other than the agent's own terminal says so in the agent slot, so an
 // editor chat is distinguishable from a terminal one at a glance (change
