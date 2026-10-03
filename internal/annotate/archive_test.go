@@ -3,8 +3,8 @@ package annotate
 import (
 	"testing"
 
-	"github.com/rfist/lazyrecall/internal/schema"
-	"github.com/rfist/lazyrecall/internal/sqlitex"
+	"github.com/wimcraft/lazyrecall/internal/schema"
+	"github.com/wimcraft/lazyrecall/internal/sqlitex"
 )
 
 // storedArchivedAt reads the raw archived_at value for a lineage, so a

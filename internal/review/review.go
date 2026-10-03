@@ -7,9 +7,9 @@ package review
 import (
 	"fmt"
 
-	"github.com/rfist/lazyrecall/internal/search"
-	"github.com/rfist/lazyrecall/internal/session"
-	"github.com/rfist/lazyrecall/internal/sqlitex"
+	"github.com/wimcraft/lazyrecall/internal/search"
+	"github.com/wimcraft/lazyrecall/internal/session"
+	"github.com/wimcraft/lazyrecall/internal/sqlitex"
 )
 
 // Entry is one unfinished session in the loose-ends report (spec

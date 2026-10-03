@@ -14,12 +14,12 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/rfist/lazyrecall/internal/annotate"
-	"github.com/rfist/lazyrecall/internal/config"
-	"github.com/rfist/lazyrecall/internal/profile"
-	"github.com/rfist/lazyrecall/internal/schema"
-	"github.com/rfist/lazyrecall/internal/search"
-	"github.com/rfist/lazyrecall/internal/sqlitex"
+	"github.com/wimcraft/lazyrecall/internal/annotate"
+	"github.com/wimcraft/lazyrecall/internal/config"
+	"github.com/wimcraft/lazyrecall/internal/profile"
+	"github.com/wimcraft/lazyrecall/internal/schema"
+	"github.com/wimcraft/lazyrecall/internal/search"
+	"github.com/wimcraft/lazyrecall/internal/sqlitex"
 )
 
 // All fixtures below are synthetic, hand-written data - never real session

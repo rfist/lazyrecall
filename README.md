@@ -21,13 +21,13 @@ lazyrecall needs no runtime dependencies: it is a single statically linked binar
 Via the install script (macOS and Linux):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/rfist/lazyrecall/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/wimcraft/lazyrecall/main/install.sh | sh
 ```
 
 Or build from source:
 
 ```sh
-git clone https://github.com/rfist/lazyrecall.git
+git clone https://github.com/wimcraft/lazyrecall.git
 cd lazyrecall
 CGO_ENABLED=0 go build -o lazyrecall ./cmd/lazyrecall
 ```

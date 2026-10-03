@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/rfist/lazyrecall/internal/gitutil"
-	"github.com/rfist/lazyrecall/internal/profile"
+	"github.com/wimcraft/lazyrecall/internal/gitutil"
+	"github.com/wimcraft/lazyrecall/internal/profile"
 )
 
 // This file covers the git-resolution caching fix: a refresh used to call

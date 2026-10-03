@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rfist/lazyrecall/internal/profile"
-	"github.com/rfist/lazyrecall/internal/search"
-	"github.com/rfist/lazyrecall/internal/sqlitex"
+	"github.com/wimcraft/lazyrecall/internal/profile"
+	"github.com/wimcraft/lazyrecall/internal/search"
+	"github.com/wimcraft/lazyrecall/internal/sqlitex"
 )
 
 // All transcript content below is synthetic, hand-written test data -

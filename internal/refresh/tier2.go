@@ -4,15 +4,15 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/rfist/lazyrecall/internal/adapter"
-	claudeadapter "github.com/rfist/lazyrecall/internal/adapter/claude"
-	gooseadapter "github.com/rfist/lazyrecall/internal/adapter/goose"
-	hermesadapter "github.com/rfist/lazyrecall/internal/adapter/hermes"
-	kiloadapter "github.com/rfist/lazyrecall/internal/adapter/kilo"
-	ompadapter "github.com/rfist/lazyrecall/internal/adapter/omp"
-	opencodeadapter "github.com/rfist/lazyrecall/internal/adapter/opencode"
-	"github.com/rfist/lazyrecall/internal/profile"
-	"github.com/rfist/lazyrecall/internal/transcript"
+	"github.com/wimcraft/lazyrecall/internal/adapter"
+	claudeadapter "github.com/wimcraft/lazyrecall/internal/adapter/claude"
+	gooseadapter "github.com/wimcraft/lazyrecall/internal/adapter/goose"
+	hermesadapter "github.com/wimcraft/lazyrecall/internal/adapter/hermes"
+	kiloadapter "github.com/wimcraft/lazyrecall/internal/adapter/kilo"
+	ompadapter "github.com/wimcraft/lazyrecall/internal/adapter/omp"
+	opencodeadapter "github.com/wimcraft/lazyrecall/internal/adapter/opencode"
+	"github.com/wimcraft/lazyrecall/internal/profile"
+	"github.com/wimcraft/lazyrecall/internal/transcript"
 )
 
 // tier2ForSource ingests one (source, install) pair's prompts for the

@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/rfist/lazyrecall/internal/config"
+	"github.com/wimcraft/lazyrecall/internal/config"
 )
 
 // withEnv sets env vars for the duration of the test and restores them

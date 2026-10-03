@@ -16,10 +16,10 @@ import (
 
 	"github.com/mattn/go-runewidth"
 
-	"github.com/rfist/lazyrecall/internal/config"
-	"github.com/rfist/lazyrecall/internal/profile"
-	"github.com/rfist/lazyrecall/internal/search"
-	"github.com/rfist/lazyrecall/internal/session"
+	"github.com/wimcraft/lazyrecall/internal/config"
+	"github.com/wimcraft/lazyrecall/internal/profile"
+	"github.com/wimcraft/lazyrecall/internal/search"
+	"github.com/wimcraft/lazyrecall/internal/session"
 )
 
 // InstallLabels computes the install-name -> display-label map every row

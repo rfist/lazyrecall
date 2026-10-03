@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rfist/lazyrecall/internal/config"
-	"github.com/rfist/lazyrecall/internal/session"
-	"github.com/rfist/lazyrecall/internal/sqlitex"
+	"github.com/wimcraft/lazyrecall/internal/config"
+	"github.com/wimcraft/lazyrecall/internal/session"
+	"github.com/wimcraft/lazyrecall/internal/sqlitex"
 )
 
 // Filter narrows a listing or search. Zero values mean "no constraint on

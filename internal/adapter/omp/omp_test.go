@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/rfist/lazyrecall/internal/profile"
+	"github.com/wimcraft/lazyrecall/internal/profile"
 )
 
 func TestDiscover(t *testing.T) {

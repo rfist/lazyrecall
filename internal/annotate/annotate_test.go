@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/rfist/lazyrecall/internal/schema"
-	"github.com/rfist/lazyrecall/internal/sqlitex"
+	"github.com/wimcraft/lazyrecall/internal/schema"
+	"github.com/wimcraft/lazyrecall/internal/sqlitex"
 )
 
 func testDB(t *testing.T) *sqlitex.Runner {

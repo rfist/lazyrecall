@@ -3,8 +3,8 @@ package annotate
 import (
 	"testing"
 
-	"github.com/rfist/lazyrecall/internal/config"
-	"github.com/rfist/lazyrecall/internal/sqlitex"
+	"github.com/wimcraft/lazyrecall/internal/config"
+	"github.com/wimcraft/lazyrecall/internal/sqlitex"
 )
 
 // storedGroup reads the raw group_name and archived_at values for a

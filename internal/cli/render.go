@@ -10,8 +10,8 @@ import (
 	"io"
 	"time"
 
-	"github.com/rfist/lazyrecall/internal/review"
-	"github.com/rfist/lazyrecall/internal/search"
+	"github.com/wimcraft/lazyrecall/internal/review"
+	"github.com/wimcraft/lazyrecall/internal/search"
 )
 
 // jsonItem is the machine-readable shape of one session (task 11.2). Field

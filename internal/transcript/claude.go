@@ -3,7 +3,7 @@ package transcript
 import (
 	"strings"
 
-	"github.com/rfist/lazyrecall/internal/session"
+	"github.com/wimcraft/lazyrecall/internal/session"
 )
 
 // claudeVocab maps Claude Code's transcript record shape. Record types seen

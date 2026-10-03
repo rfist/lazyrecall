@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rfist/lazyrecall/internal/search"
+	"github.com/wimcraft/lazyrecall/internal/search"
 )
 
 func strp(s string) *string { return &s }

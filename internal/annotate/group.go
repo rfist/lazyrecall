@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/rfist/lazyrecall/internal/config"
-	"github.com/rfist/lazyrecall/internal/sqlitex"
+	"github.com/wimcraft/lazyrecall/internal/config"
+	"github.com/wimcraft/lazyrecall/internal/sqlitex"
 )
 
 // SetGroup applies a group choice to a lineage - the one function the CLI's

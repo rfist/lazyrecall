@@ -20,7 +20,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/rfist/lazyrecall/internal/config"
+	"github.com/wimcraft/lazyrecall/internal/config"
 )
 
 // Profile is one discovered install: a bundle of config roots, at most one

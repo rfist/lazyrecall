@@ -8,9 +8,9 @@ import (
 
 	"github.com/mattn/go-runewidth"
 
-	"github.com/rfist/lazyrecall/internal/config"
-	"github.com/rfist/lazyrecall/internal/profile"
-	"github.com/rfist/lazyrecall/internal/search"
+	"github.com/wimcraft/lazyrecall/internal/config"
+	"github.com/wimcraft/lazyrecall/internal/profile"
+	"github.com/wimcraft/lazyrecall/internal/search"
 )
 
 // All fixtures below are synthetic, hand-written data. strp is defined in

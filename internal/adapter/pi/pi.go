@@ -11,9 +11,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/rfist/lazyrecall/internal/adapter"
-	"github.com/rfist/lazyrecall/internal/profile"
-	"github.com/rfist/lazyrecall/internal/session"
+	"github.com/wimcraft/lazyrecall/internal/adapter"
+	"github.com/wimcraft/lazyrecall/internal/profile"
+	"github.com/wimcraft/lazyrecall/internal/session"
 )
 
 type Adapter struct{}

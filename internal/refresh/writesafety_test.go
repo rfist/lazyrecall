@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rfist/lazyrecall/internal/profile"
+	"github.com/wimcraft/lazyrecall/internal/profile"
 )
 
 // TestNoSourceIsEverWritten builds a profile with synthetic data across all

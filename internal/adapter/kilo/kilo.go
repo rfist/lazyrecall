@@ -12,7 +12,7 @@
 package kilo
 
 import (
-	"github.com/rfist/lazyrecall/internal/adapter/opencode"
+	"github.com/wimcraft/lazyrecall/internal/adapter/opencode"
 )
 
 // New builds the Kilo adapter over OpenCode's implementation.

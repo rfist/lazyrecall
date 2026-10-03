@@ -36,11 +36,11 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/rfist/lazyrecall/internal/adapter"
-	"github.com/rfist/lazyrecall/internal/profile"
-	"github.com/rfist/lazyrecall/internal/session"
-	"github.com/rfist/lazyrecall/internal/sqlitex"
-	"github.com/rfist/lazyrecall/internal/transcript"
+	"github.com/wimcraft/lazyrecall/internal/adapter"
+	"github.com/wimcraft/lazyrecall/internal/profile"
+	"github.com/wimcraft/lazyrecall/internal/session"
+	"github.com/wimcraft/lazyrecall/internal/sqlitex"
+	"github.com/wimcraft/lazyrecall/internal/transcript"
 )
 
 type Adapter struct {

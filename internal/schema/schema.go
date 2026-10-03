@@ -9,7 +9,7 @@ package schema
 import (
 	"fmt"
 
-	"github.com/rfist/lazyrecall/internal/sqlitex"
+	"github.com/wimcraft/lazyrecall/internal/sqlitex"
 )
 
 // CurrentVersion is the schema version this build of LazyRecall expects. It is

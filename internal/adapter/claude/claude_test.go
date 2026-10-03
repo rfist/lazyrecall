@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/rfist/lazyrecall/internal/profile"
+	"github.com/wimcraft/lazyrecall/internal/profile"
 )
 
 // Synthetic fixtures only - no real session content.

@@ -18,7 +18,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rfist/lazyrecall/internal/search"
+	"github.com/wimcraft/lazyrecall/internal/search"
 )
 
 // dateBucket is one of the Sessions panel's time buckets, ordered oldest-last

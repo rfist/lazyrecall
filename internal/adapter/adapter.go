@@ -6,9 +6,9 @@
 package adapter
 
 import (
-	"github.com/rfist/lazyrecall/internal/profile"
-	"github.com/rfist/lazyrecall/internal/session"
-	"github.com/rfist/lazyrecall/internal/transcript"
+	"github.com/wimcraft/lazyrecall/internal/profile"
+	"github.com/wimcraft/lazyrecall/internal/session"
+	"github.com/wimcraft/lazyrecall/internal/transcript"
 )
 
 // Discovered is one session an adapter found, with whatever its source's

@@ -7,11 +7,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rfist/lazyrecall/internal/annotate"
-	"github.com/rfist/lazyrecall/internal/config"
-	"github.com/rfist/lazyrecall/internal/schema"
-	"github.com/rfist/lazyrecall/internal/session"
-	"github.com/rfist/lazyrecall/internal/sqlitex"
+	"github.com/wimcraft/lazyrecall/internal/annotate"
+	"github.com/wimcraft/lazyrecall/internal/config"
+	"github.com/wimcraft/lazyrecall/internal/schema"
+	"github.com/wimcraft/lazyrecall/internal/session"
+	"github.com/wimcraft/lazyrecall/internal/sqlitex"
 )
 
 // All fixtures below are synthetic, hand-written data - no real session

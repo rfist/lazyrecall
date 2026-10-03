@@ -10,8 +10,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/rfist/lazyrecall/internal/config"
-	"github.com/rfist/lazyrecall/internal/sqlitex"
+	"github.com/wimcraft/lazyrecall/internal/config"
+	"github.com/wimcraft/lazyrecall/internal/sqlitex"
 )
 
 // groupBranch is one longest-prefix-first WHEN of the effective-group CASE

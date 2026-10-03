@@ -3,7 +3,7 @@ package annotate
 import (
 	"testing"
 
-	"github.com/rfist/lazyrecall/internal/sqlitex"
+	"github.com/wimcraft/lazyrecall/internal/sqlitex"
 )
 
 // storedCustomName reads the raw custom_name value for a lineage, so a

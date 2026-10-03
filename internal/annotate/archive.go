@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/rfist/lazyrecall/internal/sqlitex"
+	"github.com/wimcraft/lazyrecall/internal/sqlitex"
 )
 
 // Archive marks a lineage archived at the current time (change

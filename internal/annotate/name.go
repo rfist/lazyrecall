@@ -3,7 +3,7 @@ package annotate
 import (
 	"strings"
 
-	"github.com/rfist/lazyrecall/internal/sqlitex"
+	"github.com/wimcraft/lazyrecall/internal/sqlitex"
 )
 
 // SetName assigns lazyrecall's own name to a lineage - the name the user

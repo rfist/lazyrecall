@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/rfist/lazyrecall/internal/config"
+	"github.com/wimcraft/lazyrecall/internal/config"
 )
 
 func TestValidateGroupAcceptsReservedAndConfiguredNames(t *testing.T) {

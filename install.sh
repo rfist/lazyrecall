@@ -1,7 +1,7 @@
 #!/bin/sh
 set -e
 
-REPO="rfist/lazyrecall"
+REPO="wimcraft/lazyrecall"
 
 # --- platform detection -------------------------------------------------
 case "$(uname -s)" in
